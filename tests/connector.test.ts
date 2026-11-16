@@ -47,6 +47,7 @@ test("returns text only from completed assistant output and scopes session to ta
   );
   assert.equal(body.model, "openclaw/github");
   assert.equal(body.input[0].role, "user");
+  assert.equal(body.input[0].type, "message");
 });
 test("executes client tools and continues with matching response and call IDs", async () => {
   const bodies: any[] = [];

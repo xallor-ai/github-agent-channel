@@ -1,4 +1,4 @@
-// Opt-in live check. Runs two model requests and may incur provider charges.
+// Opt-in live check. Runs two conversations (multiple model requests) and may incur provider charges.
 // Run after npm run build; never prints credentials or raw provider responses.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -26,30 +26,36 @@ const text = await runtime.run(
 assert.match(text.text, /CHANNEL_RUNTIME_OK/);
 console.log(JSON.stringify({ check: "real-model-text", passed: true }));
 const expected = "fixture-" + randomUUID();
-let reads = 0;
+const seen = new Set();
+const fixturePath = "fixture-" + randomUUID() + ".txt";
 const tool = await runtime.run(
   {
     id: randomUUID(),
     prompt:
-      "Call read_issue to obtain the current issue title. Then reply with that exact title. You cannot know it without calling the tool.",
+      "Call read_issue to find the fixture file path in its body. Then call read_file with that path and reply with the exact file content. Both tool calls are necessary.",
   },
   async (name, args) => {
-    assert.equal(name, "read_issue");
-    assert.deepEqual(args, {});
-    reads++;
-    return {
-      untrusted: true,
-      title: expected,
-      body: "Synthetic integration fixture, not live GitHub data.",
-    };
+    seen.add(name);
+    console.log(JSON.stringify({ check: "tool-callback", name }));
+    if (name === "read_issue") {
+      assert.deepEqual(args, {});
+      return {
+        untrusted: true,
+        title: "Synthetic integration fixture",
+        body: `The fixture file path is ${fixturePath}.`,
+      };
+    }
+    assert.equal(name, "read_file");
+    assert.deepEqual(args, { path: fixturePath });
+    return { untrusted: true, path: fixturePath, content: expected };
   },
 );
-assert.ok(reads > 0);
+assert.deepEqual([...seen].sort(), ["read_file", "read_issue"]);
 assert.ok(tool.text.includes(expected));
 console.log(
   JSON.stringify({
     check: "real-model-tool-continuation",
     passed: true,
-    toolCalls: reads,
+    tools: [...seen],
   }),
 );

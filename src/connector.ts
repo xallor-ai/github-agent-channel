@@ -43,7 +43,9 @@ export class OpenClawConnector implements RuntimeConnector {
   ): Promise<RuntimeResult> {
     const deadline = AbortSignal.timeout(this.config.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
-    let input: unknown[] = [{ role: "user", content: task.prompt }];
+    let input: unknown[] = [
+      { type: "message", role: "user", content: task.prompt },
+    ];
     let previous: string | undefined;
     for (let round = 0; round < this.config.maxToolRounds; round++) {
       let response: Response;

@@ -13,14 +13,14 @@
 
 ## 远端验证
 
-服务器隔离部署进行中：独立容器、状态目录、Gateway token 和网络。经用户明确授权，仅在服务器内复制现有模型 Provider 配置；不把凭据同步到仓库。
+已隔离部署 OpenClaw `2026.11.3 (847611d)`，Node `24.22.1`。因官方镜像拉取失败，实际采用官方 npm 包在独立容器安装；不能宣称官方镜像部署已验证。Provider 经授权仅在服务器复制，旧实例未修改。
 
-官方 GitHub Release 与 npm `latest` 均核验为 OpenClaw `2026.11.3`。镜像下载遇到连接重置和层重试，另用官方 npm 包尝试在隔离容器安装该版本。最终部署版本、验证结果和安装路径待实际完成后补充，不能将下载或容器存活等同于可用。
+真实模型文本、`read_issue` 和 `read_file` 多轮续调用已通过；无 token 请求返回 401，Gateway 无宿主端口映射。联调发现并修复输入消息缺少 `type: "message"` 以及新版 `agents.entries` 配置兼容问题。详见 [部署与联调记录](deployment-validation.md)。
 
 真实 GitHub App 尚未创建。用户已明确本轮先完成 OpenClaw 联调，并准备 App 配置步骤。因此真实 GitHub Webhook → Runtime → 评论的闭环未验收；不会以 fake 测试替代。
 
 ## 下一步验收
 
-1. 验证隔离 Gateway 配置和实际版本。
-2. 运行 `scripts/smoke-openclaw.mjs` 验证真实模型文本与 client function tool 续调用；工具返回合成数据，不访问 GitHub。
+1. 已验证隔离 Gateway 配置和实际版本。
+2. 已运行 `scripts/smoke-openclaw.mjs`，真实模型文本与两个 client function tools 的多轮续调用通过；工具返回合成数据，不访问 GitHub。
 3. 用户创建并安装 App、提供 HTTPS Webhook 入口后，按 [运行说明](operations.md)接入并验证真实 GitHub 路径。

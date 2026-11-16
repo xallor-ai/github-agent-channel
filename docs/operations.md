@@ -32,7 +32,7 @@
 
 不要将变量的值放进 YAML、命令回执、Issue 或 Git。服务不会自动加载 `.env` 文件；本地运行由启动环境注入，Compose 按部署文件指定的方式注入。变量缺失、未知配置字段或重复 binding 会使启动失败。`CHANNEL_CONFIG` 默认是当前目录下的 `config.local.yaml`。
 
-`runtime.baseUrl` 指向私网 OpenClaw Gateway；Connector 请求其 `/v1/responses`，使用 `openclaw/<agentId>`。Gateway 必须允许该 Responses 接口，且模型配置可用。为此 Channel 单独配置受限 agent：不要赋予额外 GitHub 凭据、任意 Shell 或与此任务无关的高权限工具。Channel 的两个 function tools 并不能撤销 Runtime 自身另有的工具权限。
+`runtime.baseUrl` 指向私网 OpenClaw Gateway；Connector 请求其 `/v1/responses`，使用 `openclaw/<agentId>`。Gateway 必须允许该 Responses 接口，且模型配置可用。为此 Channel 使用独立 Gateway、容器网络和 token，并单独配置受限 agent：不要赋予额外 GitHub 凭据、任意 Shell 或与此任务无关的高权限工具。Channel 的两个 function tools 并不能撤销 Runtime 自身另有的工具权限。
 
 ConfigManager 提供校验和原子文件更新，但当前入口启动时只读取一次快照；没有公开配置更新 API，也没有已验证的全模块热更新。修改配置后按受控停启流程重启。
 
@@ -40,7 +40,7 @@ ConfigManager 提供校验和原子文件更新，但当前入口启动时只读
 
 本地入口见 [README](../README.md)。容器定义见 [compose.yaml](../deploy/compose.yaml)，默认只启动不映射宿主端口的 OpenClaw。Channel 尚需真实 GitHub App 配置，因此通过 profile 显式启用。
 
-Compose 从仓库根目录的 `.env` 向 Channel 注入环境，从 `config.local.yaml` 只读挂载 Channel 配置；OpenClaw 状态目录是 `deploy/state/openclaw`。先依据 [openclaw.example.json](../deploy/openclaw.example.json) 准备该目录中的 `openclaw.json`、私网 Gateway、Responses 接口及受限 agent 配置，并补全实际模型凭据。Channel 的 `env_file` 不会自动向 OpenClaw 传递凭据，两边应分别配置。这些模板的远端可用性尚需验证。准备完成后启动两项服务：
+Compose 从仓库根目录的 `.env` 向 Channel 注入环境，从 `config.local.yaml` 只读挂载 Channel 配置；OpenClaw 状态目录是 `deploy/state/openclaw`。先依据 [openclaw.example.json](../deploy/openclaw.example.json) 准备该目录中的 `openclaw.json`、私网 Gateway、Responses 接口及受限 agent 配置，并补全实际模型凭据。Channel 的 `env_file` 不会自动向 OpenClaw 传递凭据，两边应分别配置。本轮已验证 2026.11.3 的配置结构和 npm 容器部署；官方镜像模板尚未成功拉取验证，具体证据见 [远端验证](deployment-validation.md)。准备完成后启动两项服务：
 
 ```sh
 docker compose -f deploy/compose.yaml --profile channel up -d --build
@@ -92,3 +92,19 @@ docker compose -f deploy/compose.yaml --profile channel up -d --build
 ```
 
 这两种处理都不创建评论、不触发重发。正常发布前最多检查 10 页、每页 100 条评论；扫描到边界仍未找到 marker 时进入未知状态，交由人工核对，不越过边界盲目创建。此机制用于减少重复，不能保证外部评论恰好写入一次。
+
+## 真实 OpenClaw 单独验收
+
+设置 `OPENCLAW_GATEWAY_TOKEN`、`OPENCLAW_BASE_URL`（默认回环 18789）和可选的 `OPENCLAW_AGENT_ID`（默认 github），然后运行：
+
+```sh
+npm run smoke:openclaw
+```
+
+这会实际调用模型，可能产生 Provider 费用。脚本验证指定文本响应，以及 `read_issue`、`read_file` 的 client function calls 和 `previous_response_id` 多轮续调用。工具返回合成 Issue，不访问 GitHub；两个检查通过也不能证明真实 GitHub App 路径可用。
+
+OpenClaw 配置使用 `agents.entries.github`，不再使用旧版 `agents.list/default`。模板禁用内置工具、Skills、浏览器、后台自动任务和 memory 插件；设置 `tools.toolSearch: false` 直接提供这两个工具的定义，只读工具由 Channel 在 Responses 请求中传入。不要为了让一个 client tool 可用而开放 Runtime 的全部工具。
+
+在已运行的 Gateway 上校验配置，应使用该容器内的 `docker exec ... openclaw config validate`，不要启动另一个容器共享同一状态目录；2026.11.3 的状态所有权检查会拒绝不同 PID namespace 的并发访问。
+
+参考：[OpenResponses 接口](https://docs.openclaw.ai/gateway/openresponses-http-api)、[agents.entries 配置](https://docs.openclaw.ai/gateway/config-agents/entries-and-multi-agent)。

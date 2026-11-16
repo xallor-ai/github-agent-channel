@@ -5,31 +5,67 @@
         "baseUrl": "https://provider.example/v1",
         "apiKey": "REPLACE_ON_SERVER_ONLY",
         "api": "openai-completions",
-        "models": [{"id": "your-model", "name": "Your model"}]
+        "models": [
+          {
+            "id": "your-model",
+            "name": "Your model"
+          }
+        ]
       }
     }
   },
   "agents": {
     "defaults": {
-      "model": {"primary": "your-provider/your-model"},
+      "model": {
+        "primary": "your-provider/your-model"
+      },
       "workspace": "/home/node/.openclaw/workspace"
     },
-    "list": [{"id": "github", "default": true}]
+    "entries": {
+      "github": {
+        "name": "GitHub Channel",
+        "skills": []
+      }
+    }
   },
   "gateway": {
     "mode": "local",
-    "auth": {"mode": "token", "token": "REPLACE_WITH_RANDOM_GATEWAY_TOKEN"},
-    "controlUi": {"enabled": false},
+    "auth": {
+      "mode": "token",
+      "token": "REPLACE_WITH_RANDOM_GATEWAY_TOKEN"
+    },
+    "controlUi": {
+      "enabled": false
+    },
     "http": {
       "endpoints": {
         "responses": {
           "enabled": true,
-          "files": {"allowUrl": false},
-          "images": {"allowUrl": false}
+          "files": {
+            "allowUrl": false
+          },
+          "images": {
+            "allowUrl": false
+          }
         }
       }
     }
   },
-  "tools": {"deny": ["*"]},
-  "browser": {"enabled": false}
+  "tools": {
+    "deny": [
+      "*"
+    ],
+    "toolSearch": false
+  },
+  "browser": {
+    "enabled": false
+  },
+  "cron": {
+    "enabled": false
+  },
+  "plugins": {
+    "slots": {
+      "memory": "none"
+    }
+  }
 }

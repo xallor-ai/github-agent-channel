@@ -40,6 +40,6 @@ GitHub App Webhook 指向 `https://<your-domain>/webhooks/github`。公网反向
 
 ## 验证与边界
 
-当前证据来自本地测试：真实 Octokit/Webhooks SDK、签名 fixture、SQLite 和 fake GitHub / fake Runtime HTTP。它能检查协议、权限、去重、串行、崩溃恢复与回帖歧义，不能替代真实 GitHub App 安装、真实模型执行和服务器部署验收。测试结果与待完成项见[进度记录](docs/progress.md)。
+本地 41 项测试及 Linux CI 已通过，覆盖真实 SDK、SQLite、签名 HTTP、权限、去重、恢复与回帖歧义；GitHub API 使用 fake transport。另已在隔离 OpenClaw 2026.11.3 上通过真实模型文本与 client tool 续调用验证，详情见[部署与联调记录](docs/deployment-validation.md)。尚未创建 GitHub App，因此真实 GitHub 到回帖的完整闭环仍未验收。测试结果与待完成项见[进度记录](docs/progress.md)。
 
 [长期架构](docs/architecture.md)描述未来的 Connector、Policy、Git Executor 和管理面；当前交付范围以本 README、[实施计划](docs/implementation-plan.md)及实际代码为准。[社区源码复用说明](docs/community-reuse.md)记录基础库选择与未直接采用的产品机制。

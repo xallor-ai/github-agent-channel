@@ -61,11 +61,11 @@
 
 ## Task 4 — 容器与真实 OpenClaw 原型（M0/M3 联调）
 
-- [ ] 在用户指定的服务器隔离部署最新官方 OpenClaw；记录实际版本和镜像digest，不覆盖已有服务。
-- [ ] 开启私网/回环 Responses API，专用agent默认不携带GitHub凭据，限制无关本地工具。
-- [ ] 提供Compose、配置示例、运行/恢复说明；检查健康端点不等于模型任务成功。
-- [ ] 以真实模型请求验证文本与client-side function tools；如果没有模型授权，明确记录未完成项，不用fake结果替代。
-- [ ] GitHub App E2E需要新仓库的App安装、Webhook入口和密钥；用户未提供时，保留明确部署步骤和本地签名fixture验证。
+- [x] 在指定服务器隔离部署官方 npm 包 OpenClaw 2026.11.3，记录版本与包 integrity；镜像拉取失败，所以不报告不存在的已部署镜像 digest。
+- [x] 开启私网/回环 Responses API，专用agent默认不携带GitHub凭据，限制无关本地工具。
+- [x] 提供Compose、配置示例、运行/恢复说明；检查健康端点不等于模型任务成功。
+- [x] 真实文本、read_issue/read_file 多轮工具请求通过；保留 400、旧配置和 Tool Search 超时的排查记录。
+- [ ] 真实 GitHub App E2E：等待用户创建并安装 App 与配置 HTTPS Webhook；配置步骤和本地签名 fixture 验证已提供。
 
 ## 后续里程碑（首轮不开放未验证能力）
 
