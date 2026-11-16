@@ -1,0 +1,35 @@
+{
+  "models": {
+    "providers": {
+      "your-provider": {
+        "baseUrl": "https://provider.example/v1",
+        "apiKey": "REPLACE_ON_SERVER_ONLY",
+        "api": "openai-completions",
+        "models": [{"id": "your-model", "name": "Your model"}]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {"primary": "your-provider/your-model"},
+      "workspace": "/home/node/.openclaw/workspace"
+    },
+    "list": [{"id": "github", "default": true}]
+  },
+  "gateway": {
+    "mode": "local",
+    "auth": {"mode": "token", "token": "REPLACE_WITH_RANDOM_GATEWAY_TOKEN"},
+    "controlUi": {"enabled": false},
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true,
+          "files": {"allowUrl": false},
+          "images": {"allowUrl": false}
+        }
+      }
+    }
+  },
+  "tools": {"deny": ["*"]},
+  "browser": {"enabled": false}
+}

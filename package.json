@@ -7,7 +7,10 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "start": "node dist/main.js",
-    "dev": "tsx src/main.ts"
+    "dev": "tsx src/main.ts",
+    "smoke:openclaw": "npm run build && node scripts/smoke-openclaw.mjs",
+    "format:check": "prettier --check src tests scripts",
+    "format": "prettier --write src tests scripts"
   },
   "repository": {
     "type": "git",
@@ -22,12 +25,14 @@
   "homepage": "https://github.com/xallor-ai/github-agent-channel#readme",
   "dependencies": {
     "@octokit/app": "^16.1.4",
+    "@octokit/core": "^7.0.8",
     "@octokit/webhooks": "^14.2.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "prettier": "3.6.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },

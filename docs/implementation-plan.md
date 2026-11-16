@@ -39,25 +39,25 @@
 
 ## Task 1 — 配置与持久任务（M1）
 
-- [ ] 先写 `tests/config.test.ts`：拒绝明文密钥字段/重复binding、丢失环境变量、非法URL；无效 update 保留快照，revision冲突拒绝。
-- [ ] 先写 `tests/store.test.ts`：同delivery、同comment重投只有一个任务；不同binding可领取，同binding running/unknown阻塞；重启running变unknown，queued保留；已完成回复不会再次投递。
-- [ ] 运行 `npm test -- tests/config.test.ts tests/store.test.ts` 确认缺失实现导致失败。
-- [ ] 实现 ConfigManager、TaskStore，数据库 WAL、参数化 SQL、事务领取；运行测试和 `npm run typecheck`。
+- [x] 先写 `tests/config.test.ts`：拒绝明文密钥字段/重复binding、丢失环境变量、非法URL；无效 update 保留快照，revision冲突拒绝。
+- [x] 先写 `tests/store.test.ts`：同delivery、同comment重投只有一个任务；不同binding可领取，同binding running/unknown阻塞；重启running变unknown，queued保留；已完成回复不会再次投递。
+- [x] 运行 `npx tsx --test tests/config.test.ts tests/store.test.ts` 确认缺失实现导致失败。
+- [x] 实现 ConfigManager、TaskStore，数据库 WAL、参数化 SQL、事务领取；运行测试和 `npm run typecheck`。
 
 ## Task 2 — GitHub 接入和授权（M2）
 
-- [ ] 测试 raw-body 签名有效/失效、created/edited、Bot、自身标记、提及单词边界、仓库/installation不匹配。
-- [ ] GitHub fake transport 测试：API返回 repo ID与绑定不一致或actor权限不足时拒绝；模型不能指定另一个repo/issue；限量读文件。
-- [ ] 实现 Octokit App client 与真实 raw webhook verification，网络故障失败关闭；不自造JWT或签名算法。
-- [ ] 验证事件成功落盘才返回202，重复返回已受理task，不等待Runtime响应。
+- [x] 测试 raw-body 签名有效/失效、created/edited、Bot、自身标记、提及单词边界、仓库/installation不匹配。
+- [x] GitHub fake transport 测试：API返回 repo ID与绑定不一致或actor权限不足时拒绝；模型不能指定另一个repo/issue；限量读文件。
+- [x] 实现 Octokit App client 与真实 raw webhook verification，网络故障失败关闭；不自造JWT或签名算法。
+- [x] 验证事件成功落盘才返回202，重复返回已受理task，不等待Runtime响应。
 
 ## Task 3 — Connector 与只读闭环（M3）
 
-- [ ] 用本地 HTTP fake OpenClaw 返回正常文本、function call、失败、invalid JSON和超时；测试最多工具轮次、响应大小与失败分类。
-- [ ] Responses每个task使用独立session key；同任务工具续调用 `previous_response_id`，避免不同调用者共用会话历史。长期repo主会话复用后续显式开启。
-- [ ] 实现 `RuntimeConnector.run(task, invokeTool)`，只提供读取当前任务与同仓文件的function tools，所有scope由worker绑定。
-- [ ] 测试 actor 在运行中失权时阻止工具和最终回帖；成功结果先持久化再投递；网络未知不自动replay。
-- [ ] 完成本地 HTTP 签名事件 → SQLite → fake Runtime → fake GitHub 回帖端到端测试。
+- [x] 用fake fetch transport 模拟 OpenClaw 返回正常文本、function call、失败、invalid JSON和超时；测试最多工具轮次、响应大小与失败分类。
+- [x] Responses每个task使用独立session key；同任务工具续调用 `previous_response_id`，避免不同调用者共用会话历史。长期repo主会话复用后续显式开启。
+- [x] 实现 `RuntimeConnector.run(task, invokeTool)`，只提供读取当前任务与同仓文件的function tools，所有scope由worker绑定。
+- [x] 测试 actor 在运行中失权时阻止工具和最终回帖；成功结果先持久化再投递；网络未知不自动replay。
+- [x] 完成本地 HTTP 签名事件 → SQLite → fake Runtime → fake GitHub 回帖端到端测试。
 
 ## Task 4 — 容器与真实 OpenClaw 原型（M0/M3 联调）
 

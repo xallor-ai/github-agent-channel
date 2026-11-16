@@ -1,0 +1,23 @@
+server:
+  host: 0.0.0.0
+  port: 3000
+  adminTokenEnv: CHANNEL_ADMIN_TOKEN
+dataFile: /data/channel.db
+github:
+  appId: '12345' # Replace with your GitHub App ID
+  privateKeyEnv: GITHUB_APP_PRIVATE_KEY
+  webhookSecretEnv: GITHUB_WEBHOOK_SECRET
+  botLogin: your-app[bot]
+runtime:
+  baseUrl: http://openclaw:18789
+  tokenEnv: OPENCLAW_GATEWAY_TOKEN
+  agentId: github
+  timeoutMs: 180000
+  maxToolRounds: 8
+bindings: [] # Add only repositories explicitly installed and authorized below.
+# - id: demo
+#   installationId: 123
+#   repositoryId: 456
+#   owner: your-org
+#   repo: your-repo
+#   enabled: true

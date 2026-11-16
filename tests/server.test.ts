@@ -1,0 +1,333 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { once } from "node:events";
+import { createChannelServer } from "../src/server.js";
+import { TaskStore } from "../src/store.js";
+import { Worker } from "../src/worker.js";
+import type { ChannelConfig } from "../src/contracts.js";
+const cfg: ChannelConfig = {
+  server: { host: "127.0.0.1", port: 8080, adminTokenEnv: "ADMIN" },
+  dataFile: ":memory:",
+  github: {
+    appId: "1",
+    privateKeyEnv: "KEY",
+    webhookSecretEnv: "SECRET",
+    botLogin: "channel[bot]",
+  },
+  runtime: {
+    baseUrl: "http://localhost:18789",
+    agentId: "main",
+    tokenEnv: "TOKEN",
+    timeoutMs: 100,
+    maxToolRounds: 3,
+  },
+  bindings: [
+    {
+      id: "binding",
+      installationId: 1,
+      repositoryId: 2,
+      owner: "org",
+      repo: "repo",
+      enabled: true,
+    },
+  ],
+};
+test("PR comment reconciliation accepts pull path and rejects unrelated paths", async () => {
+  const s = new TaskStore(":memory:");
+  const server = createChannelServer(cfg, s, "secret", "admin");
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const task = s.accept({
+    deliveryId: "pr",
+    commentId: 1,
+    bindingId: "binding",
+    installationId: 1,
+    repositoryId: 2,
+    owner: "org",
+    repo: "repo",
+    actorId: 3,
+    actorLogin: "alice",
+    issueNumber: 5,
+    prompt: "review",
+  }).task;
+  const endpoint = `http://127.0.0.1:${(server.address() as any).port}/tasks/${task.id}/resolve-delivery`;
+  try {
+    s.claim();
+    s.finish(task.id, "succeeded", "answer");
+    s.pendingDelivery();
+    s.markDelivery(task.id, "unknown");
+    for (const path of [
+      "/org/repo/pulls/5",
+      "/org/repo/discussions/5",
+      "/org/repo/pull/6",
+      "/org/other/pull/5",
+      "/org/repo/pull/5/files",
+    ]) {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: "Bearer admin" },
+        body: JSON.stringify({
+          confirmedReconciled: true,
+          resolution: "sent",
+          url: `https://github.com${path}#issuecomment-123`,
+        }),
+      });
+      assert.equal(response.status, 400);
+      assert.equal(s.get(task.id)?.deliveryStatus, "unknown");
+    }
+    const url = "https://github.com/org/repo/pull/5#issuecomment-123";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer admin" },
+      body: JSON.stringify({
+        confirmedReconciled: true,
+        resolution: "sent",
+        url,
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(s.get(task.id)?.commentUrl, url);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    s.close();
+  }
+});
+test("execution resolution rejects malformed and extra JSON fields without changing unknown state", async () => {
+  const s = new TaskStore(":memory:");
+  const server = createChannelServer(cfg, s, "secret", "admin");
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const task = s.accept({
+    deliveryId: "unknown",
+    commentId: 1,
+    bindingId: "binding",
+    installationId: 1,
+    repositoryId: 2,
+    owner: "org",
+    repo: "repo",
+    actorId: 3,
+    actorLogin: "alice",
+    issueNumber: 5,
+    prompt: "review",
+  }).task;
+  const endpoint = `http://127.0.0.1:${(server.address() as any).port}/tasks/${task.id}/resolve`;
+  try {
+    s.claim();
+    s.finish(task.id, "unknown");
+    for (const raw of [
+      "{",
+      "null",
+      "[]",
+      "{}",
+      JSON.stringify({
+        confirmedStopped: true,
+        resolution: "failed",
+        extra: true,
+      }),
+      JSON.stringify({ confirmedStopped: "true", resolution: "failed" }),
+      JSON.stringify({ confirmedStopped: true, resolution: "succeeded" }),
+    ]) {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: "Bearer admin" },
+        body: raw,
+      });
+      assert.equal(response.status, 400);
+      assert.equal(s.get(task.id)?.status, "unknown");
+    }
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer admin" },
+      body: JSON.stringify({ confirmedStopped: true, resolution: "failed" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(s.get(task.id)?.status, "failed");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    s.close();
+  }
+});
+test("delivery reconciliation requires admin, explicit confirmation and a target-scoped comment URL", async () => {
+  const s = new TaskStore(":memory:");
+  const server = createChannelServer(cfg, s, "secret", "admin");
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  const task = s.accept({
+    deliveryId: "one",
+    commentId: 1,
+    bindingId: "binding",
+    installationId: 1,
+    repositoryId: 2,
+    owner: "org",
+    repo: "repo",
+    actorId: 3,
+    actorLogin: "alice",
+    issueNumber: 5,
+    prompt: "review",
+  }).task;
+  const endpoint = base + "/tasks/" + task.id + "/resolve-delivery";
+  const post = (data: unknown, auth = true) =>
+    fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(auth ? { Authorization: "Bearer admin" } : {}),
+      },
+      body: JSON.stringify(data),
+    });
+  try {
+    s.claim();
+    s.finish(task.id, "succeeded", "answer");
+    s.pendingDelivery();
+    s.markDelivery(task.id, "unknown");
+    const valid = {
+      confirmedReconciled: true,
+      resolution: "sent",
+      url: "https://github.com/org/repo/issues/5#issuecomment-123",
+    };
+    assert.equal((await post(valid, false)).status, 401);
+    for (const invalid of [
+      null,
+      {},
+      { ...valid, confirmedReconciled: false },
+      { ...valid, resolution: "pending" },
+      { ...valid, resolution: ["sent"] },
+      { ...valid, url: undefined },
+      { ...valid, extra: "ignored" },
+      ...[
+        "http://github.com/org/repo/issues/5#issuecomment-123",
+        "https://evil.test/org/repo/issues/5#issuecomment-123",
+        "https://github.com/other/repo/issues/5#issuecomment-123",
+        "https://github.com/org/repo/issues/6#issuecomment-123",
+        "https://user:pass@github.com/org/repo/issues/5#issuecomment-123",
+        "https://github.com/org/repo/issues/5?x=1#issuecomment-123",
+        "https://github.com/org/repo/issues/5#issuecomment-no",
+      ].map((url) => ({ ...valid, url })),
+    ]) {
+      assert.equal((await post(invalid)).status, 400);
+      assert.equal(s.get(task.id)?.deliveryStatus, "unknown");
+    }
+    assert.equal(
+      (
+        await fetch(endpoint, {
+          method: "POST",
+          headers: { Authorization: "Bearer admin" },
+          body: "{",
+        })
+      ).status,
+      400,
+    );
+    assert.equal((await post(valid)).status, 200);
+    assert.equal(s.get(task.id)?.commentUrl, valid.url);
+    assert.equal(s.pendingDelivery(), undefined);
+    assert.equal((await post(valid)).status, 409);
+    const second = s.accept({ ...task, deliveryId: "two", commentId: 2 }).task;
+    s.claim();
+    s.finish(second.id, "succeeded", "answer");
+    s.pendingDelivery();
+    s.markDelivery(second.id, "unknown");
+    const failed = await fetch(
+      base + "/tasks/" + second.id + "/resolve-delivery",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer admin",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          confirmedReconciled: true,
+          resolution: "failed",
+        }),
+      },
+    );
+    assert.equal(failed.status, 200);
+    assert.equal(s.get(second.id)?.deliveryStatus, "failed");
+    assert.equal(s.pendingDelivery(), undefined);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    s.close();
+  }
+});
+test("signed HTTP delivery is persisted and independently completed; task query requires auth", async () => {
+  const s = new TaskStore(":memory:");
+  const server = createChannelServer(cfg, s, "secret", "admin");
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as any).port}`;
+  try {
+    const data = JSON.stringify({
+      action: "created",
+      installation: { id: 1 },
+      repository: { id: 2, name: "repo", owner: { login: "org" } },
+      sender: { id: 3, login: "alice", type: "User" },
+      comment: {
+        id: 4,
+        body: "@channel[bot] review this",
+        user: { id: 3, login: "alice", type: "User" },
+      },
+      issue: { number: 5 },
+    });
+    const headers = {
+      "content-type": "application/json",
+      "x-github-event": "issue_comment",
+      "x-github-delivery": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "x-hub-signature-256":
+        "sha256=" + createHmac("sha256", "secret").update(data).digest("hex"),
+    };
+    const response = await fetch(base + "/webhooks/github", {
+      method: "POST",
+      headers,
+      body: data,
+    });
+    assert.equal(response.status, 202);
+    const receipt: any = await response.json();
+    assert.equal(s.get(receipt.taskId)?.status, "queued");
+    const replay = await fetch(base + "/webhooks/github", {
+      method: "POST",
+      headers,
+      body: data,
+    });
+    assert.equal(((await replay.json()) as any).taskId, receipt.taskId);
+    assert.equal((await fetch(base + "/tasks/" + receipt.taskId)).status, 401);
+    let published = "";
+    const worker = new Worker(
+      s,
+      {
+        authorize: async () => {},
+        readIssue: async () => ({}),
+        readFile: async () => ({}),
+        publish: async (_, text) => {
+          published = text;
+          return { id: 6, url: "https://github.com/comment/6" };
+        },
+      },
+      { run: async () => ({ text: "review done" }) },
+    );
+    await worker.tick();
+    await worker.tick();
+    assert.equal(published, "review done");
+    const status: any = await (
+      await fetch(base + "/tasks/" + receipt.taskId, {
+        headers: { Authorization: "Bearer admin" },
+      })
+    ).json();
+    assert.equal(status.status, "succeeded");
+    assert.equal(status.deliveryStatus, "sent");
+    assert.equal(status.prompt, undefined);
+    assert.equal(
+      (
+        await fetch(base + "/webhooks/github", {
+          method: "POST",
+          headers: { ...headers, "x-hub-signature-256": "invalid" },
+          body: data,
+        })
+      ).status,
+      400,
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    s.close();
+  }
+});

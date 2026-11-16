@@ -9,3 +9,5 @@ config.local.*
 data/
 coverage/
 *.tgz
+deploy/state/
+deploy/*.local.*

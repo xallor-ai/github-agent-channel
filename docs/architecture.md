@@ -7,14 +7,14 @@ tags:
   - openclaw
   - architecture
 created: 2026-11-15
-status: ready
+status: target-architecture
 ---
 
 # GitHub Agent Channel 架构与阶段计划
 
 > 本文收录于 [AI-Engineering-Notes](https://github.com/xallor-ai/AI-Engineering-Notes)，分享 AI 技术研究、工程实践与应用探索。欢迎 Star 关注后续更新，也欢迎通过 Issue 交流和纠错。
 
-配套实操：[[GitHub App 注册指南]]。旧称「OpenClaw GitHub Plugin」已收束为本定位；本文不写运行时代码。
+本文件保留原方案的长期架构和里程碑。当前实现范围见 [实施计划](implementation-plan.md)，GitHub App 配置见 [运行与恢复](operations.md)；图中的管理面、写仓执行器与异步恢复能力尚未全部实现。
 
 ## 产品定位
 
@@ -171,7 +171,7 @@ V1 只实现 **OpenClaw Connector**。Codex / Cursor / ACP 等先做**能力矩�
 ## GitHub Capability 与 Skills
 
 - **Channel 拥有** GitHub 侧任务型能力与 Policy（精选 Tools，非一 API 一 Tool）。  
-- Agent 如何调用这些能力由 Connector 适配；V1 经 OpenClaw 注册 Tools。  
+- Agent 如何调用这些能力由 Connector 适配；首轮通过 Responses 的 client function tools 回到 Channel 执行受限读取；后续工具注册方式由 Connector 适配。
 - OpenClaw 侧可附带 Skills / `AGENTS.md` 模板（pr-review、pr-development、issue-triage、actions）；**不属于**所有 Runtime 共通核心。
 
 ## 社区实现调研：复用基础设施，不照搬产品边界
