@@ -1,106 +1,52 @@
 # GitHub Agent Channel
 
-让内网 Agent 参与 GitHub 协作，无需为内网开放端口。ECS 接收 GitHub Webhook，连接器主动通过 HTTPS 领取任务，调用本机 OpenClaw，再回传结果。GitHub 私钥和写入权限始终留在 ECS。
+让内网Agent参与GitHub协作，无需为内网开放端口。ECS接收并保存GitHub Webhook，内网连接器主动HTTPS领取任务，调用本机OpenClaw，再把结果交给ECS受控回帖。GitHub私钥始终留在ECS。
 
 ```text
-GitHub ──Webhook──▶ ECS Channel ──受控回帖──▶ GitHub
-                         ▲
-                         │ 内网主动 HTTPS：领取 / 工具请求 / 结果
-                         │
-                  Agent 连接器 ──本地请求──▶ OpenClaw
+GitHub ──签名Webhook──▶ Channel服务 ──受控回帖──▶ GitHub
+                             ▲
+                             │ 内网主动HTTPS：领取 / 工具请求 / 结果
+                             │
+                      本仓库连接器 ──本地请求──▶ OpenClaw
 ```
 
-OpenClaw 是第一个 Runtime 适配器，连接器是本仓库的独立进程；不是把 URL 填进 OpenClaw 就会自动出现的原生能力。当前支持读取 Issue/同仓文件与分析回帖，不支持改代码、创建 PR 或 merge。
+OpenClaw是第一个Runtime适配器。本仓库提供独立连接器进程，并非OpenClaw内置GitHub插件。当前支持读取Issue/同仓文件与分析回帖，不支持修改代码、创建PR或merge。
 
-## 1. ECS：配置 Channel
+## 配置文档
 
-需要 Node.js 24。容器部署需 Docker Compose 插件 2.20+。在源码目录执行：
+| 文档                                     | 什么时候读                                                 |
+| ---------------------------------------- | ---------------------------------------------------------- |
+| **[完整接入主线](docs/setup.md)**        | 从准备OpenClaw、配置连接器到真实GitHub回帖，按顺序完成闭环 |
+| [ECS自建部署（可选）](docs/ecs-setup.md) | 没有现成Channel服务，或需要自己维护公网入口时              |
+| [运行与恢复](docs/operations.md)         | 日志排错、secret权限、更新回滚、备份与unknown对账          |
+| [架构与边界](docs/architecture.md)       | 理解云端/内网职责、身份和幂等保证                          |
+
+GitHub App的注册、权限、安装与事件订阅引用配套书稿[附录 B](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20B%20GitHub%20CLI%E3%80%81API%20%E5%92%8C%20GitHub%20App.md)，Webhook验签与事件接收引用[附录 C](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20C%20Webhook%20%E4%B8%8E%E4%BA%8B%E4%BB%B6%E6%8E%A5%E6%94%B6.md)。配置主线保留本服务所需的交接参数，不重复维护注册教程。
+
+## 从哪里开始
+
+需要Node.js 24；容器方式需要Compose插件2.20+。OpenClaw已验证版本为2026.11.3。当前主动连接实现位于 `codex/outbound-connector` 分支，尚未自动合并到默认分支：
 
 ```sh
+git clone --branch codex/outbound-connector --single-branch https://github.com/xallor-ai/github-agent-channel.git
+cd github-agent-channel
 npm ci --ignore-scripts
-npm run channel -- init ./channel-data
 ```
 
-编辑 `channel-data/config.local.yaml`：填写 App ID、bot login、仓库 binding；放置 App PEM、Webhook Secret、管理 token、**连接器 token** 的文件。配置只保存文件路径或环境变量名。ECS 不配置 OpenClaw 地址或模型 token。
-
-```yaml
-connector:
-  workerId: local-openclaw
-  tokenFile: secrets/connector-token
-  timeoutMs: 300000
-deployment:
-  mode: external
-  publicUrl: https://channel.example.com
-```
-
-- 已有 Nginx/HTTPS 网关：用 `external`。若网关也是 Docker 容器，设置 `deployment.network` 为共同网络。
-- 没有入口、80/443 空闲：用 `caddy`，提供域名并完成 DNS/端口配置，自动处理证书。
-
-```sh
-npm run channel -- config check ./channel-data/config.local.yaml
-npm run channel -- doctor ./channel-data/config.local.yaml
-npm run channel -- deploy render ./channel-data/config.local.yaml ./channel-data/.channel
-npm run channel -- deploy up ./channel-data/.channel
-```
-
-external 模式将生成 `nginx-webhook.conf`，审核后加入已有 HTTPS server。它包含 `/webhooks/github` 和受认证的 `/connector/v1/`，不会转发管理接口 `/tasks/*`。Caddy 模式自动配置这两类入口。
-
-GitHub App 开启 **Issue comment**，Webhook URL：`https://channel.example.com/webhooks/github`。权限为 Metadata/Contents Read、Issues/Pull requests Read and write。填写准确的 installation/repository ID。对无仓库写权限的调用者默认拒绝。
-
-## 2. 内网：配置主动连接器
-
-在内网另一份源码安装依赖，然后：
+**已有Channel服务**：取得服务origin和connector token，从[主线](docs/setup.md)准备OpenClaw，然后：
 
 ```sh
 npm run channel -- agent init ./agent-data
-```
-
-编辑 `agent-data/agent.local.yaml`：
-
-```yaml
-channel:
-  baseUrl: https://channel.example.com
-  tokenFile: secrets/connector-token
-runtime:
-  baseUrl: http://127.0.0.1:18789
-  tokenFile: secrets/openclaw-gateway-token
-  agentId: github
-  timeoutMs: 180000
-  maxToolRounds: 8
-stateFile: ./data/agent.db
-pollIntervalMs: 2000
-requestTimeoutMs: 15000
-```
-
-两端的连接器 token 必须相同，且与 ECS 管理 token 不同。OpenClaw token 只在内网保存；此配置不接受 GitHub 私钥。OpenClaw 需启用 Responses API。
-
-原生 Node 运行：
-
-```sh
+# 按主线编辑YAML、放置secret并完成模型探针后：
 npm run channel -- agent check ./agent-data/agent.local.yaml
 npm run channel -- agent run ./agent-data/agent.local.yaml
 ```
 
-容器运行：将 agent 配置的 `deployment.network` 设为现有 OpenClaw 网络，并把 `runtime.baseUrl` 改成该网络可达的 OpenClaw 容器地址，然后执行：
+**需要自建**：先按[可选ECS文档](docs/ecs-setup.md)启动Channel与HTTPS入口，再回到主线。内网不持有GitHub PEM，ECS不需要访问内网OpenClaw。
 
-```sh
-npm run channel -- agent deploy render ./agent-data/agent.local.yaml ./agent-data/.channel-agent
-npm run channel -- agent deploy up ./agent-data/.channel-agent
-```
+配置示例：[云端 YAML](deploy/channel.example.yaml)、[内网 YAML](deploy/agent.example.yaml)、[OpenClaw完整实例模板](deploy/openclaw.example.json)、[已有专用实例的合并片段](deploy/openclaw.channel.patch.json)。占位符必须替换，不能把示例当作已安装环境。
 
-Agent 容器不发布任何端口。云端不需要知道内网 IP；不需要 SSH 反向隧道、NAT 映射或将 OpenClaw 暴露公网。
-
-## 3. 验证与运维
-
-先运行内网连接器，再由有仓库写权限的账号在绑定仓库的新评论中写 `@your-app 请分析这个 Issue`（同时兼容带 `[bot]` 的完整 botLogin）。检查 GitHub delivery 是否返回202，再查看原 Issue 的机器人回帖。
-
-```sh
-npm run channel -- deploy status ./channel-data/.channel
-npm run channel -- agent deploy status ./agent-data/.channel-agent
-npm run channel -- deploy down ./channel-data/.channel
-```
-
-`doctor` 为离线配置/Compose检查，不代表真实 GitHub 或模型成功。`up` 后台启动；`down` 保留数据卷。两端均为单进程，每个云实例配置一个可信连接器身份。遇到网络结果不明、租约过期或进程重启，任务进入 `unknown`，不会自动重跑模型。详见 [运行与恢复](docs/operations.md)。
+## 开发与验证
 
 ```sh
 npm test
@@ -110,6 +56,6 @@ npm run format:check
 npm run smoke:deployment
 ```
 
-单元/HTTP测试及隔离 Docker 冒烟使用合成 GitHub/模型输出；不得据此声称生产已接入。架构与当前实施进度见 [主动连接计划](docs/outbound-connector-plan.md)。
+模型探针 `npm run smoke:openclaw` 会实际调用Provider，应先按主线配置本地Gateway token；它使用合成工具数据，不访问真实GitHub。容器冒烟和单元测试同样不能替代公网验收。
 
-已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖与重投去重验收，见 [验证记录](docs/outbound-validation-20261122.md)。这不代表订阅的其他事件已实现处理。
+已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖和重投去重验收，见[记录](docs/outbound-validation-20261122.md)。只有符合规则的 `issue_comment.created` 会启动任务，其他订阅事件不会自动激活能力。当前单云实例对应单可信连接器身份；不宣称多租户隔离、任意写仓或外部执行恰好一次。

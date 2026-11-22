@@ -1,5 +1,7 @@
 # 主动连接运维与恢复
 
+首次接入从[完整配置主线](setup.md)开始；自建服务端看[可选ECS部署](ecs-setup.md)。本文用于部署后的诊断、升级、备份和未知任务对账。
+
 ## 两端职责和前置条件
 
 ECS 只运行 Channel 和 HTTPS 入口。内网运行本仓库 Agent 连接器与既有 OpenClaw。所有跨网请求由 Agent 发往 ECS；ECS 不调用内网地址。需要 Node24，容器命令要求 Compose插件2.20+。旧独立 `docker-compose` 不受支持。

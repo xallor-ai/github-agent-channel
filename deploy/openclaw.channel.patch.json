@@ -1,0 +1,23 @@
+{
+  "gateway": {
+    "http": {
+      "endpoints": {
+        "responses": {
+          "enabled": true,
+          "files": { "allowUrl": false },
+          "images": { "allowUrl": false }
+        }
+      }
+    }
+  },
+  "agents": {
+    "entries": {
+      "github": {
+        "name": "GitHub Channel",
+        "skills": [],
+        "tools": { "deny": ["*"] }
+      }
+    }
+  },
+  "tools": { "toolSearch": false }
+}
