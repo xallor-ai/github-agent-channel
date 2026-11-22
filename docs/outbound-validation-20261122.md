@@ -27,8 +27,19 @@ Nginx在不重启时跟随Channel IP变化；UID1000读取File/Env secret；SQLi
 
 公网无签名Webhook400、未认证connector401、认证空任务claim204。内网Agent持续出站轮询。ECS容器真实GitHub仓库授权通过，内网Agent容器真实OpenClaw文字请求完成且命中预期回复。具体服务器地址、配置路径和备份位置保存在不进Git的部署记录。
 
-## 尚未确认
+## 真实 GitHub 与模型闭环：通过
 
-GitHub App的Active/Issue comment配置由App管理员操作。最后一次API读取事件列表仍为空，hook/config返回404；不能把界面截图当作已保存证据。
+App 事件订阅生效后，实际投递发现缺少 X-Hub-Signature-256，服务端正确拒绝400。已将预先生成的Webhook Secret同步到App；随后使用新评论触发，没有用手工构造的payload替代GitHub投递。
 
-真实GitHub事件→ECS入队→实际模型工具调用→GitHub回帖仍待受控测试。当前仅启用一个指定测试仓库binding。不会从模型预检或fixture声称完整生产闭环。
+- 测试 [Issue #1](https://github.com/xallor-ai/github-agent-channel/issues/1)。
+- [触发评论](https://github.com/xallor-ai/github-agent-channel/issues/1#issuecomment-7078248693)。
+- GitHub delivery GUID：154ed398-e665-11f1-815e-372c3422834e，issue_comment/created，含签名，HTTP202。
+- 云端任务 e7d35862-8776-41d9-835c-817c87b7abb7：succeeded，deliveryStatus=sent，error=null。
+- 实际HTTPS工具请求两次均200，结果回传一次200。
+- [机器人回帖](https://github.com/xallor-ai/github-agent-channel/issues/1#issuecomment-7078258127)，含OUTBOUND_E2E_OK与匹配任务marker。
+- 机器人自己的评论delivery返回200并被忽略，没有启动新任务。
+- 对原delivery执行GitHub Redeliver，仍返回202；数据库保持同一任务，机器人评论数量仍为1。
+
+机器人提到“尚未验收”来自其读取的默认分支旧README，不是此次后台状态的结论。本次通过由实际delivery、持久任务和评论读回共同证明。新代码在codex/outbound-connector分支，未自动合并默认分支。
+
+本次实测范围是一个明确绑定的仓库、真实模型及读Issue/文件后回帖；不扩展为多租户、任意写仓或所有事件处理均已验证。

@@ -111,3 +111,5 @@ npm run smoke:deployment
 ```
 
 单元/HTTP测试及隔离 Docker 冒烟使用合成 GitHub/模型输出；不得据此声称生产已接入。架构与当前实施进度见 [主动连接计划](docs/outbound-connector-plan.md)。
+
+已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖与重投去重验收，见 [验证记录](docs/outbound-validation-20261122.md)。这不代表订阅的其他事件已实现处理。

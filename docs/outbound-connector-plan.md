@@ -1,6 +1,6 @@
 # 内网主动连接设计与实施计划
 
-状态：实施中；取代此前要求 ECS 主动访问内网 OpenClaw 的部署假设。
+状态：已实现并完成受控公网闭环；取代此前要求 ECS 主动访问内网 OpenClaw 的部署假设。
 
 ## 目标拓扑
 
@@ -29,10 +29,12 @@ GitHub → ECS Webhook → SQLite 任务。内网连接器主动 HTTPS 拉取任
 - [x] 内网journal与主动pull客户端；本机OpenClaw复用现有Connector；重启/断网/重复确认测试。
 - [x] 云/内网配置schema、CLI init/check/run、Compose配套与公网路由。
 - [x] 真实HTTP双端测试（服务端不连接内网）、部署冒烟、文档、独立评审。
-- [ ] 公网真实部署与GitHub/模型闭环单独验收，不把模拟结果当成成功。
+- [x] 公网真实部署与GitHub/模型闭环单独验收，不把模拟结果当成成功。
 
 配置/HTTPS层已在5254b50保存；该提交自身未完成本主动连接能力，不能作为整个目标完成证明。
 
 ## 已验证的主动连接证据
 
 双端真实HTTP测试：云端配置不含内网地址，实际Agent主动调用claim/tool/result，并通过实际OpenClawConnector完成Responses工具续调用（模型/API为fixture）。容器验证：实际Agent服务无ports、UID1000、TLS验证开启、崩溃journal恢复unknown、容器重建后继续认证轮询。错误ACK、数据库临时写失败、重复结果、过期lease、权限撤销均有回归测试。具体结果与生产联调分开记录。
+
+真实GitHub/模型及重复投递结果见 [主动连接验证记录](outbound-validation-20261122.md)。
