@@ -99,6 +99,43 @@ test("change bytes match the 512 KiB outcome boundary", () => {
   writeFileSync(join(f.dir, "file.txt"), "x".repeat(512 * 1024 + 1));
   assert.throws(() => collectChanges(f.dir, sha), /size limit/);
 });
+
+test("collected UTF-8 bytes preserve BOM and non-ASCII text", () => {
+  const f = fixture();
+  const sha = f.git("rev-parse", "HEAD");
+  const bytes = Buffer.from("efbbbfe4bda0e5a5bd0a", "hex");
+  writeFileSync(join(f.dir, "file.txt"), bytes);
+  const files = collectChanges(f.dir, sha);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].path, "file.txt");
+  assert.deepEqual(Buffer.from(files[0].content!, "utf8"), bytes);
+});
+
+for (const [operation, mutation] of [
+  ["rewrites a candidate", "fs.writeFileSync('file.txt','UNVERIFIED\\n')"],
+  ["adds a publication input", "fs.writeFileSync('new.txt','UNVERIFIED\\n')"],
+  ["deletes a candidate", "fs.unlinkSync('file.txt')"],
+] as const) {
+  test(`successful verification that ${operation} cannot publish`, async () => {
+    const f = fixture();
+    f.config.verification.args = [
+      "-e",
+      `const fs=require('node:fs');require('node:assert/strict').equal(fs.readFileSync('file.txt','utf8'),'after\\n');console.log('checked original candidate');${mutation}`,
+    ];
+    const result = await f.connector.run(task, async () => ({
+      title: "Issue",
+    }));
+    const report = result.artifacts.find((a) => a.kind === "test_report");
+    assert.equal(report?.exitCode, 0);
+    assert.equal(result.publication.kind, "none");
+    assert.match(report?.summary ?? "", /publication inputs changed/i);
+    assert.ok(result.artifacts.some((a) => a.kind === "change_set"));
+    assert.match(
+      readFileSync(join(f.dir, ".git", "received-prompt.json"), "utf8"),
+      /Issue/,
+    );
+  });
+}
 after(() => {
   for (const dir of temporaryDirectories) {
     const actual = realpathSync.native(dir);

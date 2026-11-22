@@ -58,7 +58,10 @@ app.onRequest(methods.agent.session.prompt, async ({ params, client: ctx }) => {
     });
     return { stopReason: "end_turn" };
   }
-  writeFileSync(join(cwd, "file.txt"), "after\n");
+  writeFileSync(
+    join(cwd, "file.txt"),
+    process.argv[2] === "bom" ? "\ufeffafter\n" : "after\n",
+  );
   if (process.argv[2] === "commit") {
     execFileSync("git", ["add", "."], { cwd });
     execFileSync("git", ["commit", "-m", "unexpected"], { cwd });

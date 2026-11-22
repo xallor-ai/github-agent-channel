@@ -32,7 +32,11 @@ const connectorToken = "coding-connector";
 const key = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
   .toString();
-async function fixture(t: test.TestContext, verificationExit = 0) {
+async function fixture(
+  t: test.TestContext,
+  verificationExit = 0,
+  options: { bom?: boolean; mutateAfterVerification?: boolean } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "coding-e2e-"));
   const workspace = join(dir, "workspace");
   mkdirSync(workspace);
@@ -191,7 +195,10 @@ async function fixture(t: test.TestContext, verificationExit = 0) {
   const runtimeConfig: AcpRuntimeConfig = {
     type: "acp",
     command: process.execPath,
-    args: [resolve("tests/fixtures/acp-peer.mjs"), "edit"],
+    args: [
+      resolve("tests/fixtures/acp-peer.mjs"),
+      options.bom ? "bom" : "edit",
+    ],
     timeoutMs: 30000,
     workspaces: { "2": workspace },
     envRefs: {},
@@ -200,7 +207,7 @@ async function fixture(t: test.TestContext, verificationExit = 0) {
       command: process.execPath,
       args: [
         "-e",
-        `const fs=require('node:fs');if(fs.readFileSync('file.txt','utf8')!=='after\\n')process.exit(9);console.log('verified actual file');process.exit(${verificationExit})`,
+        `const fs=require('node:fs');if(fs.readFileSync('file.txt').toString('hex')!=='${options.bom ? "efbbbf61667465720a" : "61667465720a"}')process.exit(9);console.log('verified actual file');${options.mutateAfterVerification ? "fs.writeFileSync('file.txt','UNVERIFIED\\n');" : ""}process.exit(${verificationExit})`,
       ],
       timeoutMs: 10000,
     },
@@ -388,6 +395,56 @@ test("failed observed verification preserves code artifacts but suppresses all G
   assert.equal(
     f.apiCalls.filter(
       (c) => c.method === "POST" && !c.path.endsWith("access_tokens"),
+    ).length,
+    0,
+  );
+});
+
+test("BOM survives signed task, ACP verification, outcome and GitHub blob encoding", async (t) => {
+  const f = await fixture(t, 0, { bom: true });
+  const { taskId } = (await (await f.webhook()).json()) as { taskId: string };
+  await f.agent.once();
+  const task = f.store.get(taskId)!;
+  assert.equal(
+    task.outcome?.artifacts.find((a) => a.kind === "test_report")?.exitCode,
+    0,
+  );
+  const change = task.outcome?.artifacts.find((a) => a.kind === "change_set");
+  assert.equal(
+    Buffer.from(change!.files[0].content!, "utf8").toString("hex"),
+    "efbbbf61667465720a",
+  );
+  await f.publisher.tick();
+  const blob = f.apiCalls.find(
+    (c) => c.method === "POST" && c.path.endsWith("/git/blobs"),
+  )!;
+  assert.equal(
+    Buffer.from(blob.body.content, "base64").toString("hex"),
+    "efbbbf61667465720a",
+  );
+  assert.equal(f.store.get(taskId)?.deliveryStatus, "sent");
+});
+
+test("verification rewriting the candidate persists diagnostics without GitHub writes", async (t) => {
+  const f = await fixture(t, 0, { mutateAfterVerification: true });
+  const { taskId } = (await (await f.webhook()).json()) as { taskId: string };
+  await f.agent.once();
+  const task = f.store.get(taskId)!;
+  assert.equal(task.status, "succeeded");
+  assert.equal(task.deliveryStatus, "skipped");
+  assert.equal(task.outcome?.publication.kind, "none");
+  const report = task.outcome?.artifacts.find((a) => a.kind === "test_report");
+  assert.equal(report?.exitCode, 0);
+  assert.match(report?.summary ?? "", /publication inputs changed/i);
+  assert.equal(
+    task.outcome?.artifacts.find((a) => a.kind === "change_set")?.files[0]
+      .content,
+    "UNVERIFIED\n",
+  );
+  assert.equal(await f.publisher.tick(), false);
+  assert.equal(
+    f.apiCalls.filter(
+      (c) => c.method === "POST" && !c.path.endsWith("/access_tokens"),
     ).length,
     0,
   );

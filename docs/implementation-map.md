@@ -15,33 +15,33 @@
 
 ## 全部生产模块
 
-| 文件                                                  | 实际职责与边界                                                                                         |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------ | ------------------------------------------ |
-| [main.ts](../src/main.ts)                             | 一次性加载服务端配置，装配 HTTP/队列/发布 worker；只显示安全 schema 拒绝诊断                           |
-| [server.ts](../src/server.ts)                         | Webhook、健康、管理员状态与人工对账；严格按 target 校验发布 receipt URL                                |
-| [webhook.ts](../src/webhook.ts)                       | 验签、事件/action/binding/人类身份/触发规则；构造 source 与 target                                     |
-| [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                            |
-| [config.ts](../src/config.ts)                         | 云端 schema；事件与 PR writePolicy；仅 loadConfig，无运行中设置 API                                    |
-| [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                             |
-| [store-schema.ts](../src/store-schema.ts)             | 只建立 schema v2；旧格式拒绝，绝不转换或删除旧数据                                                     |
-| [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish    |
-| [pull.ts](../src/pull.ts)                             | 只处理 /connector/v2/claim、tasks/id/tool                                                              | result | execution；lease/actor 与严格 outcome 校验 |
-| [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                    |
-| [github-publication.ts](../src/github-publication.ts) | 显式 writePolicy；基线/路径/模式检查；服务端分支、Git Data commit 和 draft PR；每次写入重授权          |
-| [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment 或 pull_request；none 已在存储置 skipped                               |
-| [outcomes.ts](../src/outcomes.ts)                     | source/target/runtime/产物/发布 schema；有界 payload，拒绝额外身份字段                                 |
-| [agent-config.ts](../src/agent-config.ts)             | type 必填：openclaw 或 acp；命令、工作区、环境引用由管理员配置                                         |
-| [agent-store.ts](../src/agent-store.ts)               | schema v2 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                 |
-| [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                              |
-| [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，无默认 provider 和未知类型回退                                         |
-| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 适配器；两种受控读取工具，返回明确评论/none outcome                                 |
-| [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                   |
-| [runtime-workspace.ts](../src/runtime-workspace.ts)   | 管理员准备的干净 clone；origin/HEAD/元数据检查，受限 Git 子进程和实际文件变更收集；不 clone/reset/push |
-| [cli.ts](../src/cli.ts)                               | 初始化、校验、渲染、生命周期、agent run；不安装 harness/App 或替用户开启 writePolicy                   |
-| [examples.ts](../src/examples.ts)                     | CLI init 模板源，与 deploy YAML 手动保持一致                                                           |
-| [deploy.ts](../src/deploy.ts)                         | Cloud Compose、Nginx v2路由、可选 Caddy、secret 挂载和不可覆盖 bundle                                  |
-| [agent-deploy.ts](../src/agent-deploy.ts)             | OpenClaw bridge 容器，无端口；ACP render 明确拒绝，使用原生 bridge                                     |
-| [lifecycle.ts](../src/lifecycle.ts)                   | Compose2.20+检查、up/down/status、离线 doctor；不验证真实模型/GitHub                                   |
+| 文件                                                  | 实际职责与边界                                                                                            |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| [main.ts](../src/main.ts)                             | 一次性加载服务端配置，装配 HTTP/队列/发布 worker；只显示安全 schema 拒绝诊断                              |
+| [server.ts](../src/server.ts)                         | Webhook、健康、管理员状态与人工对账；严格按 target 校验发布 receipt URL                                   |
+| [webhook.ts](../src/webhook.ts)                       | 验签、事件/action/binding/人类身份/触发规则；构造 source 与 target                                        |
+| [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
+| [config.ts](../src/config.ts)                         | 云端 schema；事件与 PR writePolicy；仅 loadConfig，无运行中设置 API                                       |
+| [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
+| [store-schema.ts](../src/store-schema.ts)             | 只建立 schema v2；旧格式拒绝，绝不转换或删除旧数据                                                        |
+| [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
+| [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
+| [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |
+| [github-publication.ts](../src/github-publication.ts) | 显式 writePolicy；基线/路径/模式检查；服务端分支、Git Data commit 和 draft PR；每次写入重授权             |
+| [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment 或 pull_request；none 已在存储置 skipped                                  |
+| [outcomes.ts](../src/outcomes.ts)                     | source/target/runtime/产物/发布 schema；有界 payload，拒绝额外身份字段                                    |
+| [agent-config.ts](../src/agent-config.ts)             | type 必填：openclaw 或 acp；命令、工作区、环境引用由管理员配置                                            |
+| [agent-store.ts](../src/agent-store.ts)               | schema v2 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
+| [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
+| [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，无默认 provider 和未知类型回退                                            |
+| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 适配器；两种受控读取工具，返回明确评论/none outcome                                    |
+| [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
+| [runtime-workspace.ts](../src/runtime-workspace.ts)   | 管理员准备的干净 clone；origin/HEAD/元数据检查，受限 Git 子进程和实际文件变更收集；不 clone/reset/push    |
+| [cli.ts](../src/cli.ts)                               | 初始化、校验、渲染、生命周期、agent run；不安装 harness/App 或替用户开启 writePolicy                      |
+| [examples.ts](../src/examples.ts)                     | CLI init 模板源，与 deploy YAML 手动保持一致                                                              |
+| [deploy.ts](../src/deploy.ts)                         | Cloud Compose、Nginx v2路由、可选 Caddy、secret 挂载和不可覆盖 bundle                                     |
+| [agent-deploy.ts](../src/agent-deploy.ts)             | OpenClaw bridge 容器，无端口；ACP render 明确拒绝，使用原生 bridge                                        |
+| [lifecycle.ts](../src/lifecycle.ts)                   | Compose2.20+检查、up/down/status、离线 doctor；不验证真实模型/GitHub                                      |
 
 ## 权限、存储和恢复
 

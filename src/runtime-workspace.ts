@@ -231,7 +231,11 @@ export function collectChanges(
     if (bytes > 512 * 1024) throw Error("Changed files exceed size limit");
     const data = readFileSync(absolute);
     if (data.includes(0)) throw Error("Binary files unsupported");
-    const content = new TextDecoder("utf-8", { fatal: true }).decode(data);
+    // Keep an initial U+FEFF so UTF-8 re-encoding preserves the original BOM bytes.
+    const content = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: true,
+    }).decode(data);
     return { path, content };
   });
 }

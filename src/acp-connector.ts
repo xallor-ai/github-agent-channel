@@ -205,6 +205,9 @@ export class AcpConnector implements RuntimeConnector {
       let verificationReport:
         | Extract<Artifact, { kind: "test_report" }>
         | undefined;
+      const candidateFiles = this.config.verification
+        ? collectChanges(cwd, baseSha, metadataHash)
+        : undefined;
       if (this.config.verification) {
         const verification = this.config.verification;
         const report = await new Promise<{
@@ -245,6 +248,23 @@ export class AcpConnector implements RuntimeConnector {
       }
       combined.throwIfAborted();
       const files = collectChanges(cwd, baseSha, metadataHash);
+      // Verification may itself regenerate or delete files. Its exit status
+      // only applies to the captured candidate, never to silently changed inputs.
+      const publicationInputsChanged =
+        candidateFiles !== undefined &&
+        (candidateFiles.length !== files.length ||
+          candidateFiles.some(
+            (before) =>
+              !files.some(
+                (after) =>
+                  before.path === after.path &&
+                  before.content === after.content,
+              ),
+          ));
+      if (publicationInputsChanged && verificationReport) {
+        verificationReport.summary +=
+          "\nPublication inputs changed during verification; publication disabled. Review the changed files before a new task.";
+      }
       if (files.length)
         artifacts.push({
           kind: "change_set",
@@ -253,7 +273,8 @@ export class AcpConnector implements RuntimeConnector {
           files,
         });
       const verificationFailed =
-        verificationReport !== undefined && verificationReport.exitCode !== 0;
+        publicationInputsChanged ||
+        (verificationReport !== undefined && verificationReport.exitCode !== 0);
       const verificationBody = verificationReport
         ? `Configured verification: exitCode=${verificationReport.exitCode === null ? "unknown" : verificationReport.exitCode}\nCommand: ${verificationReport.command.slice(0, 2000)}\nObserved output (bounded, untrusted command output):\n${verificationReport.summary.slice(0, 7000)}`
         : "Verification was not configured; no passing test evidence is claimed.";

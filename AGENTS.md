@@ -21,6 +21,7 @@
 - workerId, runtime agentId and GitHub botLogin are different identities. Admin, connector and runtime/model credentials are not interchangeable.
 - Task target is issue/pull_request/repository; source records event/action and optional original comment ID. There are no task-root commentId/issueNumber/result/commentUrl compatibility fields.
 - RuntimeResult requires text, artifacts and explicit publication. Accepted execution outcome and confirmed publication receipt are distinct. A model statement is not observed code/test evidence.
+- Verification exit 0 alone does not authorize publication: candidate paths/content must match before and after verification. Preserve actual UTF-8 bytes including BOM. Changed verification inputs disable publication; never silently restore or rerun the command.
 - Bindings events are opt-in; subscribing all GitHub events does not implement them. PR writes require explicit writePolicy. Core derives the head branch and validates repository, base SHA, paths and actor.
 - Cloud Inbox and local journal protect different network boundaries. Startup/expiry uncertainty is not proof execution stopped; no automatic model or GitHub side-effect replay. Unknown execution may only be reconciled to failed, not promoted to success.
 - ACP process permissions are not an OS sandbox. Dedicated normal clean clones only; no shared workspaces, symlinks/submodules/alternate Git metadata. The harness and verification subprocesses must not inherit bridge credentials; verification does not receive harness auth envRefs.

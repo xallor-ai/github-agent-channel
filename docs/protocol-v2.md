@@ -63,7 +63,7 @@ publication=none 保存成果并将 deliveryStatus 置 skipped；comment/PR 则�
 1. 运行者准备对应仓库的干净独立 clone，安装并认证 ACP harness；配置仓库数字 ID→工作区、verification 和 runtime.publication。
 2. 服务端启用 binding.writePolicy，App Contents 写权限已获安装方批准，目标 baseBranch 与工作区 HEAD 一致。
 3. 用有写权限的账号在绑定 Issue 中 @App 提交可判定的小型修复要求，或使用已启用的 Issue 标签触发。
-4. 核对 source/target、Runtime 标识、实际 change_set、验证命令及退出码。配置验证失败/超时时 ACP 不生成 PR publication。
+4. 核对 source/target、Runtime 标识、实际 change_set、验证命令及退出码。配置验证失败/超时时 ACP 不生成 PR publication。验证前后候选文件的路径或内容发生变化时，即使命令退出0也禁止发布；保留当前成果和诊断，不自动恢复或重跑验证。
 5. 发布器重查权限、远端基线与路径，再创建派生分支和 draft PR；核对 publicationReceipt.url 及 PR 的实际文件和 commit。
 6. 若写入返回结果不明，先对账可能残留的分支/commit/PR；保持 unknown，不盲目重新发任务。
 

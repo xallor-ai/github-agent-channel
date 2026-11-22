@@ -32,7 +32,7 @@
 | E12 | 防止机器人回复触发自身               | 已实现；忽略 Bot、自己的消息和不匹配的提及                                    | webhook.test.ts                                                              | 历史真实观察到回帖事件被忽略 |
 | E13 | 重复投递只对应一个任务               | 已实现；delivery 和 scoped comment 去重                                       | [store.test.ts](../tests/store.test.ts)                                      | 历史真实重投通过             |
 
-GitHub App 勾选某个事件仅表示 GitHub 会投递它。当前除符合条件的 `issue_comment.created` 外，其余事件不会创建任务，通常返回 `200 {ignored:true}`。不能把这个 HTTP 200 当成业务执行成功。
+GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时默认只处理符合条件的 `issue_comment.created`；可显式启用已实现的 `issues.opened/labeled`、`pull_request.opened/synchronize` 和 `push`，并满足对应触发规则。未启用或未实现的事件会被忽略，通常返回 `200 {ignored:true}`；这个 HTTP 200 不代表任务执行成功。
 
 ## 2. 上下文、模型和执行环境
 
@@ -47,8 +47,8 @@ GitHub App 勾选某个事件仅表示 GitHub 会投递它。当前除符合条�
 | R07 | 读取 PR diff、head/base 和检查日志 | 未实现；read_issue 不提供这些数据                                                               | github.ts；本次 read_diff 请求被拒绝                                                | 待实现                                  |
 | R08 | 固定任务 base SHA                  | ACP 捕获工作区 HEAD；PR 发布校验远端 base HEAD；OpenClaw read_file 仍读默认分支                 | runtime-workspace/github-publication 测试                                           | 本地通过；真实待验收                    |
 | R09 | 仓库与工作区                       | 部分实现；映射管理员准备的干净独立 clone，校验 origin；不自动 clone/重置/分配 sandbox           | [runtime-workspace.ts](../src/runtime-workspace.ts)                                 | 本地通过；不是多租户隔离                |
-| R10 | 修改文件并收集 diff                | ACP 委托 harness 编辑，收集实际 UTF-8 文件变更；拒绝改 HEAD、特殊模式/超限文件                  | acp-connector.test.ts                                                               | 真实协议子进程 fixture 通过；模型待验收 |
-| R11 | 执行项目验证                       | 运行管理员配置的验证命令，记录退出码/日志；失败或未知结果禁止 PR proposal                       | acp-connector.test.ts                                                               | 真实本地验证进程通过；真实项目待验收    |
+| R10 | 修改文件并收集 diff                | ACP 委托 harness 编辑，保留 BOM 收集实际 UTF-8 文件变更；拒绝改 HEAD、特殊模式/超限文件         | acp-connector.test.ts                                                               | 真实协议子进程 fixture 通过；模型待验收 |
+| R11 | 执行项目验证                       | 运行管理员配置的验证命令，记录退出码/日志；失败、未知或验证前后候选文件变化均禁止发布           | acp-connector.test.ts                                                               | 真实本地验证进程通过；真实项目待验收    |
 | R12 | 结构化成果                         | 已实现必需 outcome：text/artifacts/publication；产物与发布回执分别存储                          | [outcomes.ts](../src/outcomes.ts)、generic-outbound.test.ts                         | 本地 HTTP/SQLite 通过                   |
 | R13 | 运行状态与恢复                     | 记录 Runtime session/run handle；ACP 可请求取消，但不保证后代停止；无自动 resume 或远端运行查询 | agent/acp-connector/generic-outbound 测试                                           | 部分实现；未知状态人工对账              |
 
@@ -70,7 +70,7 @@ GitHub App 勾选某个事件仅表示 GitHub 会投递它。当前除符合条�
 | ID  | 能力                             | 实现状态与限制                                                                              | 证据                                                                                         | 验收范围                           |
 | --- | -------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------- |
 | S01 | 安装范围与发起人权限分离         | 已实现；仓库身份匹配，actor 需 write/maintain/admin                                         | github.test.ts、pull.test.ts                                                                 | 本次本地通过；真实授权评论历史通过 |
-| S02 | 每次工具和外部回写重新授权       | 已实现，当前仅覆盖读取与评论；未来写仓须增加对应校验                                        | 同上、worker.test.ts                                                                         | 本次本地失权用例通过               |
+| S02 | 每次工具和外部回写重新授权       | 已实现；读取、评论及每次 Git Data/PR 写入前均重新授权                                       | github.test.ts、github-publication.test.ts、worker.test.ts                                   | 本次本地失权用例通过               |
 | S03 | 模型不能覆盖目标仓库/Issue/身份  | 已实现；可信上下文来自已保存任务，工具参数严格检查                                          | webhook.test.ts、pull.test.ts                                                                | 本次本地通过                       |
 | S04 | Webhook 持久化后 ACK             | 已实现                                                                                      | server.test.ts、store.test.ts                                                                | 本次本地通过                       |
 | S05 | 云端 assignment、lease、结果幂等 | 已实现；单可信 worker，未知任务阻塞继续执行                                                 | [pull-store.test.ts](../tests/pull-store.test.ts)、pull.test.ts                              | 本次本地通过                       |

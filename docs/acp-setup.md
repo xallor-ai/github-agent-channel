@@ -89,7 +89,8 @@ guard also rejects leftover changes on later runs. The lock is process-local;
 multiple bridge instances must use distinct checkouts.
 
 Results contain actual bounded UTF-8 file contents and the captured HEAD SHA,
-not model assertions about edits. Binary files, symlinks, workflow paths, changed
+not model assertions about edits. An existing UTF-8 BOM is preserved through
+collection and GitHub blob encoding. Binary files, symlinks, workflow paths, changed
 HEAD, over 100 files and over 512 KiB total contents are rejected. Changed executable files and executable-bit
 changes are not supported publication artifacts. The optional configured
 verification command runs in the checkout and records its observed exit code and
@@ -102,6 +103,14 @@ PR proposal generation requires `runtime.publication`, and actual publication
 separately requires the cloud binding's `writePolicy`; the cloud checks the base
 SHA, allowed paths and actor again. A failed or unknown verification exit code
 disables publication (`kind: none`) while preserving changes and the test report.
+Before verification, the adapter captures the candidate change set relative to
+the pinned HEAD. Afterward it compares publication paths and exact content with
+that candidate. Rewrites, additions or deletions disable publication even when
+the command exits 0; the report retains the actual exit code and adds the
+invalidation reason. Current changes remain available as artifacts for review.
+There is no automatic restore or verification replay. This before/after check is
+not an OS isolation guarantee against concurrent native processes.
+
 A successful PR proposal includes the actual configured verification command,
 exit code and bounded observed output. When verification is not configured, the
 proposal explicitly says no passing test evidence is claimed. Otherwise, without
