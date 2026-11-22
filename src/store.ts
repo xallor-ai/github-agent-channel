@@ -4,6 +4,15 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { NewTask, Task, TaskState, DeliveryState } from "./contracts.js";
 
+export interface AssignmentResult {
+  status: "succeeded" | "failed" | "unknown";
+  text?: string;
+  responseId?: string;
+}
+
+/** Domain rejection only; infrastructure errors must remain retryable. */
+export class AssignmentConflict extends Error {}
+
 export class TaskStore {
   private readonly db: DatabaseSync;
   private closed = false;
@@ -23,7 +32,12 @@ export class TaskStore {
         UNIQUE(installationId, repositoryId, commentId));
       CREATE INDEX IF NOT EXISTS task_queue ON tasks(status,createdAt);
       CREATE INDEX IF NOT EXISTS task_binding ON tasks(bindingId,status);
-      CREATE TABLE IF NOT EXISTS deliveries (deliveryId TEXT PRIMARY KEY, taskId TEXT NOT NULL REFERENCES tasks(id));`);
+      CREATE TABLE IF NOT EXISTS deliveries (deliveryId TEXT PRIMARY KEY, taskId TEXT NOT NULL REFERENCES tasks(id));
+      CREATE TABLE IF NOT EXISTS assignments (
+        taskId TEXT PRIMARY KEY REFERENCES tasks(id), workerId TEXT NOT NULL,
+        leaseHash TEXT NOT NULL, expiresAt INTEGER NOT NULL, resultDigest TEXT
+      );
+      CREATE INDEX IF NOT EXISTS assignment_worker ON assignments(workerId);`);
   }
   private transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -108,6 +122,123 @@ export class TaskStore {
         .prepare("UPDATE tasks SET status='running' WHERE id=?")
         .run(row.id!);
       return this.get(row.id as string);
+    });
+  }
+  expireAssignments(now = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE tasks SET status='unknown', error='Connector lease expired; reconcile execution'
+      WHERE status='running' AND id IN (SELECT taskId FROM assignments WHERE expiresAt<=?)`,
+      )
+      .run(now);
+  }
+  claimAssignment(
+    workerId: string,
+    leaseHash: string,
+    expiresAt: number,
+    now = Date.now(),
+  ): Task | undefined {
+    if (
+      !workerId ||
+      !leaseHash ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= now
+    )
+      throw new Error("Invalid assignment");
+    return this.transaction(() => {
+      this.expireAssignments(now);
+      const busy = this.db
+        .prepare(
+          `SELECT 1 FROM assignments a JOIN tasks t ON t.id=a.taskId
+        WHERE a.workerId=? AND t.status IN ('running','unknown') LIMIT 1`,
+        )
+        .get(workerId);
+      if (busy) return undefined;
+      const row = this.db
+        .prepare(
+          `SELECT id FROM tasks q WHERE q.status='queued' AND NOT EXISTS (
+        SELECT 1 FROM tasks busy WHERE busy.bindingId=q.bindingId AND (
+          busy.status IN ('running','unknown') OR (busy.status='succeeded' AND busy.deliveryStatus IN ('pending','sending','unknown'))
+        )) ORDER BY q.createdAt,q.rowid LIMIT 1`,
+        )
+        .get();
+      if (!row) return undefined;
+      this.db
+        .prepare(
+          "UPDATE tasks SET status='running' WHERE id=? AND status='queued'",
+        )
+        .run(row.id!);
+      this.db
+        .prepare(
+          "INSERT INTO assignments(taskId,workerId,leaseHash,expiresAt) VALUES (?,?,?,?)",
+        )
+        .run(row.id!, workerId, leaseHash, expiresAt);
+      return this.get(row.id as string);
+    });
+  }
+  assignedTask(
+    taskId: string,
+    workerId: string,
+    leaseHash: string,
+    now = Date.now(),
+  ): Task | undefined {
+    this.expireAssignments(now);
+    const row = this.db
+      .prepare(
+        `SELECT t.* FROM tasks t JOIN assignments a ON a.taskId=t.id
+      WHERE t.id=? AND a.workerId=? AND a.leaseHash=? AND a.expiresAt>? AND t.status='running'`,
+      )
+      .get(taskId, workerId, leaseHash, now);
+    return row ? ({ ...row } as unknown as Task) : undefined;
+  }
+  finishAssignment(
+    taskId: string,
+    workerId: string,
+    leaseHash: string,
+    result: AssignmentResult,
+    digest: string,
+    now = Date.now(),
+  ): boolean {
+    // Commit expiry independently: a rejected late result must not roll it back.
+    this.expireAssignments(now);
+    return this.transaction(() => {
+      const row = this.db
+        .prepare(
+          "SELECT * FROM assignments WHERE taskId=? AND workerId=? AND leaseHash=?",
+        )
+        .get(taskId, workerId, leaseHash);
+      if (!row) throw new AssignmentConflict("Assignment not found");
+      if (row.resultDigest !== null) {
+        if (row.resultDigest === digest) return true;
+        throw new AssignmentConflict("Conflicting assignment result");
+      }
+      if (
+        Number(row.expiresAt) <= now ||
+        this.get(taskId)?.status !== "running"
+      )
+        throw new AssignmentConflict("Assignment is not active");
+      if (!["succeeded", "failed", "unknown"].includes(result.status))
+        throw new AssignmentConflict("Invalid assignment result");
+      if (
+        result.status === "succeeded" &&
+        (!result.text?.trim() || result.text.length > 18000)
+      )
+        throw new AssignmentConflict("Invalid assignment text");
+      this.finish(
+        taskId,
+        result.status,
+        result.status === "succeeded" ? result.text : undefined,
+        result.status === "unknown"
+          ? "Connector execution requires reconciliation"
+          : result.status === "failed"
+            ? "Connector execution failed"
+            : undefined,
+        result.responseId,
+      );
+      this.db
+        .prepare("UPDATE assignments SET resultDigest=? WHERE taskId=?")
+        .run(digest, taskId);
+      return false;
     });
   }
   finish(

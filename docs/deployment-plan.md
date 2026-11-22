@@ -1,5 +1,7 @@
 # 配置与部署升级实施计划
 
+> 当前网络方向已修正为内网主动连接ECS；云端直连Runtime不再支持。部署与协议以 [主动连接计划](outbound-connector-plan.md) 和 [运维说明](operations.md) 为准。本文早期设计/验收保留作历史记录。
+
 目标是让开发者用一份 YAML 和明确的 secret 引用完成 Channel 配置、渲染、校验和生命周期管理，同时保留已有 HTTPS 网关。
 
 ## 已实现

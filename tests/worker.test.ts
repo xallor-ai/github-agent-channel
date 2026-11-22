@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TaskStore } from "../src/store.js";
-import { Worker } from "../src/worker.js";
+import { DeliveryWorker } from "../src/worker.js";
 import {
   AccessDenied,
   AmbiguousExecution,
@@ -24,150 +24,113 @@ const input: NewTask = {
 function github(overrides: Partial<GitHubClient> = {}): GitHubClient {
   return {
     authorize: async () => {},
-    readIssue: async () => ({ title: "issue" }),
-    readFile: async () => ({ text: "code" }),
-    publish: async () => ({ id: 10, url: "https://github.com/comment/10" }),
+    readIssue: async () => ({}),
+    readFile: async () => ({}),
+    publish: async () => ({
+      id: 10,
+      url: "https://github.com/org/repo/issues/4#issuecomment-10",
+    }),
     ...overrides,
   };
 }
-test("task executes allowed read and final delivery separately", async () => {
+function ready(t: test.TestContext) {
   const store = new TaskStore(":memory:");
-  const { task } = store.accept(input);
-  let publications = 0;
-  const w = new Worker(
+  t.after(() => store.close());
+  const task = store.accept(input).task;
+  store.claimAssignment("worker", "hash", Date.now() + 60000);
+  store.finishAssignment(
+    task.id,
+    "worker",
+    "hash",
+    { status: "succeeded", text: "answer" },
+    "digest",
+  );
+  return { store, task };
+}
+test("delivery worker publishes persisted connector result once", async (t) => {
+  const { store, task } = ready(t);
+  let attempts = 0;
+  const worker = new DeliveryWorker(
     store,
     github({
-      publish: async () => {
-        publications++;
-        return { id: 10, url: "url" };
+      publish: async (received, text) => {
+        assert.equal(received.id, task.id);
+        assert.equal(text, "answer");
+        attempts++;
+        return {
+          id: 10,
+          url: "https://github.com/org/repo/issues/4#issuecomment-10",
+        };
       },
     }),
-    {
-      run: async (t, invoke) => {
-        assert.deepEqual(await invoke("read_issue", {}), { title: "issue" });
-        return { text: "done" };
-      },
-    },
   );
-  assert.equal(await w.tick(), true);
-  assert.equal(store.get(task.id)?.status, "succeeded");
-  assert.equal(publications, 0);
-  await w.tick();
+  assert.equal(await worker.tick(), true);
+  assert.equal(await worker.tick(), false);
+  assert.equal(attempts, 1);
   assert.equal(store.get(task.id)?.deliveryStatus, "sent");
-  assert.equal(publications, 1);
-  await w.tick();
-  assert.equal(publications, 1);
-  store.close();
 });
-test("unauthorized actor never reaches runtime", async () => {
-  const s = new TaskStore(":memory:");
-  const { task } = s.accept(input);
-  let runs = 0;
-  await new Worker(
-    s,
-    github({
-      authorize: async () => {
-        throw new AccessDenied();
-      },
-    }),
-    {
-      run: async () => {
-        runs++;
-        return { text: "bad" };
-      },
-    },
-  ).tick();
-  assert.equal(runs, 0);
-  assert.equal(s.get(task.id)?.status, "rejected");
-  s.close();
-});
-test("re-checks authorization on each tool call and rejects target overrides", async () => {
-  const s = new TaskStore(":memory:");
-  const { task } = s.accept(input);
-  let reads = 0;
-  await new Worker(
-    s,
-    github({
-      readIssue: async () => {
-        reads++;
-      },
-    }),
-    {
-      run: async (_, invoke) => {
-        await invoke("read_issue", { repo: "other" });
-        return { text: "bad" };
-      },
-    },
-  ).tick();
-  assert.equal(reads, 0);
-  assert.equal(s.get(task.id)?.status, "failed");
-  s.close();
-});
-test("runtime timeout becomes unknown and blocks queued same binding", async () => {
-  const s = new TaskStore(":memory:");
-  const { task } = s.accept(input);
-  s.accept({ ...input, deliveryId: "d2", commentId: 2 });
-  const w = new Worker(s, github(), {
-    run: async () => {
-      throw new AmbiguousExecution();
-    },
-  });
-  await w.tick();
-  assert.equal(s.get(task.id)?.status, "unknown");
-  assert.equal(await w.tick(), false);
-  s.close();
-});
-test("lost publication response becomes unknown and is not replayed", async () => {
-  const s = new TaskStore(":memory:");
-  const { task } = s.accept(input);
+test("lost publication result becomes unknown and is never retried automatically", async (t) => {
+  const { store, task } = ready(t);
   let attempts = 0;
-  const w = new Worker(
-    s,
+  const worker = new DeliveryWorker(
+    store,
     github({
       publish: async () => {
         attempts++;
         throw new AmbiguousExecution();
       },
     }),
-    { run: async () => ({ text: "done" }) },
   );
-  await w.tick();
-  await w.tick();
-  await w.tick();
+  await worker.tick();
+  await worker.tick();
   assert.equal(attempts, 1);
-  assert.equal(s.get(task.id)?.deliveryStatus, "unknown");
-  s.close();
+  assert.equal(store.get(task.id)?.deliveryStatus, "unknown");
 });
-
-test("HTTP timeout and in-progress Responses block the next task", async () => {
-  const { OpenClawConnector } = await import("../src/connector.js");
-  for (const mode of ["timeout", "in-progress"]) {
-    const s = new TaskStore(":memory:");
-    const { task } = s.accept(input);
-    const second = s.accept({ ...input, deliveryId: "d2", commentId: 2 }).task;
-    let requests = 0;
-    const connector = new OpenClawConnector(
-      {
-        baseUrl: "http://localhost:18789",
-        agentId: "github",
-        tokenEnv: "TOKEN",
-        timeoutMs: 100,
-        maxToolRounds: 2,
+test("permission revoked before publication blocks writes", async (t) => {
+  const { store, task } = ready(t);
+  let attempts = 0;
+  const worker = new DeliveryWorker(
+    store,
+    github({
+      authorize: async () => {
+        throw new AccessDenied();
       },
-      "secret",
-      (async () => {
-        requests++;
-        return mode === "timeout"
-          ? new Response("", { status: 408 })
-          : Response.json({ status: "in_progress", output: [] });
-      }) as typeof fetch,
-    );
-    const w = new Worker(s, github(), connector);
-    await w.tick();
-    assert.equal(await w.tick(), false);
-    assert.equal(s.get(task.id)?.status, "unknown");
-    assert.equal(s.get(second.id)?.status, "queued");
-    assert.equal(requests, 1);
-    s.close();
-  }
+      publish: async () => {
+        attempts++;
+        throw new Error("unexpected");
+      },
+    }),
+  );
+  await worker.tick();
+  assert.equal(attempts, 0);
+  assert.equal(store.get(task.id)?.deliveryStatus, "failed");
+});
+test("delivery worker leaves queued execution untouched", async (t) => {
+  const store = new TaskStore(":memory:");
+  t.after(() => store.close());
+  const task = store.accept(input).task;
+  const worker = new DeliveryWorker(store, github());
+  assert.equal(await worker.tick(), false);
+  assert.equal(store.get(task.id)?.status, "queued");
+});
+test("overlapping ticks do not publish twice", async (t) => {
+  const { store } = ready(t);
+  let unblock!: () => void;
+  const gate = new Promise<void>((r) => (unblock = r));
+  let attempts = 0;
+  const worker = new DeliveryWorker(
+    store,
+    github({
+      publish: async () => {
+        attempts++;
+        await gate;
+        return { id: 1, url: "url" };
+      },
+    }),
+  );
+  const first = worker.tick();
+  assert.equal(await worker.tick(), false);
+  unblock();
+  await first;
+  assert.equal(attempts, 1);
 });

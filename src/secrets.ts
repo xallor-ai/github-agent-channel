@@ -62,10 +62,10 @@ export function resolveSecrets(
       configPath,
       env,
     ).trim(),
-    runtimeToken: readReference(
-      "runtime.token",
-      config.runtime.tokenEnv,
-      config.runtime.tokenFile,
+    connectorToken: readReference(
+      "connector.token",
+      config.connector.tokenEnv,
+      config.connector.tokenFile,
       configPath,
       env,
     ).trim(),

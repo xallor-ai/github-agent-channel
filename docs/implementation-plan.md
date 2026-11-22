@@ -1,5 +1,7 @@
 # GitHub Agent Channel V1 Implementation Plan
 
+> 当前网络方向已修正为内网主动连接ECS；云端直连Runtime不再支持。部署与协议以 [主动连接计划](outbound-connector-plan.md) 和 [运维说明](operations.md) 为准。本文早期设计/验收保留作历史记录。
+
 > 执行方式：按任务使用测试驱动开发，独立评审设计与实现；每项记录验证结果，按里程碑交付。当前先交付可运行的分析与回帖闭环，不把它称为完整写代码 Agent。
 
 **Goal:** 将 GitHub 中已授权的 @mention 转换为持久任务，交给用户已有 Runtime 分析，并通过 Channel 受控回写。

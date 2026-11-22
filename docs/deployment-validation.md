@@ -18,7 +18,7 @@
 sha512-FBq/q0TCaoA2b7qfdV0q81fHhI6RBB1zAQfJQREc1u2TlK5khVgCUsAlXskLWthyVqRz5PWEj+oOmfYgK58dHg==
 ```
 
-仓库中的 [compose.yaml](../deploy/compose.yaml) 使用官方 `slim` 镜像，供正常网络环境部署；它与这次 npm 备用部署不是同一个镜像构建路径。本轮只完成 Compose/Dockerfile 静态复核，尚未证明官方镜像构建及 Channel 容器联调通过。
+当时的 `deploy/compose.yaml`（现已删除）使用官方 `slim` 镜像；它与这次 npm 备用部署不是同一个镜像构建路径。本轮只完成 Compose/Dockerfile 静态复核，尚未证明官方镜像构建及 Channel 容器联调通过。
 
 ## 已验证
 

@@ -9,3 +9,4 @@
 **/*.pem
 **/secrets/**
 **/config.local.*
+**/agent.local.*

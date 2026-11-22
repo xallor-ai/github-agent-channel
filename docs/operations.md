@@ -1,88 +1,63 @@
-# 运维与恢复
+# 主动连接运维与恢复
 
-本文描述 Channel 的可重复部署、升级、备份和人工对账。它不代表真实 GitHub/ECS 闭环已经验收。
+## 两端职责和前置条件
 
-## 配置与 secret
+ECS 只运行 Channel 和 HTTPS 入口。内网运行本仓库 Agent 连接器与既有 OpenClaw。所有跨网请求由 Agent 发往 ECS；ECS 不调用内网地址。需要 Node24，容器命令要求 Compose插件2.20+。旧独立 `docker-compose` 不受支持。
 
-从 [channel.example.yaml](../deploy/channel.example.yaml) 复制配置。每项敏感值必须且只能设置一个引用：`github.privateKeyFile`/`github.privateKeyEnv`、`github.webhookSecretFile`/`github.webhookSecretEnv`、`runtime.tokenFile`/`runtime.tokenEnv`、`server.adminTokenFile`/`server.adminTokenEnv`。
+GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull requests Write。绑定的仓库 ID、installation ID 和 owner/repo 由服务端固定。每次领取、工具请求和回帖前重新核验调用者仓库权限。
 
-File secret 路径相对配置文件目录解析。Linux 容器以非 root UID 1000 运行：推荐 secret 文件 `0600` 且 owner UID 1000；也可 `0640` 且 group 为 1000。父目录只允许部署用户和容器所需 group 进入。PEM 保留换行，token 文件会去除首尾空白。不要把内容写进 YAML、命令参数、日志、Issue 或 Git。
+## 配置迁移与凭据
 
-Compose 生成器使用 Docker Compose secret 文件挂载到 `/run/secrets/`；Env 引用使用 Compose `environment` secret source。`docker stack deploy` 不支持这种 environment secret source。Native Node 运行时直接读取 File 或进程环境。
+之前的云端 `runtime` 配置已移除。云端现在使用 `connector.workerId/tokenFile或tokenEnv/timeoutMs`。旧版直连配置将校验失败，不能静默沿用。
 
-## GitHub App
+内网的 `agent.local.yaml` 配置 `channel`（ECS URL 与连接器token）、`runtime`（本机OpenClaw URL和token）、`stateFile`、轮询/请求时间。OpenClaw Responses必须启用；单次Runtime超时应短于云端领取期限，给工具请求/结果回传留余量。
 
-启用 `Issue comment` 事件，Webhook URL 为 `https://<your-domain>/webhooks/github`，设置随机 Webhook Secret。权限为 Metadata Read、Contents Read、Issues Read and write、Pull requests Read and write。配置 installation ID、repository ID、owner、repo 和 bot login；binding 必须与安装范围完全匹配。
+每项secret只允许Env/File之一。File相对配置文件目录解析；PEM保留换行，token去首尾空白。Linux容器UID1000，secret文件建议0600 owner1000或0640 group1000，父目录受限。云端管理token不能与connector token复用。Agent数据库含任务和未确认结果，需受保护且持久化。
 
-## 三种运行方式
+配置初始化不生成或上传GitHub私钥，也不修改GitHub App。用 `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"` 在受控本机生成各类独立token，再保存文件；不要提交或贴入聊天。
 
-### Native Node
+云端校验：`npm run channel -- config check <cloud.yaml>`。Agent校验：`npm run channel -- agent check <agent.yaml>`。`doctor`只查离线配置与Compose版本；没有enabled binding会提示。
 
-```sh
-export CHANNEL_CONFIG="$PWD/channel-data/config.local.yaml"
-npm run build
-npm start
-```
+## 入口
 
-PowerShell：
+已有Nginx用external，将生成片段加入现有HTTPS server；容器网关须与Channel加入共同 `deployment.network`，不能从网关容器用127.0.0.1访问宿主回环端口。片段使用Docker DNS动态解析，支持Channel重建换IP。
 
-```powershell
-$env:CHANNEL_CONFIG = (Resolve-Path .\channel-data\config.local.yaml)
-npm run build
-npm start
-```
+公网允许POST `/webhooks/github`（GitHub HMAC签名）和 `/connector/v1/`（独立Bearer，任务操作再验证lease）。管理 `/tasks/*` 与 `/healthz` 只通过宿主回环/受控私网访问。Caddy采用相同策略。
 
-Native Node 的 `dataFile` 必须是本机可写持久路径，`runtime.baseUrl` 必须从本机可达。
+只修改Nginx镜像的templates文件再reload不会重新执行envsubst；需先在隔离配置中展开和 `nginx -t`，再受控发布并reload。不要覆盖其他站点。
 
-### External gateway
+## 原生与容器
 
-```sh
-npm run channel -- deploy render channel-data/config.local.yaml channel-data/.channel
-npm run channel -- deploy up channel-data/.channel
-```
+原生云服务：设置 `CHANNEL_CONFIG` 指向云端YAML，`npm run build && npm start`。host建议127.0.0.1，dataFile为可写持久路径；相对dataFile按进程工作目录解析。
 
-生成器会把容器内配置规范化为 `server.host=0.0.0.0`、`server.port=3000`、`dataFile=/data/channel.db`，宿主只发布 `127.0.0.1:18896`（或 `deployment.localPort`）。生成 `nginx-webhook.conf`，只允许 `POST /webhooks/github`；入口容器与 Channel 共用 Docker 网络时设置 `deployment.network`。
+原生内网：`npm run channel -- agent run <agent.yaml>`。连接器只出站，不启动HTTP监听。重定向不会转发认证token；认证失败会提示，网络失败按有界退避重试。
 
-### Caddy
+生成容器配置会将云服务固定到0.0.0.0:3000及 `/data/channel.db`，Agent固定使用 `/data/agent.db`。它们分别有独立状态卷。Agent生成服务没有ports。Env引用以Compose secret来源使用，不会写成容器environment中的秘密值。
 
-`deployment.mode: caddy` 会生成固定 Caddy `2.10.2-alpine`、80/443 入口和持久证书卷。DNS 和端口条件由用户负责。服务器已有 80/443 时使用 external，不能同时启动第二个公网入口。
+## 升级与回滚
 
-## Doctor 和生命周期
+生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
-`doctor` 是离线检查，只读取配置、解析 secret 引用并执行 `docker compose version`；不会访问 GitHub、OpenClaw、DNS、ACME 或 Webhook。
+1. 等待运行任务结束；先停止Agent，再停止Cloud（down不带-v）。
+2. 备份SQLite及存在的WAL/SHM文件、secret引用和生成配置。
+3. 生成新bundle，用相同projectName启动Cloud，再启动Agent。
+4. 检查两端日志/状态、私网health、授权评论回帖。
 
-现代 Compose 生命周期为：
+同名bundle是原位替换，不能启动新bundle后再对旧bundle执行down。回滚需停止当前服务、恢复对应旧源码和配置；数据库schema不兼容时恢复备份。不要用down-v删除卷。不要删除Agent journal来重试任务。
 
-```sh
-npm run channel -- deploy up channel-data/.channel
-npm run channel -- deploy status channel-data/.channel
-npm run channel -- deploy down channel-data/.channel
-```
+## 租约和未知状态
 
-CLI 只使用 `docker compose` 2.20+ 插件，不回退到旧 `docker-compose`。`up` 使用 `-d --build --wait`，`status` 使用 `ps`，`down` 不带 `-v`。如果配置变化，渲染到新目录；生成 bundle 不覆盖不同内容的旧文件。
+领取时云端先持久化assignment，之后才返回任务。投递响应丢失不会重新投递同一执行。Agent在调用模型前写journal；进程重启看到执行中记录只报告unknown，不再次调用模型。结果回传失败只重试已持久化的同一结果；云端原子保存结果与幂等摘要后确认，重复同结果不会重复回帖，冲突409。
 
-## 数据备份、升级和回滚
+云端重启或租约过期会将执行标记unknown；unknown同时阻塞该binding及连接器，直到人工确认旧执行停止。即使断线后收到晚到成功结果，也不自动覆盖unknown。
 
-默认 SQLite 文件为 `/data/channel.db`，位于 `channel-data` 卷。停服后备份 `channel.db`、`channel.db-wal` 和 `channel.db-shm`（若存在），保留校验和与时间戳。恢复前保留原始卷快照。
-
-升级：
-
-1. 复制配置和 secret 引用，生成新的部署目录。
-2. 执行 `config check`、`doctor` 和 `deploy render`。
-3. 保持 `deployment.projectName` 不变，先停止旧 bundle（保留卷），备份 SQLite。
-4. 在新 bundle 上执行 up 并检查 status、私网 `/healthz` 和入口。不要再对旧 bundle 执行 down：同名项目共享容器身份。
-
-回滚时停止新 bundle，启动旧 bundle；禁止 `down -v`。配置变更和镜像版本应可追溯。
-
-## unknown 对账
-
-进程启动会将遗留 `running` 标记为执行 `unknown`，将 `sending` 标记为回帖 `unknown`；不会自动重放外部副作用。执行 unknown 时先确认 Runtime 任务已停止，再调用：
+在受控私网查询 `GET /tasks/<id>`（Bearer admin token）。确认模型执行已停止后，向 `POST /tasks/<id>/resolve` 发送：
 
 ```json
 { "confirmedStopped": true, "resolution": "failed" }
 ```
 
-回帖 unknown 时在目标 Issue/PR 中核对带有 `<!-- github-agent-channel:<task-id> -->` 的评论，再调用：
+回帖状态unknown时，先在GitHub核对配置bot发布且带 `<!-- github-agent-channel:<task-id> -->` 的评论，再向 `POST /tasks/<id>/resolve-delivery` 提交：
 
 ```json
 {
@@ -92,14 +67,16 @@ CLI 只使用 `docker compose` 2.20+ 插件，不回退到旧 `docker-compose`�
 }
 ```
 
-若确认没有成功且关闭投递：
+若决定关闭未成功投递，用 `{"confirmedReconciled":true,"resolution":"failed"}`。这些操作不重跑、不重发。新的执行必须由新的评论触发。
 
-```json
-{ "confirmedReconciled": true, "resolution": "failed" }
-```
+## 边界
 
-这些操作不创建评论，也不触发重发。不要删除数据库或重复投递来“解决” unknown。
+当前支持一个云实例的一个连接器身份（其任务受enabled bindings限制），不宣称多租户隔离或多worker路由。Agent journal的SQLite排他锁防止多个进程共享状态并执行；崩溃由OS释放锁。不能在不支持可靠文件锁的共享文件系统上运行。
 
-## 验证边界
+隔离冒烟不调用真实GitHub或生产模型；公网ACME、真实GitHub事件和真实OpenClaw回帖需单独记录。旧直接调用架构和相关验证仅作为历史资料，不是当前部署说明。
 
-`npm test`、类型检查、构建和格式检查是仓库级验证。真实 App 安装、有效签名、模型调用、GitHub 回帖、域名 ACME 和 ECS 入口路由必须单独验收并记录，不能用离线测试代替。
+## 预构建镜像
+
+两端配置可选 `deployment.image: registry.example.com/team/github-agent-channel:<commit>`，生成器只使用image而不要求目标主机build context。未设置时仍从当前源码目录构建。镜像需包含编译后的dist和生产依赖（仓库Dockerfile）。
+
+目标机没有Node时，可用同一镜像运行配置生成CLI。将配置目录及输出目录按相同绝对路径挂载到一次性容器，执行 `node dist/cli.js deploy render <cloud-config> <bundle>`（Agent用 `agent deploy render`），然后在宿主执行 `docker compose -f <bundle>/compose.yaml up -d --wait`。secret文件仍由宿主Docker按生成引用挂载，不复制到镜像。生成容器与长期服务的UID应正确配置；应用服务保持UID1000。

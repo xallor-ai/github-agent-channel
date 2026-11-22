@@ -1,0 +1,120 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TaskStore } from "../src/store.js";
+import type { NewTask } from "../src/contracts.js";
+const input: NewTask = {
+  deliveryId: "d1",
+  commentId: 1,
+  bindingId: "b1",
+  installationId: 1,
+  repositoryId: 2,
+  owner: "org",
+  repo: "repo",
+  actorId: 3,
+  actorLogin: "user",
+  issueNumber: 4,
+  prompt: "hello",
+};
+function fixture(t: test.TestContext) {
+  const dir = mkdtempSync(join(tmpdir(), "pull-store-"));
+  const path = join(dir, "tasks.db");
+  const stores: TaskStore[] = [];
+  t.after(() => {
+    for (const s of stores) s.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const open = () => {
+    const s = new TaskStore(path);
+    stores.push(s);
+    return s;
+  };
+  return { open };
+}
+test("assignment is atomic across connections and blocks one worker across bindings", (t) => {
+  const { open } = fixture(t);
+  const s = open(),
+    peer = open();
+  const a = s.accept(input).task;
+  s.accept({ ...input, deliveryId: "d2", commentId: 2, bindingId: "b2" });
+  const lease = s.claimAssignment("worker", "hash", 2000, 1000);
+  assert.equal(lease?.id, a.id);
+  assert.equal(peer.claimAssignment("worker", "other", 2000, 1000), undefined);
+  assert.equal(
+    peer.assignedTask(a.id, "other-worker", "hash", 1000),
+    undefined,
+  );
+  assert.equal(peer.assignedTask(a.id, "worker", "wrong", 1000), undefined);
+  assert.equal(peer.assignedTask(a.id, "worker", "hash", 1000)?.id, a.id);
+});
+test("expiry and restart never replay execution or allow late success", (t) => {
+  const { open } = fixture(t);
+  const s = open();
+  const a = s.accept(input).task;
+  s.claimAssignment("worker", "hash", 2000, 1000);
+  s.expireAssignments(2000);
+  assert.equal(s.get(a.id)?.status, "unknown");
+  assert.equal(s.claimAssignment("worker", "new", 4000, 2000), undefined);
+  assert.throws(() =>
+    s.finishAssignment(
+      a.id,
+      "worker",
+      "hash",
+      { status: "succeeded", text: "late" },
+      "digest",
+      2000,
+    ),
+  );
+  s.resolveUnknown(a.id, "failed");
+  const b = s.accept({ ...input, deliveryId: "d2", commentId: 2 }).task;
+  s.claimAssignment("worker", "hash2", 4000, 3000);
+  s.close();
+  const restarted = open();
+  restarted.recover();
+  assert.equal(restarted.get(b.id)?.status, "unknown");
+  assert.equal(
+    restarted.assignedTask(b.id, "worker", "hash2", 3001),
+    undefined,
+  );
+});
+test("result and digest commit together, identical retry persists across restart, conflict rejected", (t) => {
+  const { open } = fixture(t);
+  const s = open();
+  const a = s.accept(input).task;
+  s.claimAssignment("worker", "hash", 2000, 1000);
+  const result = {
+    status: "succeeded" as const,
+    text: "answer",
+    responseId: "r1",
+  };
+  assert.equal(
+    s.finishAssignment(a.id, "worker", "hash", result, "same", 1500),
+    false,
+  );
+  assert.equal(s.get(a.id)?.result, "answer");
+  s.close();
+  const peer = open();
+  peer.recover();
+  assert.equal(
+    peer.finishAssignment(a.id, "worker", "hash", result, "same", 3000),
+    true,
+  );
+  assert.throws(() =>
+    peer.finishAssignment(
+      a.id,
+      "worker",
+      "hash",
+      { status: "failed" },
+      "different",
+      3000,
+    ),
+  );
+  assert.throws(() =>
+    peer.finishAssignment(a.id, "worker", "wrong", result, "same", 3000),
+  );
+  assert.equal(peer.get(a.id)?.status, "succeeded");
+  assert.equal(peer.pendingDelivery()?.id, a.id);
+  assert.equal(peer.pendingDelivery(), undefined);
+});

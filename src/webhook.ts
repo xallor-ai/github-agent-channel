@@ -69,10 +69,15 @@ export async function normalizeWebhook(
     comment.body.length > 16000
   )
     return null;
-  const escaped = config.github.botLogin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const mentions = [config.github.botLogin];
+  if (/\[bot\]$/i.test(config.github.botLogin))
+    mentions.push(config.github.botLogin.replace(/\[bot\]$/i, ""));
+  const escaped = mentions
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
   if (
     !new RegExp(
-      `(?<![A-Za-z0-9_@-])@${escaped}(?![A-Za-z0-9_\\[\\]-])`,
+      `(?<![A-Za-z0-9_@-])@(?:${escaped})(?![A-Za-z0-9_\\[\\]-])`,
       "i",
     ).test(comment.body)
   )

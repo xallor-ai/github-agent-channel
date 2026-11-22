@@ -1,21 +1,20 @@
+# ECS: no OpenClaw URL or model token belongs here.
 server:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 3000
-  adminTokenEnv: CHANNEL_ADMIN_TOKEN
-dataFile: /data/channel.db
+  adminTokenFile: secrets/channel-admin-token
+dataFile: ./data/channel.db
 github:
-  appId: "12345" # Replace with your GitHub App ID
-  privateKeyEnv: GITHUB_APP_PRIVATE_KEY
-  webhookSecretEnv: GITHUB_WEBHOOK_SECRET
+  appId: "REPLACE_WITH_APP_ID"
+  privateKeyFile: secrets/github-app-private-key.pem
+  webhookSecretFile: secrets/github-webhook-secret
   botLogin: your-app[bot]
-runtime:
-  baseUrl: http://openclaw:18789
-  tokenEnv: OPENCLAW_GATEWAY_TOKEN
-  agentId: github
-  timeoutMs: 180000
-  maxToolRounds: 8
-bindings: [] # Add only repositories explicitly installed and authorized below.
-# - id: demo
+connector:
+  workerId: local-openclaw
+  tokenFile: secrets/connector-token
+  timeoutMs: 300000
+bindings: []
+# - id: example
 #   installationId: 123
 #   repositoryId: 456
 #   owner: example-org
@@ -23,4 +22,4 @@ bindings: [] # Add only repositories explicitly installed and authorized below.
 #   enabled: true
 deployment:
   mode: external
-  publicUrl: https://github-agent.example.com
+  publicUrl: https://channel.example.com

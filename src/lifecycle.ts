@@ -80,7 +80,7 @@ export function buildDoctorReport(
       ? []
       : ["No enabled repository bindings: all comments will be ignored"],
     deployment: config.deployment?.mode ?? "external",
-    runtime: config.runtime.baseUrl,
+    connector: config.connector.workerId,
     compose: { status: "available", version: detectComposeVersion(spawn) },
   };
 }

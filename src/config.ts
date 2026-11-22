@@ -43,26 +43,11 @@ const schema = z.strictObject({
     webhookSecretFile: name.optional(),
     botLogin: name,
   }),
-  runtime: z.strictObject({
-    baseUrl: z.string().refine((value) => {
-      try {
-        const url = new URL(value);
-        return (
-          ["http:", "https:"].includes(url.protocol) &&
-          !url.username &&
-          !url.password &&
-          !url.search &&
-          !url.hash
-        );
-      } catch {
-        return false;
-      }
-    }),
+  connector: z.strictObject({
+    workerId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
     tokenEnv: envName.optional(),
     tokenFile: name.optional(),
-    agentId: name,
-    timeoutMs: z.number().int().min(1).max(3_600_000),
-    maxToolRounds: z.number().int().min(1).max(100),
+    timeoutMs: z.number().int().min(1000).max(3_600_000),
   }),
   bindings: z.array(
     z.strictObject({
@@ -87,6 +72,10 @@ const schema = z.strictObject({
         .regex(/^[a-z0-9][a-z0-9_-]*$/)
         .optional(),
       localPort: z.number().int().min(1024).max(65535).optional(),
+      image: z
+        .string()
+        .regex(/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$/)
+        .optional(),
     })
     .optional()
     .superRefine((value, ctx) => {
@@ -123,7 +112,11 @@ function validate(
     scopes.add(scope);
   }
   try {
-    resolveSecrets(config, configPath, env);
+    const secrets = resolveSecrets(config, configPath, env);
+    if (secrets.connectorToken === secrets.adminToken)
+      throw new SecretReferenceError(
+        "connector.token must differ from server.adminToken",
+      );
   } catch (error) {
     if (error instanceof SecretReferenceError) throw error;
     throw new Error("Invalid channel secret references");

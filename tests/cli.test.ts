@@ -68,10 +68,7 @@ test("doctor reports valid configuration without printing secret values", (t) =>
     "pem-secret",
   );
   writeFileSync(join(dir, "secrets", "github-webhook-secret"), "hook-secret");
-  writeFileSync(
-    join(dir, "secrets", "openclaw-gateway-token"),
-    "runtime-secret",
-  );
+  writeFileSync(join(dir, "secrets", "connector-token"), "runtime-secret");
   const report = buildDoctorReport(configPath, (_command, args) => ({
     status: 0,
     stdout: `Docker Compose version v2.40.0 (${args.join(" ")})`,

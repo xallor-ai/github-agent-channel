@@ -1,6 +1,6 @@
 import {
   AmbiguousExecution,
-  type ChannelConfig,
+  type DirectRuntimeConfig,
   type RuntimeConnector,
   type RuntimeResult,
   type Task,
@@ -31,7 +31,7 @@ const tools = [
 
 export class OpenClawConnector implements RuntimeConnector {
   constructor(
-    private config: ChannelConfig["runtime"],
+    private config: DirectRuntimeConfig,
     private token: string,
     private fetcher: typeof fetch = fetch,
   ) {}

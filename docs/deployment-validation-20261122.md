@@ -1,5 +1,7 @@
 # 配置化部署验收（2026-11-22）
 
+> 当前网络方向已修正为内网主动连接ECS；云端直连Runtime不再支持。部署与协议以 [主动连接计划](outbound-connector-plan.md) 和 [运维说明](operations.md) 为准。本文早期设计/验收保留作历史记录。
+
 本次交付是仓库的配置与部署产品化：一份业务 YAML、文件/环境 secret 引用、CLI、可选 Caddy、现有 Nginx 路由片段、可复现 Docker 冒烟与 CI。它不代表用户的生产 GitHub App 已上线。
 
 ## 需求与证据

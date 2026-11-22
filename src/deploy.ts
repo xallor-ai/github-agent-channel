@@ -51,6 +51,9 @@ export function renderDeployment(
   if (network && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(network))
     throw new Error("Invalid deployment.network");
   const localPort = deployment?.localPort ?? 18896;
+  const image = deployment?.image;
+  if (image && !/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$/.test(image))
+    throw new Error("Invalid deployment.image");
   if (!Number.isInteger(localPort) || localPort < 1024 || localPort > 65535)
     throw new Error("Invalid deployment.localPort");
   const runtime = structuredClone(config);
@@ -64,7 +67,7 @@ export function renderDeployment(
     [runtime.server, "adminToken", "channel_admin_token"],
     [runtime.github, "privateKey", "github_private_key"],
     [runtime.github, "webhookSecret", "github_webhook_secret"],
-    [runtime.runtime, "token", "runtime_token"],
+    [runtime.connector, "token", "connector_token"],
   ] as const;
   for (const [section, key, secretName] of references) {
     const entry = section as unknown as Record<string, unknown>;
@@ -96,7 +99,7 @@ export function renderDeployment(
     name: project,
     services: {
       channel: {
-        build: { context: projectRoot },
+        ...(image ? { image } : { build: { context: projectRoot } }),
         restart: "unless-stopped",
         init: true,
         environment: { CHANNEL_CONFIG: "/app/config.runtime.yaml" },
@@ -151,7 +154,7 @@ export function renderDeployment(
   const caddy = `${origin} {
   @webhook {
     method POST
-    path /webhooks/github
+    path /webhooks/github /connector/v1/claim /connector/v1/tasks/*
   }
   handle @webhook {
     reverse_proxy ${project}-channel:3000
@@ -171,6 +174,15 @@ export function renderDeployment(
 location = /webhooks/github {
     if ($request_method != POST) { return 405; }
     client_max_body_size 1m;
+    ${proxy}
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_read_timeout 15s;
+}
+# Connector uses a dedicated bearer token; task tools/results require an active assignment.
+location ^~ /connector/v1/ {
+    if ($request_method != POST) { return 405; }
+    client_max_body_size 100k;
     ${proxy}
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;

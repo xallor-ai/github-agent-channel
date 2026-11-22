@@ -2,7 +2,8 @@
 import { loadConfig } from "../dist/config.js";
 import { resolveSecrets } from "../dist/secrets.js";
 import { TaskStore } from "../dist/store.js";
-import { Worker } from "../dist/worker.js";
+import { DeliveryWorker } from "../dist/worker.js";
+import { PullCoordinator } from "../dist/pull.js";
 import { createChannelServer } from "../dist/server.js";
 import { DatabaseSync } from "node:sqlite";
 const path = process.env.CHANNEL_CONFIG;
@@ -24,6 +25,7 @@ const db = new DatabaseSync(config.dataFile);
 db.exec(
   "CREATE TABLE IF NOT EXISTS smoke_publications(taskId TEXT, text TEXT)",
 );
+db.exec("CREATE TABLE IF NOT EXISTS smoke_claims(accepted INTEGER)");
 const github = {
   authorize: async (task) => {
     if (task.actorLogin !== "tester" || task.repositoryId !== 2)
@@ -42,22 +44,35 @@ const github = {
     };
   },
 };
-const runtime = {
-  run: async (task, invoke) => {
-    const issue = await invoke("read_issue", {});
-    if (issue.title !== "synthetic issue") throw new Error("read failed");
-    return { text: "synthetic reply" };
-  },
-};
-const worker = new Worker(store, github, runtime);
+const coordinator = new PullCoordinator(
+  store,
+  github,
+  config.connector,
+  secrets.connectorToken,
+);
+const worker = new DeliveryWorker(store, github);
 const server = createChannelServer(
   config,
   store,
   secrets.webhookSecret,
   secrets.adminToken,
+  coordinator,
 );
+server.on("request", (req, res) => {
+  if (req.url === "/connector/v1/claim")
+    res.once("finish", () => {
+      if (
+        req.headers.authorization === "Bearer " + secrets.connectorToken &&
+        [200, 204].includes(res.statusCode)
+      )
+        db.prepare("INSERT INTO smoke_claims VALUES (1)").run();
+    });
+});
 server.listen(config.server.port, config.server.host);
-const timer = setInterval(() => void worker.tick(), 50);
+const timer = setInterval(() => {
+  coordinator.expire();
+  void worker.tick();
+}, 50);
 for (const signal of ["SIGTERM", "SIGINT"])
   process.on(signal, () => {
     clearInterval(timer);

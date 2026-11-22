@@ -18,7 +18,7 @@ const secretValues = {
   privateKey:
     "-----BEGIN PRIVATE KEY-----\nprivate-file-secret\n-----END PRIVATE KEY-----\n",
   webhook: "webhook-file-secret",
-  runtime: "runtime-file-secret",
+  connector: "runtime-file-secret",
 };
 
 function baseConfig(deployment?: ChannelConfig["deployment"]): ChannelConfig {
@@ -31,12 +31,10 @@ function baseConfig(deployment?: ChannelConfig["deployment"]): ChannelConfig {
       webhookSecretFile: "secrets/webhook",
       botLogin: "test[bot]",
     },
-    runtime: {
-      baseUrl: "http://openclaw:18789",
+    connector: {
       tokenFile: "secrets/runtime",
-      agentId: "github",
+      workerId: "local-worker",
       timeoutMs: 1000,
-      maxToolRounds: 8,
     },
     bindings: [],
     ...(deployment ? { deployment } : {}),
@@ -52,12 +50,10 @@ function environmentConfig(): ChannelConfig {
       webhookSecretEnv: "GITHUB_WEBHOOK_SECRET",
       botLogin: "test[bot]",
     },
-    runtime: {
-      baseUrl: "http://openclaw:18789",
+    connector: {
       tokenEnv: "OPENCLAW_TOKEN",
-      agentId: "github",
+      workerId: "local-worker",
       timeoutMs: 1000,
-      maxToolRounds: 8,
     },
     bindings: [],
     deployment: { mode: "external", localPort: 19999 },
@@ -70,7 +66,7 @@ function fixture(t: test.TestContext, config: ChannelConfig) {
   writeFileSync(join(root, "secrets/admin"), secretValues.admin);
   writeFileSync(join(root, "secrets/private.pem"), secretValues.privateKey);
   writeFileSync(join(root, "secrets/webhook"), secretValues.webhook);
-  writeFileSync(join(root, "secrets/runtime"), secretValues.runtime);
+  writeFileSync(join(root, "secrets/runtime"), secretValues.connector);
   const configPath = join(root, "config.local.yaml");
   writeFileSync(configPath, "# test fixture\n");
   return { root, configPath, output: join(root, ".channel"), config };
@@ -113,12 +109,13 @@ test("caddy mode normalizes the runtime and emits a canonical HTTPS edge", (t) =
     "/run/secrets/github_private_key",
   );
   assert.equal(runtime.github.privateKeyEnv, undefined);
-  assert.equal(runtime.runtime.tokenFile, "/run/secrets/runtime_token");
+  assert.equal(runtime.connector.tokenFile, "/run/secrets/connector_token");
   assert.match(caddy, /^https:\/\/channel\.example\.com \{/);
   assert.match(caddy, /path \/webhooks\/github/);
   assert.match(caddy, /reverse_proxy github-channel-channel:3000/);
   assert.match(caddy, /respond 404/);
-  assert.doesNotMatch(caddy, /tasks/);
+  assert.doesNotMatch(caddy, /\s\/tasks\//);
+  assert.match(caddy, /\/connector\/v1\/claim/);
   assert.match(nginx, /location = \/webhooks\/github/);
   assert.match(nginx, /set \$channel_upstream github-channel-channel:3000/);
   assert.match(nginx, /resolver 127\.0\.0\.11 valid=5s/);
@@ -142,7 +139,7 @@ test("external mode maps environment secrets without serializing their values", 
     channel_admin_token: { environment: "CHANNEL_ADMIN" },
     github_private_key: { environment: "GITHUB_PRIVATE_KEY" },
     github_webhook_secret: { environment: "GITHUB_WEBHOOK_SECRET" },
-    runtime_token: { environment: "OPENCLAW_TOKEN" },
+    connector_token: { environment: "OPENCLAW_TOKEN" },
   });
   assert.equal(runtime.server.host, "0.0.0.0");
   assert.equal(runtime.server.port, 3000);
@@ -154,7 +151,7 @@ test("external mode maps environment secrets without serializing their values", 
     runtime.github.privateKeyFile,
     "/run/secrets/github_private_key",
   );
-  assert.equal(runtime.runtime.tokenFile, "/run/secrets/runtime_token");
+  assert.equal(runtime.connector.tokenFile, "/run/secrets/connector_token");
   assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:19999/);
   assert.equal(files.caddyfilePath, undefined);
   assert.doesNotMatch(
@@ -217,11 +214,25 @@ test("escapes literal dollar signs in Compose paths and keeps source context ind
   config.server.adminTokenFile = "secret$dir/admin";
   config.github.privateKeyFile = "secret$dir/private.pem";
   config.github.webhookSecretFile = "secret$dir/webhook";
-  config.runtime.tokenFile = "secret$dir/runtime";
+  config.connector.tokenFile = "secret$dir/runtime";
   const files = renderDeployment(config, configPath, join(root, "out"));
   const composeText = readFileSync(files.composePath, "utf8");
   const compose = parse(composeText);
   assert.equal(compose.services.channel.build.context, projectRoot);
   assert.ok(composeText.includes("secret$$dir"));
   assert.doesNotMatch(composeText, /secret-content/);
+});
+
+test("prebuilt image deployments do not depend on a host build context", (t) => {
+  const data = fixture(
+    t,
+    baseConfig({ mode: "external", image: "github-agent-channel:release-1" }),
+  );
+  const files = renderDeployment(data.config, data.configPath, data.output);
+  const compose = parse(readFileSync(files.composePath, "utf8"));
+  assert.equal(
+    compose.services.channel.image,
+    "github-agent-channel:release-1",
+  );
+  assert.equal(compose.services.channel.build, undefined);
 });

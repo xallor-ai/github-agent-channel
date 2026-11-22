@@ -4,7 +4,7 @@ import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import { createChannelServer } from "../src/server.js";
 import { TaskStore } from "../src/store.js";
-import { Worker } from "../src/worker.js";
+import { DeliveryWorker } from "../src/worker.js";
 import type { ChannelConfig } from "../src/contracts.js";
 const cfg: ChannelConfig = {
   server: { host: "127.0.0.1", port: 8080, adminTokenEnv: "ADMIN" },
@@ -15,9 +15,8 @@ const cfg: ChannelConfig = {
     webhookSecretEnv: "SECRET",
     botLogin: "channel[bot]",
   },
-  runtime: {
-    baseUrl: "http://localhost:18789",
-    agentId: "main",
+  connector: {
+    workerId: "local-worker",
     tokenEnv: "TOKEN",
     timeoutMs: 100,
     maxToolRounds: 3,
@@ -292,19 +291,23 @@ test("signed HTTP delivery is persisted and independently completed; task query 
     assert.equal(((await replay.json()) as any).taskId, receipt.taskId);
     assert.equal((await fetch(base + "/tasks/" + receipt.taskId)).status, 401);
     let published = "";
-    const worker = new Worker(
-      s,
-      {
-        authorize: async () => {},
-        readIssue: async () => ({}),
-        readFile: async () => ({}),
-        publish: async (_, text) => {
-          published = text;
-          return { id: 6, url: "https://github.com/comment/6" };
-        },
-      },
-      { run: async () => ({ text: "review done" }) },
+    s.claimAssignment("worker", "hash", Date.now() + 60000);
+    s.finishAssignment(
+      receipt.taskId,
+      "worker",
+      "hash",
+      { status: "succeeded", text: "review done" },
+      "digest",
     );
+    const worker = new DeliveryWorker(s, {
+      authorize: async () => {},
+      readIssue: async () => ({}),
+      readFile: async () => ({}),
+      publish: async (_, text) => {
+        published = text;
+        return { id: 6, url: "https://github.com/comment/6" };
+      },
+    });
     await worker.tick();
     await worker.tick();
     assert.equal(published, "review done");

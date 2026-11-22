@@ -1,0 +1,340 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { Agent } from "../src/agent.js";
+import { AgentStore } from "../src/agent-store.js";
+import type { AgentConfig } from "../src/agent-config.js";
+import type { Task } from "../src/contracts.js";
+
+const task: Task = {
+  id: "a0000000-0000-4000-8000-000000000001",
+  deliveryId: "d",
+  commentId: 1,
+  bindingId: "b",
+  installationId: 1,
+  repositoryId: 2,
+  owner: "org",
+  repo: "repo",
+  actorId: 3,
+  actorLogin: "alice",
+  issueNumber: 4,
+  prompt: "read",
+  status: "running",
+  deliveryStatus: "pending",
+  result: null,
+  error: null,
+  createdAt: 1,
+  responseId: null,
+  commentUrl: null,
+};
+function config(baseUrl: string): AgentConfig {
+  return {
+    channel: { baseUrl, tokenEnv: "CLOUD" },
+    runtime: {
+      baseUrl: "http://127.0.0.1:18789",
+      tokenEnv: "LOCAL",
+      agentId: "github",
+      timeoutMs: 2000,
+      maxToolRounds: 3,
+    },
+    stateFile: "",
+    pollIntervalMs: 100,
+    requestTimeoutMs: 1000,
+  };
+}
+async function fixture(
+  t: any,
+  handler: (path: string, body: any, res: any) => void,
+) {
+  const dir = mkdtempSync(join(tmpdir(), "agent-http-"));
+  const server = createServer(async (req, res) => {
+    assert.equal(req.headers.authorization, "Bearer dedicated-cloud-token");
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    handler(req.url!, JSON.parse(body), res);
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = "http://127.0.0.1:" + (server.address() as any).port;
+  const stores: AgentStore[] = [];
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+    for (const store of stores) store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const path = join(dir, "state.db");
+  return {
+    base,
+    path,
+    store: () => {
+      const store = new AgentStore(path);
+      stores.push(store);
+      return store;
+    },
+  };
+}
+const assignment = () => ({
+  task,
+  leaseToken: "lease-value",
+  expiresAt: Date.now() + 10000,
+});
+const respond = (res: any, value: unknown) => {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify(value));
+};
+
+test("lost result acknowledgement retries identical payload and never reruns model", async (t) => {
+  const received: any[] = [];
+  let claims = 0;
+  let models = 0;
+  const f = await fixture(t, (path, body, res) => {
+    if (path.endsWith("/claim")) {
+      claims++;
+      respond(res, assignment());
+    } else if (path.endsWith("/tool")) {
+      assert.equal(body.name, "read_issue");
+      respond(res, { title: "source" });
+    } else {
+      received.push(body);
+      if (received.length === 1) res.destroy();
+      else respond(res, { accepted: true, duplicate: false });
+    }
+  });
+  const store = f.store();
+  t.after(() => store.close());
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async (_task, invoke) => {
+        models++;
+        assert.deepEqual(await invoke("read_issue", {}), { title: "source" });
+        return { text: "summary" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await assert.rejects(agent.once());
+  assert.equal(models, 1);
+  assert.equal(store.pending()?.phase, "pending");
+  await agent.once();
+  assert.equal(models, 1);
+  assert.deepEqual(received[0], received[1]);
+  await agent.once();
+  assert.equal(models, 1);
+  assert.equal(claims, 2);
+});
+
+test("reboot after execution began reports unknown without running model", async (t) => {
+  let result: any;
+  let modelCalls = 0;
+  const f = await fixture(t, (path, body, res) => {
+    assert.ok(path.endsWith("/result"));
+    result = body;
+    respond(res, { accepted: true, duplicate: false });
+  });
+  let store = f.store();
+  store.begin(assignment());
+  store.close();
+  store = f.store();
+  t.after(() => store.close());
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        modelCalls++;
+        return { text: "bad" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.equal(result.status, "unknown");
+  assert.equal(modelCalls, 0);
+});
+
+test("cloud redirects are refused without forwarding connector credentials", async (t) => {
+  let leaked = 0;
+  const destination = createServer((_req, res) => {
+    leaked++;
+    res.end("{}");
+  });
+  destination.listen(0, "127.0.0.1");
+  await once(destination, "listening");
+  t.after(() => {
+    destination.closeAllConnections();
+    destination.close();
+  });
+  const f = await fixture(t, (_path, _body, res) => {
+    res.writeHead(307, {
+      location:
+        "http://127.0.0.1:" + (destination.address() as any).port + "/steal",
+    });
+    res.end();
+  });
+  const store = f.store();
+  t.after(() => store.close());
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        throw Error("must not execute");
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await assert.rejects(agent.once());
+  assert.equal(leaked, 0);
+});
+
+test("lease conflict closes local result and does not execute again", async (t) => {
+  let runs = 0;
+  const f = await fixture(t, (path, _body, res) => {
+    if (path.endsWith("/claim")) respond(res, assignment());
+    else {
+      res.writeHead(409);
+      res.end("{}");
+    }
+  });
+  const store = f.store();
+  t.after(() => store.close());
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        runs++;
+        return { text: "answer" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  await agent.once();
+  assert.equal(runs, 1);
+  assert.equal(store.pending(), undefined);
+});
+
+test("invalid acknowledgement keeps the exact result pending", async (t) => {
+  let calls = 0;
+  const f = await fixture(t, (path, _body, res) => {
+    if (path.endsWith("/claim")) respond(res, assignment());
+    else respond(res, {});
+  });
+  const store = f.store();
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        calls++;
+        return { text: "result" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await assert.rejects(agent.once());
+  const payload = store.pending()!.result;
+  await assert.rejects(agent.once());
+  assert.equal(store.pending()!.result, payload);
+  assert.equal(calls, 1);
+});
+
+test("aborting execution persists unknown and restart only reports it", async (t) => {
+  const controller = new AbortController();
+  let calls = 0;
+  let reported: any;
+  const f = await fixture(t, (path, body, res) => {
+    if (path.endsWith("/claim")) respond(res, assignment());
+    else {
+      reported = body;
+      respond(res, { accepted: true, duplicate: false });
+    }
+  });
+  let store = f.store();
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        calls++;
+        controller.abort();
+        return { text: "uncertain" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await agent.once(controller.signal);
+  assert.equal(JSON.parse(store.pending()!.result!).status, "unknown");
+  store.close();
+  store = f.store();
+  const next = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        calls++;
+        return { text: "bad" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await next.once();
+  assert.equal(reported.status, "unknown");
+  assert.equal(calls, 1);
+});
+
+test("lost claim response never calls the model", async (t) => {
+  let calls = 0;
+  const f = await fixture(t, (_path, _body, res) => res.destroy());
+  const store = f.store();
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        calls++;
+        return { text: "bad" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await assert.rejects(agent.once());
+  assert.equal(calls, 0);
+  assert.equal(store.pending(), undefined);
+});
+
+test("expired assignment reports unknown without starting a model", async (t) => {
+  let calls = 0;
+  let reported: any;
+  const f = await fixture(t, (path, body, res) => {
+    if (path.endsWith("/claim"))
+      respond(res, { ...assignment(), expiresAt: Date.now() - 100 });
+    else {
+      reported = body;
+      respond(res, { accepted: true, duplicate: false });
+    }
+  });
+  const store = f.store();
+  const agent = new Agent(
+    config(f.base),
+    store,
+    {
+      run: async () => {
+        calls++;
+        return { text: "bad" };
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.equal(calls, 0);
+  assert.equal(reported.status, "unknown");
+});

@@ -19,6 +19,14 @@ export interface Binding {
   repo: string;
   enabled: boolean;
 }
+export interface DirectRuntimeConfig {
+  baseUrl: string;
+  tokenEnv?: string;
+  tokenFile?: string;
+  agentId: string;
+  timeoutMs: number;
+  maxToolRounds: number;
+}
 export interface ChannelConfig {
   server: {
     host: string;
@@ -35,13 +43,11 @@ export interface ChannelConfig {
     webhookSecretFile?: string;
     botLogin: string;
   };
-  runtime: {
-    baseUrl: string;
+  connector: {
+    workerId: string;
     tokenEnv?: string;
     tokenFile?: string;
-    agentId: string;
     timeoutMs: number;
-    maxToolRounds: number;
   };
   bindings: Binding[];
   deployment?: {
@@ -50,13 +56,14 @@ export interface ChannelConfig {
     network?: string;
     projectName?: string;
     localPort?: number;
+    image?: string;
   };
 }
 export interface ResolvedSecrets {
   adminToken: string;
   privateKey: string;
   webhookSecret: string;
-  runtimeToken: string;
+  connectorToken: string;
 }
 export interface NewTask {
   deliveryId: string;

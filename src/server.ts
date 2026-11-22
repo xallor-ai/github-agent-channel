@@ -1,4 +1,8 @@
-import { createServer, type IncomingMessage } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { ChannelConfig } from "./contracts.js";
 import { TaskStore } from "./store.js";
@@ -24,6 +28,9 @@ export function createChannelServer(
   store: TaskStore,
   webhookSecret: string,
   adminToken: string,
+  coordinator?: {
+    handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
+  },
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -35,6 +42,7 @@ export function createChannelServer(
     };
     const path = req.url?.split("?")[0] ?? "";
     try {
+      if (coordinator && (await coordinator.handle(req, res))) return;
       if (req.method === "GET" && path === "/healthz") {
         send(200, { status: "ok", scope: "process-liveness" });
         return;

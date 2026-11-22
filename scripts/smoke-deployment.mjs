@@ -22,6 +22,7 @@ import { createServer } from "node:net";
 import https from "node:https";
 import { parse, stringify } from "yaml";
 import { renderDeployment } from "../dist/deploy.js";
+import { renderAgentDeployment } from "../dist/agent-deploy.js";
 
 const root = mkdtempSync(join(tmpdir(), "channel-docker-smoke-"));
 const suffix = randomBytes(6).toString("hex");
@@ -72,7 +73,7 @@ for (const [name, value] of Object.entries({
   "app.pem": privateKey,
   hook: hookSecret,
   admin: randomBytes(32).toString("hex"),
-  runtime: randomBytes(32).toString("hex"),
+  connector: randomBytes(32).toString("hex"),
 })) {
   // Compose file secrets preserve host ownership; root-created files must be
   // readable by the actual nonroot container. Parent directory remains 0700.
@@ -89,12 +90,10 @@ function config(mode, localPort) {
       privateKeyFile: "app.pem",
       webhookSecretFile: "hook",
     },
-    runtime: {
-      baseUrl: "http://127.0.0.1:9",
-      tokenFile: "runtime",
-      agentId: "github",
-      timeoutMs: 1000,
-      maxToolRounds: 1,
+    connector: {
+      workerId: "smoke-worker",
+      tokenFile: "connector",
+      timeoutMs: 30000,
     },
     bindings: [],
     deployment: {
@@ -168,7 +167,7 @@ try {
         [fixture.server, "adminToken", "admin"],
         [fixture.github, "privateKey", "app.pem"],
         [fixture.github, "webhookSecret", "hook"],
-        [fixture.runtime, "token", "runtime"],
+        [fixture.connector, "token", "connector"],
       ];
       for (const [section, key, file] of refs) {
         const env = "CHANNEL_SMOKE_" + key.toUpperCase();
@@ -233,11 +232,14 @@ try {
       ]);
       const localhostCaddy = readFileSync(files.caddyfilePath, "utf8").replace(
         "https://smoke.example.com {",
-        "https://localhost {\n  tls internal",
+        "https://localhost, https://channel-edge {\n  tls internal",
       );
       const tlsConfig = join(root, "Caddyfile.localhost");
       writeFileSync(tlsConfig, localhostCaddy, { mode: 0o644 });
       parsed.services.caddy.volumes[0].source = tlsConfig;
+      parsed.services.caddy.networks = {
+        channel: { aliases: ["channel-edge"] },
+      };
       tlsPort = await freePort();
       parsed.services.caddy.ports = ["127.0.0.1:" + tlsPort + ":443"];
     }
@@ -360,8 +362,8 @@ try {
           "public path must be closed: " + path,
         );
       }
-      // Second phase uses production server/store/worker classes with synthetic
-      // GitHub/Runtime clients, mounted outside the production image.
+      // Second phase uses production cloud HTTP/coordinator/store and delivery
+      // worker, with synthetic GitHub only. Runtime executes on outbound client.
       parsed.services.channel.command = [
         "node",
         "/app/scripts/smoke-fixture-server.mjs",
@@ -410,6 +412,50 @@ try {
       );
       assert.equal(accepted.status, 202);
       const receipt = JSON.parse(accepted.text);
+      const clientScript = join(root, "outbound-client.mjs");
+      const agentModule = new URL("../dist/agent.js", import.meta.url).href;
+      const storeModule = new URL("../dist/agent-store.js", import.meta.url)
+        .href;
+      writeFileSync(
+        clientScript,
+        `
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { Agent } from ${JSON.stringify(agentModule)};
+import { AgentStore } from ${JSON.stringify(storeModule)};
+const store = new AgentStore(${JSON.stringify(join(root, "outbound-agent.db"))});
+const config = {
+  channel: {baseUrl:${JSON.stringify("https://localhost:" + tlsPort)},tokenFile:'unused'},
+  runtime: {baseUrl:'http://127.0.0.1:9',tokenFile:'unused',agentId:'github',timeoutMs:10000,maxToolRounds:2},
+  stateFile:'unused',pollIntervalMs:100,requestTimeoutMs:10000,
+};
+let modelCalls=0;
+const runtime = {run: async (_task,invoke)=>{
+  modelCalls++;
+  const issue=await invoke('read_issue',{});
+  assert.equal(issue.title,'synthetic issue');
+  return {text:'synthetic reply'};
+}};
+try {
+  const agent=new Agent(config,store,runtime,readFileSync(${JSON.stringify(join(root, "connector"))},'utf8'));
+  assert.equal(await agent.once(),true);
+  assert.equal(modelCalls,1);
+  assert.equal(store.pending(),undefined);
+  console.log('outbound_agent_claim_tool_result_verified');
+} finally {store.close();}
+`,
+        { mode: 0o600 },
+      );
+      const outbound = spawnSync(process.execPath, [clientScript], {
+        encoding: "utf8",
+        timeout: 30000,
+        env: { ...process.env, NODE_EXTRA_CA_CERTS: caPath },
+      });
+      assert.equal(outbound.status, 0, outbound.stderr);
+      assert.match(
+        outbound.stdout,
+        /outbound_agent_claim_tool_result_verified/,
+      );
       const adminToken = readFileSync(join(root, "admin"), "utf8");
       let task;
       for (let attempt = 0; attempt < 50; attempt++) {
@@ -454,11 +500,171 @@ try {
       assert.equal(publications, "1");
       console.log(
         JSON.stringify({
-          syntheticWorkerE2E: "passed",
+          syntheticOutboundAgentE2E: "passed",
+          realTlsClaimToolResult: true,
+          model: "synthetic client-side runtime",
           signedIssueComment: true,
           duplicatePublicationCount: 1,
         }),
       );
+      // Validate the actual outbound container package separately: no listeners,
+      // UID1000, shared local Runtime network and OS-lock release after a crash.
+      const agentConfig = {
+        channel: { baseUrl: "https://channel-edge", tokenFile: "connector" },
+        runtime: {
+          baseUrl: "http://127.0.0.1:9",
+          tokenFile: "connector",
+          agentId: "github",
+          timeoutMs: 1000,
+          maxToolRounds: 1,
+        },
+        stateFile: "native-agent.db",
+        pollIntervalMs: 100,
+        requestTimeoutMs: 1000,
+        deployment: {
+          projectName: "channel-smoke-agent-" + suffix,
+          network: networkName,
+        },
+      };
+      const agentFiles = renderAgentDeployment(
+        agentConfig,
+        join(root, "agent.yaml"),
+        join(root, "agent"),
+      );
+      const agentCompose = parse(readFileSync(agentFiles.composePath, "utf8"));
+      agentCompose.services.agent.image = imageName;
+      delete agentCompose.services.agent.build;
+      agentCompose.services.agent.environment = {
+        NODE_EXTRA_CA_CERTS: "/app/root-ca.pem",
+      };
+      agentCompose.services.agent.volumes.push({
+        type: "bind",
+        source: caPath,
+        target: "/app/root-ca.pem",
+        read_only: true,
+      });
+      chmodSync(caPath, 0o644);
+      const agentTestCompose = join(root, "agent", "compose.smoke.yaml");
+      writeFileSync(agentTestCompose, stringify(agentCompose));
+      projects.push(agentTestCompose);
+      compose(agentTestCompose, ["config", "-q"]);
+      const crashedTask = randomUUID();
+      compose(
+        agentTestCompose,
+        [
+          "run",
+          "--rm",
+          "--no-deps",
+          "agent",
+          "node",
+          "--input-type=module",
+          "-e",
+          "import {AgentStore} from './dist/agent-store.js';const s=new AgentStore('/data/agent.db');s.begin({task:{id:'" +
+            crashedTask +
+            "'},leaseToken:'" +
+            "0".repeat(64) +
+            "',expiresAt:Date.now()+60000});process.exit(0);",
+        ],
+        true,
+      );
+      compose(agentTestCompose, ["up", "-d", "--wait"]);
+      const agentId = compose(agentTestCompose, ["ps", "-q", "agent"], true);
+      const agentInspect = JSON.parse(docker(["inspect", agentId], true))[0];
+      assert.deepEqual(agentInspect.HostConfig.PortBindings, {});
+      let recovered = false;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const phase = compose(
+          agentTestCompose,
+          [
+            "exec",
+            "-T",
+            "agent",
+            "node",
+            "--input-type=module",
+            "-e",
+            "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/agent.db');console.log(d.prepare('SELECT phase FROM journal WHERE id=?').get('" +
+              crashedTask +
+              "')?.phase);d.close();",
+          ],
+          true,
+        );
+        if (phase === "reported") {
+          recovered = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      assert.equal(
+        recovered,
+        true,
+        "crashed local journal must report unknown over TLS, then stop on cloud409",
+      );
+      assert.equal(
+        compose(
+          agentTestCompose,
+          ["exec", "-T", "agent", "node", "-p", "String(process.getuid())"],
+          true,
+        ),
+        "1000",
+      );
+      const claimCount = () =>
+        Number(
+          compose(
+            testCompose,
+            [
+              "exec",
+              "-T",
+              "channel",
+              "node",
+              "--input-type=module",
+              "-e",
+              "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/channel.db');console.log(d.prepare('SELECT count(*) AS n FROM smoke_claims').get().n);d.close();",
+            ],
+            true,
+          ),
+        );
+      const beforeRestart = claimCount();
+      compose(agentTestCompose, [
+        "up",
+        "-d",
+        "--force-recreate",
+        "--wait",
+        "agent",
+      ]);
+      const recreatedAgent = compose(
+        agentTestCompose,
+        ["ps", "-q", "agent"],
+        true,
+      );
+      assert.notEqual(recreatedAgent, agentId);
+      let resumed = false;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (claimCount() > beforeRestart) {
+          resumed = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      assert.equal(
+        resumed,
+        true,
+        "recreated agent must resume authenticated outbound polling",
+      );
+      const afterRestart = JSON.parse(
+        docker(["inspect", recreatedAgent], true),
+      )[0];
+      assert.equal(afterRestart.RestartCount, 0);
+      assert.deepEqual(afterRestart.HostConfig.PortBindings, {});
+      console.log(
+        JSON.stringify({
+          agentContainer: "passed",
+          ports: 0,
+          crashRecovery: "unknown-not-reexecuted",
+          authenticatedPollAfterRecreate: true,
+          cloudTls: "verified-local-ca",
+        }),
+      );
+      compose(agentTestCompose, ["stop", "agent"]);
     }
     if (mode === "external") {
       // Force a new backend IP without restarting the existing Nginx process.

@@ -21,12 +21,10 @@ function config() {
       webhookSecretEnv: "HOOK",
       botLogin: "agent[bot]",
     },
-    runtime: {
-      baseUrl: "http://localhost:18789",
+    connector: {
       tokenEnv: "TOKEN",
-      agentId: "main",
+      workerId: "local-worker",
       timeoutMs: 60000,
-      maxToolRounds: 8,
     },
     bindings: [
       {
@@ -69,7 +67,7 @@ test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and i
     { baseUrl: "https://user:pass@example.org" },
   ]) {
     const c = config();
-    Object.assign(c.runtime, patch);
+    Object.assign(c.connector, patch);
     invalid.push(c);
   }
   const duplicate = config();
@@ -97,13 +95,13 @@ test("updates atomically with revision guard and defensive snapshots", (t) => {
   assert.throws(() => manager.update(config(), 0));
   assert.equal(manager.snapshot().revision, 1);
   const next = config();
-  next.runtime.agentId = "other";
+  next.connector.workerId = "other";
   assert.equal(manager.update(next, 1).revision, 2);
-  assert.equal(loadConfig(path, env).runtime.agentId, "other");
-  next.runtime.agentId = "mutated";
+  assert.equal(loadConfig(path, env).connector.workerId, "other");
+  next.connector.workerId = "mutated";
   const snapshot = manager.snapshot();
-  snapshot.config.runtime.agentId = "mutated";
-  assert.equal(manager.snapshot().config.runtime.agentId, "other");
+  snapshot.config.connector.workerId = "mutated";
+  assert.equal(manager.snapshot().config.connector.workerId, "other");
 });
 
 test("accepts deployment mode and rejects public URLs that are not HTTPS origins", (t) => {

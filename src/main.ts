@@ -1,8 +1,8 @@
 import { ConfigManager } from "./config.js";
 import { TaskStore } from "./store.js";
 import { OctokitGitHubClient } from "./github.js";
-import { OpenClawConnector } from "./connector.js";
-import { Worker } from "./worker.js";
+import { PullCoordinator } from "./pull.js";
+import { DeliveryWorker } from "./worker.js";
 import { createChannelServer } from "./server.js";
 import { resolveSecrets } from "./secrets.js";
 
@@ -16,13 +16,19 @@ try {
   const store = new TaskStore(config.dataFile);
   store.recover();
   const github = new OctokitGitHubClient(config, secrets.privateKey);
-  const runtime = new OpenClawConnector(config.runtime, secrets.runtimeToken);
-  const worker = new Worker(store, github, runtime);
+  const coordinator = new PullCoordinator(
+    store,
+    github,
+    config.connector,
+    secrets.connectorToken,
+  );
+  const worker = new DeliveryWorker(store, github);
   const server = createChannelServer(
     config,
     store,
     secrets.webhookSecret,
     secrets.adminToken,
+    coordinator,
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(
@@ -34,6 +40,7 @@ try {
     ),
   );
   const timer = setInterval(() => {
+    coordinator.expire();
     void worker
       .tick()
       .catch(() => console.error(JSON.stringify({ event: "worker_failure" })));

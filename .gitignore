@@ -13,4 +13,6 @@ deploy/state/
 deploy/*.local.*
 .channel*/
 channel-data/
+agent-data/
+agent.local.*
 secrets/
