@@ -20,22 +20,43 @@ export interface Binding {
   enabled: boolean;
 }
 export interface ChannelConfig {
-  server: { host: string; port: number; adminTokenEnv: string };
+  server: {
+    host: string;
+    port: number;
+    adminTokenEnv?: string;
+    adminTokenFile?: string;
+  };
   dataFile: string;
   github: {
     appId: string;
-    privateKeyEnv: string;
-    webhookSecretEnv: string;
+    privateKeyEnv?: string;
+    privateKeyFile?: string;
+    webhookSecretEnv?: string;
+    webhookSecretFile?: string;
     botLogin: string;
   };
   runtime: {
     baseUrl: string;
-    tokenEnv: string;
+    tokenEnv?: string;
+    tokenFile?: string;
     agentId: string;
     timeoutMs: number;
     maxToolRounds: number;
   };
   bindings: Binding[];
+  deployment?: {
+    mode: "external" | "caddy";
+    publicUrl?: string;
+    network?: string;
+    projectName?: string;
+    localPort?: number;
+  };
+}
+export interface ResolvedSecrets {
+  adminToken: string;
+  privateKey: string;
+  webhookSecret: string;
+  runtimeToken: string;
 }
 export interface NewTask {
   deliveryId: string;

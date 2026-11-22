@@ -1,45 +1,105 @@
 # GitHub Agent Channel
 
-把 GitHub Issue / PR 普通评论中的明确 `@mention` 交给用户已有的 Agent Runtime 分析，再由 Channel 受控回帖。OpenClaw 是第一个 Connector；GitHub 接入、授权和任务状态由 Channel 管理。
+GitHub Issue/PR 普通评论中的明确 `@mention` 会交给用户已有的 Agent Runtime 分析，再由 Channel 受控回帖。OpenClaw 是第一个 Connector；Channel 负责 Webhook 验签、任务持久化、授权边界和最终回帖。
 
-当前版本是**读取、分析、回帖的基础实现**。模型只能调用 `read_issue` 和 `read_file`，最终评论由 Channel 发布。它尚不能修改文件、创建分支或 PR、运行 Git/Shell、合并代码，也不提供管理控制台或远端任务恢复。
+当前版本只开放 `read_issue`、`read_file` 和最终评论回写。它不会修改文件、创建分支/PR、执行 Git/Shell 或合并代码。
 
-## 工作方式
+## 选择部署模式
 
-```text
-GitHub 签名事件 → binding 与 mention 校验 → SQLite 持久任务 → 快速返回 202
-  → 调用者仓库权限校验 → OpenClaw Responses → 受限读取 → 持久结果 → GitHub 回帖
-```
+成熟部署把 HTTPS 放在 Channel 外面。仓库提供三种路径：
 
-- 仅处理 `issue_comment.created`，包括 PR 会话区普通评论；编辑、Bot、自身评论和 PR 行内 review comment 不触发。
-- Binding 同时固定 installation ID、repository ID、owner 和 repo；调用者必须是评论作者，且当前拥有 `admin`、`maintain` 或 `write` 权限。
-- 每次工具调用和回帖都会重新授权；模型参数不能覆盖仓库、调用者或目标 Issue。
-- 按 delivery 与原评论去重。一个 binding 有运行中或结果不明的任务时，后续任务等待；当前单 worker 实际逐个处理全局任务。
-- 仓库正文作为不可信数据返回。GitHub token 留在 Channel 内，Runtime 不接收它。
-- 超时或进程中断可能留下 `unknown`，需要人工核对；没有“恰好一次”外部执行保证。
+| 模式        | 适用场景                                    | 入口                                              |
+| ----------- | ------------------------------------------- | ------------------------------------------------- |
+| Native Node | 本地开发、单进程调试                        | Node 直接监听 HTTP；用 `CHANNEL_CONFIG` 指定配置  |
+| `external`  | 已有 Nginx、云负载均衡或 Kubernetes Ingress | Channel 只绑定回环端口，生成 `nginx-webhook.conf` |
+| `caddy`     | 独立 ECS、没有现成 HTTPS 入口               | 生成 Caddy 服务，自动申请/续期证书                |
 
-## 启动
+公网只允许精确转发 `POST /webhooks/github`。`/tasks/*` 和其他路径应在入口层拒绝；管理 Bearer token 不能替代网络隔离。
 
-需要 Node.js 24、GitHub App 安装，以及可用的 OpenClaw Responses 服务。
+## 快速开始
 
-1. 按[运行与恢复说明](docs/operations.md)配置 GitHub App、密钥环境变量和私网 Runtime。
-2. 将 [deploy/channel.example.yaml](deploy/channel.example.yaml) 复制为仓库外或 Git 忽略的 `config.local.yaml`，填写真实的 App、binding 和 Runtime 信息。示例使用容器路径和服务名；直接运行 Node 时，把 `dataFile` 改为本机可写路径（如 `./data/channel.db`），`runtime.baseUrl` 改为本机可达的 Gateway 地址，`server.host` 优先改为 `127.0.0.1`。
-3. 在仓库根目录执行：
+要求 Node.js 24。容器生命周期命令要求 Docker Compose 2.20+ 插件（`docker compose`）；旧版独立命令 `docker-compose` 不受支持。运行 `npm ci` 后初始化配置：
 
 ```sh
 npm ci
-npm test
-npm run typecheck
+npm run channel -- init ./channel-data
+```
+
+这会创建 `channel-data/config.local.yaml` 和 `channel-data/secrets/`，不会覆盖已有文件。编辑配置并放入四个 secret：App 私钥、Webhook Secret、Runtime Token、管理 Token。配置可以为每个 secret 选择 `*File` 或 `*Env`，必须且只能选择一种。
+
+```sh
+npm run channel -- config check ./channel-data/config.local.yaml
+npm run channel -- doctor ./channel-data/config.local.yaml
+npm run channel -- deploy render ./channel-data/config.local.yaml ./channel-data/.channel
+```
+
+`doctor` 是离线检查：验证配置、secret 引用和本机 `docker compose version`，不会访问 GitHub、OpenClaw 或公网域名，也不会发表 Issue 评论。
+
+### Native Node
+
+开发时可以不启动 Compose：
+
+```sh
+# Linux/macOS
+export CHANNEL_CONFIG="$PWD/channel-data/config.local.yaml"
+npm run build
+npm start
+
+# PowerShell
+$env:CHANNEL_CONFIG = (Resolve-Path .\channel-data\config.local.yaml)
 npm run build
 npm start
 ```
 
-默认读取当前目录的 `config.local.yaml`；可通过 `CHANNEL_CONFIG` 指定其他配置文件。配置里的 `*Env` 字段是环境变量名称，不是密钥值。容器入口见 [deploy/compose.yaml](deploy/compose.yaml)：默认仅启动 OpenClaw，Channel 需要显式启用 `channel` profile；部署前先阅读私网与持久卷要求。
+`dataFile` 必须指向当前用户可写的持久目录；容器路径 `/data/channel.db` 只适用于 Compose。Native Node 的 `runtime.baseUrl` 必须是本机可达的 Runtime 地址。
 
-GitHub App Webhook 指向 `https://<your-domain>/webhooks/github`。公网反向代理只转发该路径；`/tasks/*` 管理接口仅供回环或私网访问。`GET /healthz` 只证明进程存活。
+### External gateway
 
-## 验证与边界
+`deployment.mode: external` 生成的 Channel 监听容器端口 `3000`，宿主只发布 `127.0.0.1:18896`（可用 `deployment.localPort` 修改）。如果入口容器和 Channel 使用同一 Docker 网络，设置 `deployment.network`，生成器会使用稳定的服务别名；同时生成 `nginx-webhook.conf` 供现有 HTTPS server block 审核后 include。
 
-本地 41 项测试及 Linux CI 已通过，覆盖真实 SDK、SQLite、签名 HTTP、权限、去重、恢复与回帖歧义；GitHub API 使用 fake transport。另已在隔离 OpenClaw 2026.11.3 上通过真实模型文本与 client tool 续调用验证，详情见[部署与联调记录](docs/deployment-validation.md)。尚未创建 GitHub App，因此真实 GitHub 到回帖的完整闭环仍未验收。测试结果与待完成项见[进度记录](docs/progress.md)。
+```sh
+npm run channel -- deploy up ./channel-data/.channel
+npm run channel -- deploy status ./channel-data/.channel
+npm run channel -- deploy down ./channel-data/.channel
+```
 
-[长期架构](docs/architecture.md)描述未来的 Connector、Policy、Git Executor 和管理面；当前交付范围以本 README、[实施计划](docs/implementation-plan.md)及实际代码为准。[社区源码复用说明](docs/community-reuse.md)记录基础库选择与未直接采用的产品机制。
+`up` 等价于 `docker compose ... up -d --build --wait`；`status` 使用 `ps`；`down` 不删除卷。生成目录是不可变 bundle：配置变化时请使用新目录，避免覆盖当前运行版本。
+
+### Caddy edge
+
+`deployment.mode: caddy` 还会生成固定版本的 Caddy `2.10.2-alpine`，暴露 80/443，并将只有 `POST /webhooks/github` 的请求转到 Channel。要求域名 DNS 指向该 ECS，且 80/443 可达。若服务器已有 80/443 服务，不要启用此模式，应使用 `external`。
+
+## Secret 约定
+
+生产 Linux 主机上的 File secret 应限制访问：文件建议 `0600` 且 owner 为容器用户 UID 1000，或 `0640` 且 group 为 1000；父目录应限制为 owner/group 可进入。PEM 保留换行，普通 token 文件去掉首尾空白。不要把 secret 内容写入 YAML、命令行、日志、Issue 或 Git。
+
+Compose 生成器会把 `*File` secret 以 Compose secret 文件挂载到 `/run/secrets/...`；`*Env` secret 使用 Compose 的 `environment` secret source。后者是 Docker Compose 能力，不适用于 `docker stack deploy`。不要把私钥放进 Dockerfile 或 build context。
+
+## GitHub App
+
+GitHub App 安装到目标仓库后，启用 `Issue comment` Webhook 事件，Webhook URL 使用：
+
+```text
+https://<your-domain>/webhooks/github
+```
+
+Webhook secret 必须与 Channel 配置一致。配置以下 Repository permissions：Metadata Read、Contents Read、Issues Read and write、Pull requests Read and write。Binding 同时固定 installation ID、repository ID、owner 和 repo；评论作者还必须拥有 `admin`、`maintain` 或 `write` 权限。
+
+## 数据、升级与回滚
+
+Channel SQLite 数据在 `channel-data` 卷中。停服后备份数据库及 `-wal`、`-shm` 文件；恢复前保留原始备份。不要通过删除数据库、重复投递 Webhook 或重启来清除 `unknown` 状态。
+
+升级时保留相同 `deployment.projectName`，先停止旧 bundle（不删除卷），备份 SQLite，再启动新 bundle 并检查 `status` 和 `/healthz`。同名项目是原位替换，不能在启动新 bundle 后再对旧 bundle 执行 down，否则会停止同一项目。回滚时停止当前项目，切回已记录的旧源码提交和旧 bundle 再构建启动。若曾升级数据库格式，恢复兼容备份。不要使用 `down -v`。
+
+## 验证边界
+
+```sh
+npm test
+npm run typecheck
+npm run build
+npm run format:check
+```
+
+本地测试覆盖配置解析、File/Env secret、脱敏、external/Caddy 生成、路径隔离、签名 Webhook、权限、去重和恢复。真实容器与 HTTPS 路由的隔离验收已通过，见[本轮验证记录](docs/deployment-validation-20261122.md)。其中 Runtime/GitHub 使用合成实现；公网 ACME 和真实 GitHub 回帖仍须单独验收。
+
+配置与架构约束见 [docs/deployment-design.md](docs/deployment-design.md)，运维恢复见 [docs/operations.md](docs/operations.md)。

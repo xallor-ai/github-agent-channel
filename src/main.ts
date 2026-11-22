@@ -4,28 +4,25 @@ import { OctokitGitHubClient } from "./github.js";
 import { OpenClawConnector } from "./connector.js";
 import { Worker } from "./worker.js";
 import { createChannelServer } from "./server.js";
+import { resolveSecrets } from "./secrets.js";
 
 try {
   const manager = new ConfigManager(
     process.env.CHANNEL_CONFIG ?? "config.local.yaml",
   );
   const config = manager.snapshot().config;
+  const configPath = process.env.CHANNEL_CONFIG ?? "config.local.yaml";
+  const secrets = resolveSecrets(config, configPath);
   const store = new TaskStore(config.dataFile);
   store.recover();
-  const github = new OctokitGitHubClient(
-    config,
-    process.env[config.github.privateKeyEnv]!,
-  );
-  const runtime = new OpenClawConnector(
-    config.runtime,
-    process.env[config.runtime.tokenEnv]!,
-  );
+  const github = new OctokitGitHubClient(config, secrets.privateKey);
+  const runtime = new OpenClawConnector(config.runtime, secrets.runtimeToken);
   const worker = new Worker(store, github, runtime);
   const server = createChannelServer(
     config,
     store,
-    process.env[config.github.webhookSecretEnv]!,
-    process.env[config.server.adminTokenEnv]!,
+    secrets.webhookSecret,
+    secrets.adminToken,
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(

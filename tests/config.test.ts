@@ -105,3 +105,21 @@ test("updates atomically with revision guard and defensive snapshots", (t) => {
   snapshot.config.runtime.agentId = "mutated";
   assert.equal(manager.snapshot().config.runtime.agentId, "other");
 });
+
+test("accepts deployment mode and rejects public URLs that are not HTTPS origins", (t) => {
+  const path = fixture(t);
+  const c = config() as any;
+  c.deployment = { mode: "caddy", publicUrl: "https://channel.example.com" };
+  writeFileSync(path, JSON.stringify(c));
+  assert.equal(loadConfig(path, env).deployment?.mode, "caddy");
+  for (const url of [
+    "http://channel.example.com",
+    "https://user:pass@example.com",
+    "https://example.com/path",
+    "https://example.com?x=1",
+  ]) {
+    c.deployment.publicUrl = url;
+    writeFileSync(path, JSON.stringify(c));
+    assert.throws(() => loadConfig(path, env));
+  }
+});

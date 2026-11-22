@@ -6,9 +6,11 @@
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
+    "channel": "tsx src/cli.ts",
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
     "smoke:openclaw": "npm run build && node scripts/smoke-openclaw.mjs",
+    "smoke:deployment": "npm run build && node scripts/smoke-deployment.mjs",
     "format:check": "prettier --check src tests scripts",
     "format": "prettier --write src tests scripts"
   },

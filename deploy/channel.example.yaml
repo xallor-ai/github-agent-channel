@@ -4,7 +4,7 @@ server:
   adminTokenEnv: CHANNEL_ADMIN_TOKEN
 dataFile: /data/channel.db
 github:
-  appId: '12345' # Replace with your GitHub App ID
+  appId: "12345" # Replace with your GitHub App ID
   privateKeyEnv: GITHUB_APP_PRIVATE_KEY
   webhookSecretEnv: GITHUB_WEBHOOK_SECRET
   botLogin: your-app[bot]
@@ -18,6 +18,9 @@ bindings: [] # Add only repositories explicitly installed and authorized below.
 # - id: demo
 #   installationId: 123
 #   repositoryId: 456
-#   owner: your-org
-#   repo: your-repo
+#   owner: example-org
+#   repo: example-repo
 #   enabled: true
+deployment:
+  mode: external
+  publicUrl: https://github-agent.example.com
