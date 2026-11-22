@@ -12,6 +12,7 @@ test("agent bundle has outbound-only service, two secret mounts, and persistent 
   const cfg: AgentConfig = {
     channel: { baseUrl: "https://channel.example.com", tokenFile: "cloud" },
     runtime: {
+      type: "openclaw",
       baseUrl: "http://openclaw:18789",
       tokenEnv: "LOCAL_TOKEN",
       agentId: "github",
@@ -30,6 +31,7 @@ test("agent bundle has outbound-only service, two secret mounts, and persistent 
   );
   const compose = parse(readFileSync(files.composePath, "utf8"));
   const runtime = parse(readFileSync(files.runtimeConfigPath, "utf8"));
+  assert.equal(runtime.runtime.type, "openclaw");
   assert.equal(compose.services.agent.ports, undefined);
   assert.equal(Object.keys(compose.services).length, 1);
   assert.equal(Object.keys(compose.secrets).length, 2);

@@ -115,7 +115,7 @@ test("caddy mode normalizes the runtime and emits a canonical HTTPS edge", (t) =
   assert.match(caddy, /reverse_proxy github-channel-channel:3000/);
   assert.match(caddy, /respond 404/);
   assert.doesNotMatch(caddy, /\s\/tasks\//);
-  assert.match(caddy, /\/connector\/v1\/claim/);
+  assert.match(caddy, /\/connector\/v2\/claim/);
   assert.match(nginx, /location = \/webhooks\/github/);
   assert.match(nginx, /set \$channel_upstream github-channel-channel:3000/);
   assert.match(nginx, /resolver 127\.0\.0\.11 valid=5s/);

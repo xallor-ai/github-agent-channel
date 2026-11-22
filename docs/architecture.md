@@ -1,49 +1,46 @@
-# GitHub Agent Channel 架构
+# GitHub Agent Channel v2 架构
 
-状态：当前架构说明。产品目标为通用 GitHub Channel；OpenClaw 只是首个适配器。当前 CLI 仍固定装配 OpenClaw，任务/结果协议仍限于评论场景，不能宣称已完成多 Runtime 支持。完整源码对照见[实现地图](implementation-map.md)，目标差距见[治理记录](governance-review-20261122.md)。
-
-## 网络方向与职责
+Channel 是通用 GitHub 协作通道，Runtime 的模型、编码工具、工作区执行由已有实现承担。OpenClaw 和 ACP 是目前两个适配器，核心不依赖 OpenClaw SDK。部署可使用已有服务或自建服务器，ECS 仅为示例。
 
 ```mermaid
 flowchart LR
-  GH[GitHub] -->|签名 Webhook| E[HTTPS Edge]
-  E --> C[Channel 服务端]
-  C --> Q[(SQLite 任务与 assignment)]
-  C -->|Installation Token 操作| GH
-  A[内网主动连接器] -->|HTTPS claim/tool/result| E
-  A --> J[(本地 journal)]
-  A -->|本机 Responses API| O[OpenClaw]
+  GH[GitHub] -->|签名事件| C[Channel 接入与授权]
+  C --> Q[(任务与 outcome)]
+  B[出站 Bridge] -->|v2 claim / tool / result| C
+  B --> J[(执行 journal)]
+  B --> F[Runtime factory]
+  F --> O[OpenClaw Responses]
+  F --> A[官方 ACP SDK]
+  A --> H[已有编码 harness 与准备好的工作区]
+  Q --> P[受控 publication]
+  P -->|评论或 draft PR| GH
 ```
 
-Channel 的产品定位是 Runtime 无关的 GitHub 协作入口；当前唯一实现的适配器是 OpenClaw。服务端不持有内网 Runtime 地址或模型 token，不主动连接内网。ECS 是一种部署方式，非产品依赖；内网无需隧道或入站端口。
+## 核心职责
 
-## 边界
+| 层              | 负责                                             | 不承担                     |
+| --------------- | ------------------------------------------------ | -------------------------- |
+| GitHub 接入     | 签名、source/target、事件与触发规则              | 模型执行                   |
+| 任务控制        | scope、actor、assignment、lease、结果/回执持久化 | Runtime 内部推理与工具规划 |
+| 出站 bridge     | 本地 journal、适配器选择、结构化结果确认         | GitHub 私钥与任意跨仓写入  |
+| Runtime adapter | Provider 协议、生命周期标识与能力限制、产物整理  | 改写仓库/身份授权范围      |
+| Publication     | 重新授权、路径/基线策略、评论/Git Data/PR API    | 执行仓库测试、自动 merge   |
+| HTTPS edge      | TLS、域名、仅转发 v2 与 webhook 路径             | 长任务处理                 |
 
-- **HTTPS Edge**：复用Nginx/云网关或选用独立Caddy。转发Webhook与带认证的connector协议，不开放管理接口。
-- **Webhook/Ingestion**：先验签原始body再解析；固定installation/repository/actor上下文；持久化和去重后返回202。
-- **PullCoordinator**：给已认证连接器原子分配任务，校验调用者权限，产生限时lease capability。处理受控工具请求和幂等结果提交。
-- **GitHub Client/DeliveryWorker**：凭据不出ECS；每次工具和回帖重新授权。回帖结果不明时停在unknown，不盲目重发。
-- **内网Agent**：只出站。模型调用前写journal；模型工具请求回到ECS授权执行；结果持久化后提交。没有GitHub写凭据。
-- **RuntimeConnector**：接口用于隔离执行差异；当前 `connector.ts` 实现 OpenClaw Responses、两种读取工具的续调用和文本结果。`runAgent()` 固定创建这个适配器，尚无 provider 注册、能力协商或通用运行产物。
+## 当前实现选择
 
-## 持久性与执行保证
+GitHub 身份与 API 复用 Octokit；ACP 复用官方 SDK，调用管理员安装的 harness。工作区必须预先准备，Channel 不复制 OpenHands 一类的执行平台。窄范围复用依据见[实现设计](runtime-neutral-design.md)。
 
-任务、assignment、lease摘要、结果摘要写入云SQLite。claim响应丢失不会重复分配执行；结果重试只有相同内容得到幂等确认，冲突拒绝。任务执行状态与回帖状态分开。
+任务、outcome、publicationReceipt 分离，目标可为 Issue/PR/仓库；文本只是成果的一部分。任何 GitHub 写入前重新核对 actor 和 binding。PR 默认关闭，启用后固定 baseBranch 和允许文件范围，分支由 task ID 派生。
 
-内网journal使用独立SQLite排他锁防止同一状态文件被多个进程执行。崩溃后OS释放锁；重启遇到running只回报unknown。网络断开不能证明远端停止，因此不自动再次执行模型。
+v2 直接删除旧字段、协议和数据库迁移路径；只接受新格式。云和本地分别持久化网络两端的责任。超时、断线、重启仍保守 unknown；ACP 的 cancel 请求不是已停止证明，不自动恢复或重跑。
 
-云端期限过期、重启或本地报告不确定时将任务置unknown，阻塞binding和连接器。确认执行停止后管理员可终止该任务；下一次执行来自新的评论。没有“恰好执行一次”的承诺。
+## 尚存边界
 
-## 配置与部署
+- 单可信 worker/实例，串行执行；没有多租户、动态多 worker 路由或自动续租。
+- OpenClaw 当前仍是读取/分析适配器；ACP 依赖已有 harness 的原生文件/终端工具，未提供客户端 filesystem/terminal 服务。
+- ACP 原生进程不是 sandbox；工作区隔离由部署者提供，禁止共享工作区。Docker 自动渲染仅支持 OpenClaw bridge。
+- PR 基线在发布前检查并固定 commit parent，但不能原子阻止 GitHub base 在随后推进；分支冲突和不确定写入不自动覆盖/重放。
+- 本地协议/SDK验收不等于具体模型的真实 Issue→代码→PR 已通过。
 
-云端YAML包含GitHub App身份、绑定、connector身份与Edge模式。内网YAML包含Channel URL、共享connector token、仅本地使用的Runtime信息、持久journal位置。secret为文件或环境引用，生成配置不含值。
-
-部署生成器把业务配置转成Compose/挂载/Edge路由。Cloud与Agent独立启动升级，不重复部署既有OpenClaw。数据库分别使用持久卷；同projectName升级按停止/备份/启动流程操作。参见[运维说明](operations.md)。
-
-## 当前范围与扩展
-
-当前单云实例、单可信connector身份；该身份处理实例内明确enabled的仓库bindings。多租户、按仓库绑定多个worker、自动续租/恢复运行中的模型以及写仓功能未开放。不能把一个实例共享token当成多租户权限方案。
-
-当前工具read_issue/read_file和评论回写。Skills与模型编排属于Runtime；服务端授权不能依赖模型或提示词。新增写能力须实现独立Policy与受控执行，再验证冲突、越权和副作用状态。
-
-已有社区实现对照保留在[community-reuse.md](community-reuse.md)；旧direct模式相关文档是历史记录，不作为当前部署入口。
+文件职责、状态与证据分别见[实现地图](implementation-map.md)、[能力台账](capabilities.md)、[验证记录](runtime-neutral-validation-20261122.md)。

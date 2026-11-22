@@ -2,20 +2,36 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenClawConnector } from "../src/connector.js";
 import { AmbiguousExecution, type Task } from "../src/contracts.js";
-const task = {
+const task: Task = {
   id: "task-1",
   bindingId: "binding",
   prompt: "review",
   actorLogin: "alice",
-} as Task;
+  deliveryId: "delivery",
+  installationId: 1,
+  repositoryId: 2,
+  owner: "org",
+  repo: "repo",
+  actorId: 3,
+  target: { kind: "issue", number: 1 },
+  source: { event: "issue_comment", action: "created", commentId: 1 },
+  status: "running",
+  deliveryStatus: "pending",
+  error: null,
+  createdAt: 1,
+  outcome: null,
+  runtime: null,
+  publicationReceipt: null,
+};
 const settings = {
+  type: "openclaw" as const,
   baseUrl: "http://localhost:18789",
   agentId: "github",
   tokenEnv: "RUNTIME_TOKEN",
   timeoutMs: 100,
   maxToolRounds: 3,
 };
-test("returns text only from completed assistant output and scopes session to task", async () => {
+test("returns an explicit outcome from completed assistant output and scopes session to task", async () => {
   const calls: any[] = [];
   const fetcher = async (url: any, opts: any) => {
     calls.push({ url, opts });
@@ -39,6 +55,8 @@ test("returns text only from completed assistant output and scopes session to ta
   assert.deepEqual(await connector.run(task, async () => null), {
     text: "done",
     responseId: "resp1",
+    artifacts: [],
+    publication: { kind: "comment" },
   });
   const body = JSON.parse(calls[0].opts.body);
   assert.equal(

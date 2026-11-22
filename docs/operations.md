@@ -1,20 +1,20 @@
 # 主动连接运维与恢复
 
-状态：当前运行契约；目前只覆盖 OpenClaw 分析回帖适配器。通用 Channel 的其他能力状态见[能力台账](capabilities.md)。
+状态：当前运行契约；涵盖通用 v2 任务与发布；OpenClaw 和 ACP 各自能力、部署限制见适配器教程。通用 Channel 的其他能力状态见[能力台账](capabilities.md)。
 
 首次接入从[完整配置主线](setup.md)开始；自建服务端看[可选ECS部署](ecs-setup.md)。本文用于部署后的诊断、升级、备份和未知任务对账。
 
 ## 两端职责和前置条件
 
-Channel 服务端运行接入、任务、GitHub 授权与发布，HTTPS 由入口层处理；ECS 是可选的自建部署示例。内网运行本仓库 Agent 连接器与当前适配的 OpenClaw。所有跨网请求由连接器发往服务端，服务端不调用内网地址。需要 Node24，容器命令要求 Compose插件2.20+。旧独立 `docker-compose` 不受支持。
+Channel 服务端运行接入、任务、GitHub 授权与发布，HTTPS 由入口层处理；ECS 是可选的自建部署示例。内网运行本仓库出站连接器，按 type 选择 OpenClaw 或 ACP。所有跨网请求由连接器发往服务端，服务端不调用内网地址。需要 Node24，容器命令要求 Compose插件2.20+。旧独立 `docker-compose` 不受支持。
 
 GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull requests Write。绑定的仓库 ID、installation ID 和 owner/repo 由服务端固定。每次领取、工具请求和回帖前重新核验调用者仓库权限。
 
 ## 配置迁移与凭据
 
-之前的云端 `runtime` 配置已移除。云端现在使用 `connector.workerId/tokenFile或tokenEnv/timeoutMs`。旧版直连配置将校验失败，不能静默沿用。
+之前的云端 `runtime` 配置已移除。云端现在使用 `connector.workerId/tokenFile或tokenEnv/timeoutMs`。旧版直连配置将校验失败，不能静默沿用。v1 任务协议和旧数据库也被拒绝，没有自动迁移。新部署前按[v2 契约](protocol-v2.md)准备新状态库。
 
-内网的 `agent.local.yaml` 配置 `channel`（ECS URL 与连接器token）、`runtime`（本机OpenClaw URL和token）、`stateFile`、轮询/请求时间。OpenClaw Responses必须启用；单次Runtime超时应短于云端领取期限，给工具请求/结果回传留余量。
+内网的 `agent.local.yaml` 配置 `channel`（ECS URL 与连接器token）、`runtime`（显式 type 和对应配置）、`stateFile`、轮询/请求时间。OpenClaw Responses必须启用；单次Runtime超时应短于云端领取期限，给工具请求/结果回传留余量。
 
 每项secret只允许Env/File之一。File相对配置文件目录解析；PEM保留换行，token去首尾空白。Linux容器UID1000，secret文件建议0600 owner1000或0640 group1000，父目录受限。云端管理token不能与connector token复用。Agent数据库含任务和未确认结果，需受保护且持久化。
 
@@ -26,7 +26,7 @@ GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull re
 
 已有Nginx用external，将生成片段加入现有HTTPS server；容器网关须与Channel加入共同 `deployment.network`，不能从网关容器用127.0.0.1访问宿主回环端口。片段使用Docker DNS动态解析，支持Channel重建换IP。
 
-公网允许POST `/webhooks/github`（GitHub HMAC签名）和 `/connector/v1/`（独立Bearer，任务操作再验证lease）。管理 `/tasks/*` 与 `/healthz` 只通过宿主回环/受控私网访问。Caddy采用相同策略。
+公网允许POST `/webhooks/github`（GitHub HMAC签名）和 `/connector/v2/`（独立Bearer，任务操作再验证lease）。管理 `/tasks/*` 与 `/healthz` 只通过宿主回环/受控私网访问。Caddy采用相同策略。
 
 只修改Nginx镜像的templates文件再reload不会重新执行envsubst；需先在隔离配置中展开和 `nginx -t`，再受控发布并reload。不要覆盖其他站点。
 
@@ -34,11 +34,15 @@ GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull re
 
 原生云服务：设置 `CHANNEL_CONFIG` 指向云端YAML，`npm run build && npm start`。host建议127.0.0.1，dataFile为可写持久路径；相对dataFile按进程工作目录解析。
 
+runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md)，不依赖 Gateway token，也不支持自动 Docker 渲染。
+
 原生内网：`npm run channel -- agent run <agent.yaml>`。连接器只出站，不启动HTTP监听。重定向不会转发认证token；认证失败会提示，网络失败按有界退避重试。
 
 生成容器配置会将云服务固定到0.0.0.0:3000及 `/data/channel.db`，Agent固定使用 `/data/agent.db`。它们分别有独立状态卷。Agent生成服务没有ports。Env引用以Compose secret来源使用，不会写成容器environment中的秘密值。
 
-## 升级与回滚
+## v2 内部升级与回滚
+
+以下复用卷步骤仅适用于 schema v2→v2；v1→v2 不支持迁移，必须使用新数据路径/卷并保留旧数据。
 
 生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
@@ -61,7 +65,7 @@ GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull re
 { "confirmedStopped": true, "resolution": "failed" }
 ```
 
-回帖状态unknown时，先在GitHub核对配置bot发布且带 `<!-- github-agent-channel:<task-id> -->` 的评论，再向 `POST /tasks/<id>/resolve-delivery` 提交：
+发布状态 unknown 时，先在GitHub核对配置bot发布且带 `<!-- github-agent-channel:<task-id> -->` 的评论，再向 `POST /tasks/<id>/resolve-delivery` 提交：
 
 ```json
 {
@@ -71,7 +75,7 @@ GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull re
 }
 ```
 
-若决定关闭未成功投递，用 `{"confirmedReconciled":true,"resolution":"failed"}`。这些操作不重跑、不重发。新的执行必须由新的评论触发。
+若决定关闭未成功投递，用 `{"confirmedReconciled":true,"resolution":"failed"}`。PR 发布对账使用同仓库的 /pull/N URL；comment 使用当前 target 对应的评论 URL。这些操作不重跑、不重发。新的执行须来自已启用规则下的新事件。
 
 ## 边界
 

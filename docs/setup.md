@@ -1,10 +1,12 @@
 # OpenClaw 适配器：完整配置与回帖验收
 
-状态：当前已实现适配器的操作教程。GitHub Agent Channel 的产品定位是通用 GitHub 通道；本篇只讲 OpenClaw 的接入，不是所有 Runtime 的协议规范，也不包含尚未实现的代码修改/创建 PR 能力。产品、实现和其他能力状态从[文档索引](README.md)进入。
+状态：当前已实现适配器的操作教程。GitHub Agent Channel 的产品定位是通用 GitHub 通道；本篇只讲 OpenClaw 的接入，不是所有 Runtime 的协议规范，编码与 PR 路径使用[ACP 适配器](acp-setup.md)，不是本 OpenClaw 读取适配器的能力。产品、实现和其他能力状态从[文档索引](README.md)进入。
 
 本篇是使用入口，按顺序完成后应能在绑定仓库评论 `@机器人`，由内网 OpenClaw 分析并回帖。自建 ECS 不是每个使用者都要做的事：已有 Channel 服务时，拿到服务地址和连接器 token 即可；没有服务时，先完成[可选的 ECS 自建部署](ecs-setup.md)，再回到本文。
 
 当前实现是本仓库的独立连接器进程，不是在 OpenClaw 的 channels 列表里填一个 GitHub Webhook URL。连接器只向公网发起 HTTPS 请求；OpenClaw 留在本机或内网。
+
+当前 Channel 仅接受 v2 配置/协议和新状态库；从旧部署切换先读[v2 契约](protocol-v2.md)。
 
 ## 0. 准备资料并确认版本
 
@@ -14,7 +16,7 @@
 
 | 资料                  | 示例与用途                                                                     |
 | --------------------- | ------------------------------------------------------------------------------ |
-| Channel origin        | `https://channel.example.com`；不要带 `/webhooks/github` 或 `/connector/v1`    |
+| Channel origin        | `https://channel.example.com`；不要带 `/webhooks/github` 或 `/connector/v2`    |
 | 连接器 token          | 与 ECS 的 `connector.tokenFile/Env` 指向同一个值；安全传递为文件，不贴入 Issue |
 | 已绑定仓库、bot login | 例如 `example-org/example-repo`、`example-robot[bot]`                          |
 | 执行期限              | 云端 `connector.timeoutMs`，示例300秒；本地Runtime超时180秒，留出回传余量      |
@@ -165,6 +167,7 @@ channel:
   baseUrl: https://channel.example.com
   tokenFile: secrets/connector-token
 runtime:
+  type: openclaw
   baseUrl: http://127.0.0.1:18790
   tokenFile: secrets/openclaw-gateway-token
   agentId: github
@@ -287,12 +290,12 @@ npm run channel -- agent deploy down ./agent-data/.channel-agent
 
 由两端共同核对：
 
-| 观察位置                     | 通过标准                                               |
-| ---------------------------- | ------------------------------------------------------ |
-| GitHub App Recent deliveries | `issue_comment` / `created`，签名存在，接收入队返回202 |
-| Channel后台任务              | `succeeded`，`deliveryStatus=sent`，有commentUrl       |
-| GitHub Issue                 | 由App机器人回复，出现指定标记，内容与实际读取相符      |
-| 重投同一个delivery           | 仍指向同一个任务，没有第二条机器人回复                 |
+| 观察位置                     | 通过标准                                                     |
+| ---------------------------- | ------------------------------------------------------------ |
+| GitHub App Recent deliveries | `issue_comment` / `created`，签名存在，接收入队返回202       |
+| Channel后台任务              | `succeeded`，`deliveryStatus=sent`，有publicationReceipt.url |
+| GitHub Issue                 | 由App机器人回复，出现指定标记，内容与实际读取相符            |
+| 重投同一个delivery           | 仍指向同一个任务，没有第二条机器人回复                       |
 
 管理员从GitHub App的Recent deliveries响应正文取得 `taskId`，然后在ECS源码目录查询任务。以下命令从文件读取管理token，不把它放入命令参数；替换taskId，端口与secret路径按实际部署调整：
 

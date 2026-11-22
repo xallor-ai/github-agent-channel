@@ -8,12 +8,12 @@ import { tmpdir } from "node:os";
 import { Agent } from "../src/agent.js";
 import { AgentStore } from "../src/agent-store.js";
 import type { AgentConfig } from "../src/agent-config.js";
-import type { Task } from "../src/contracts.js";
+import type { Task, RuntimeResult } from "../src/contracts.js";
 
 const task: Task = {
   id: "a0000000-0000-4000-8000-000000000001",
   deliveryId: "d",
-  commentId: 1,
+  source: { event: "issue_comment", action: "created", commentId: 1 },
   bindingId: "b",
   installationId: 1,
   repositoryId: 2,
@@ -21,20 +21,21 @@ const task: Task = {
   repo: "repo",
   actorId: 3,
   actorLogin: "alice",
-  issueNumber: 4,
+  target: { kind: "issue", number: 4 },
   prompt: "read",
   status: "running",
   deliveryStatus: "pending",
-  result: null,
+  outcome: null,
   error: null,
   createdAt: 1,
-  responseId: null,
-  commentUrl: null,
+  runtime: null,
+  publicationReceipt: null,
 };
 function config(baseUrl: string): AgentConfig {
   return {
     channel: { baseUrl, tokenEnv: "CLOUD" },
     runtime: {
+      type: "openclaw",
       baseUrl: "http://127.0.0.1:18789",
       tokenEnv: "LOCAL",
       agentId: "github",
@@ -52,6 +53,7 @@ async function fixture(
 ) {
   const dir = mkdtempSync(join(tmpdir(), "agent-http-"));
   const server = createServer(async (req, res) => {
+    assert.ok(req.url?.startsWith("/connector/v2/"));
     assert.equal(req.headers.authorization, "Bearer dedicated-cloud-token");
     let body = "";
     for await (const chunk of req) body += chunk;
@@ -78,6 +80,11 @@ async function fixture(
     },
   };
 }
+const outcome = (text: string): RuntimeResult => ({
+  text,
+  artifacts: [],
+  publication: { kind: "comment" },
+});
 const assignment = () => ({
   task,
   leaseToken: "lease-value",
@@ -114,7 +121,7 @@ test("lost result acknowledgement retries identical payload and never reruns mod
       run: async (_task, invoke) => {
         models++;
         assert.deepEqual(await invoke("read_issue", {}), { title: "source" });
-        return { text: "summary" };
+        return outcome("summary");
       },
     },
     "dedicated-cloud-token",
@@ -125,6 +132,11 @@ test("lost result acknowledgement retries identical payload and never reruns mod
   await agent.once();
   assert.equal(models, 1);
   assert.deepEqual(received[0], received[1]);
+  assert.deepEqual(received[0], {
+    leaseToken: "lease-value",
+    status: "succeeded",
+    outcome: outcome("summary"),
+  });
   await agent.once();
   assert.equal(models, 1);
   assert.equal(claims, 2);
@@ -149,7 +161,7 @@ test("reboot after execution began reports unknown without running model", async
     {
       run: async () => {
         modelCalls++;
-        return { text: "bad" };
+        return outcome("bad");
       },
     },
     "dedicated-cloud-token",
@@ -211,7 +223,7 @@ test("lease conflict closes local result and does not execute again", async (t) 
     {
       run: async () => {
         runs++;
-        return { text: "answer" };
+        return outcome("answer");
       },
     },
     "dedicated-cloud-token",
@@ -235,7 +247,7 @@ test("invalid acknowledgement keeps the exact result pending", async (t) => {
     {
       run: async () => {
         calls++;
-        return { text: "result" };
+        return outcome("result");
       },
     },
     "dedicated-cloud-token",
@@ -266,7 +278,7 @@ test("aborting execution persists unknown and restart only reports it", async (t
       run: async () => {
         calls++;
         controller.abort();
-        return { text: "uncertain" };
+        return outcome("uncertain");
       },
     },
     "dedicated-cloud-token",
@@ -281,7 +293,7 @@ test("aborting execution persists unknown and restart only reports it", async (t
     {
       run: async () => {
         calls++;
-        return { text: "bad" };
+        return outcome("bad");
       },
     },
     "dedicated-cloud-token",
@@ -301,7 +313,7 @@ test("lost claim response never calls the model", async (t) => {
     {
       run: async () => {
         calls++;
-        return { text: "bad" };
+        return outcome("bad");
       },
     },
     "dedicated-cloud-token",
@@ -329,7 +341,7 @@ test("expired assignment reports unknown without starting a model", async (t) =>
     {
       run: async () => {
         calls++;
-        return { text: "bad" };
+        return outcome("bad");
       },
     },
     "dedicated-cloud-token",
@@ -337,4 +349,55 @@ test("expired assignment reports unknown without starting a model", async (t) =>
   await agent.once();
   assert.equal(calls, 0);
   assert.equal(reported.status, "unknown");
+});
+
+test("assignments with missing canonical fields or obsolete aliases are rejected before runtime", async (t) => {
+  for (const invalid of [
+    {
+      ...task,
+      target: undefined,
+      source: undefined,
+      issueNumber: 4,
+      commentId: 1,
+    },
+    { ...task, result: null, commentUrl: null },
+  ]) {
+    let calls = 0;
+    const f = await fixture(t, (_path, _body, res) =>
+      respond(res, { ...assignment(), task: invalid }),
+    );
+    const journal = f.store();
+    const agent = new Agent(
+      config(f.base),
+      journal,
+      {
+        run: async () => {
+          calls++;
+          return outcome("never");
+        },
+      },
+      "dedicated-cloud-token",
+    );
+    await assert.rejects(agent.once(), /assignment is invalid/);
+    assert.equal(calls, 0);
+    assert.equal(journal.pending(), undefined);
+  }
+});
+test("text-only runtime results are rejected without fabricating publication or artifacts", async (t) => {
+  let reported: any;
+  const f = await fixture(t, (path, body, res) => {
+    if (path.endsWith("/claim")) respond(res, assignment());
+    else {
+      reported = body;
+      respond(res, { accepted: true, duplicate: false });
+    }
+  });
+  const agent = new Agent(
+    config(f.base),
+    f.store(),
+    { run: async () => ({ text: "obsolete shape" }) as RuntimeResult },
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.deepEqual(reported, { leaseToken: "lease-value", status: "failed" });
 });

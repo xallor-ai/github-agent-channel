@@ -81,7 +81,10 @@ async function fixture(t: test.TestContext) {
     readFile: async () => {
       throw new Error("Unexpected read_file");
     },
-    publish: async (task, text) => {
+    publishPullRequest: async () => {
+      throw Error("Unexpected PR publication");
+    },
+    publishComment: async (task, text) => {
       publications.push({ task, text });
       return {
         id: 7,
@@ -186,6 +189,7 @@ async function fixture(t: test.TestContext) {
   const agentConfig: AgentConfig = {
     channel: { baseUrl: cloudUrl, tokenEnv: "CHANNEL_TOKEN" },
     runtime: {
+      type: "openclaw",
       baseUrl: modelUrl,
       tokenEnv: "LOCAL_TOKEN",
       agentId: "github",
@@ -273,7 +277,19 @@ test("signed webhook travels through outbound Agent and local Responses tools to
   assert.equal(f.modelRequests.length, 2);
   assert.equal(f.reads.length, 1);
   assert.equal(f.store.get(receipt.taskId)?.status, "succeeded");
-  assert.equal(f.store.get(receipt.taskId)?.responseId, "response-done");
+  assert.deepEqual(f.store.get(receipt.taskId)?.target, {
+    kind: "issue",
+    number: 3,
+  });
+  assert.deepEqual(f.store.get(receipt.taskId)?.source, {
+    event: "issue_comment",
+    action: "created",
+    commentId: 11,
+  });
+  assert.equal(
+    f.store.get(receipt.taskId)?.outcome?.responseId,
+    "response-done",
+  );
   assert.equal(f.publications.length, 0);
   assert.equal(f.journal.pending(), undefined);
   assert.equal(await f.publisher.tick(), true);
@@ -282,10 +298,61 @@ test("signed webhook travels through outbound Agent and local Responses tools to
   assert.equal(f.publications[0].text, "Fixture summary");
   assert.equal(f.publications[0].task.id, receipt.taskId);
   assert.equal(f.store.get(receipt.taskId)?.deliveryStatus, "sent");
+  assert.deepEqual(f.store.get(receipt.taskId)?.publicationReceipt, {
+    kind: "comment",
+    id: 7,
+    url: "https://github.com/fixture-org/fixture-repo/issues/3#issuecomment-7",
+  });
   assert.equal((await f.webhook()).status, 202);
   assert.equal(await f.agent.once(), false);
   assert.equal(f.modelRequests.length, 2);
   assert.equal(f.publications.length, 1);
+});
+test("connector v2 rejects flat results and accepts only explicit structured outcomes", async (t) => {
+  const f = await fixture(t);
+  const receipt = (await (await f.webhook()).json()) as { taskId: string };
+  const post = (path: string, body: unknown) =>
+    fetch(f.cloudUrl + path, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + cloudToken,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await post("/connector/v1/claim", {})).status, 404);
+  const claimed = await post("/connector/v2/claim", {});
+  assert.equal(claimed.status, 200);
+  const assignment = (await claimed.json()) as { leaseToken: string };
+  const path = "/connector/v2/tasks/" + receipt.taskId + "/result";
+  assert.equal(
+    (
+      await post(path, {
+        leaseToken: assignment.leaseToken,
+        status: "succeeded",
+        text: "flat",
+        responseId: "old",
+      })
+    ).status,
+    400,
+  );
+  assert.equal(f.store.get(receipt.taskId)?.status, "running");
+  const outcome = {
+    text: "structured",
+    artifacts: [],
+    publication: { kind: "comment" },
+  };
+  assert.equal(
+    (
+      await post(path, {
+        leaseToken: assignment.leaseToken,
+        status: "succeeded",
+        outcome,
+      })
+    ).status,
+    200,
+  );
+  assert.deepEqual(f.store.get(receipt.taskId)?.outcome, outcome);
 });
 
 test("bad signature and admin Bearer cannot trigger connector execution", async (t) => {
@@ -293,7 +360,7 @@ test("bad signature and admin Bearer cannot trigger connector execution", async 
   assert.equal((await f.webhook(false)).status, 400);
   const id = randomUUID();
   for (const path of ["claim", `tasks/${id}/tool`, `tasks/${id}/result`]) {
-    const result = await fetch(f.cloudUrl + "/connector/v1/" + path, {
+    const result = await fetch(f.cloudUrl + "/connector/v2/" + path, {
       method: "POST",
       headers: {
         authorization: "Bearer " + adminToken,
@@ -322,7 +389,7 @@ test("caller denial skips task without stopping agent from executing the next au
   const next = f.store.accept({
     ...rejected,
     deliveryId: randomUUID(),
-    commentId: 12,
+    source: { ...rejected.source, commentId: 12 },
   }).task;
   assert.equal(await f.agent.once(), true);
   assert.equal(f.modelRequests.length, 2);

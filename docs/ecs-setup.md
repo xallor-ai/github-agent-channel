@@ -4,6 +4,8 @@
 
 已有管理员提供的Channel地址和连接器token时，无需执行本篇，直接回到[完整接入主线](setup.md)。本篇面向要自己运行服务端的人：ECS保存GitHub凭据、验签、任务和回帖，内网连接器主动连接它；ECS不配置内网OpenClaw地址或Gateway token。
 
+当前服务使用 v2 协议和 schema；已有旧部署必须使用新状态库/数据卷，流程见[v2 契约](protocol-v2.md)。要启用 PR 发布，还需按该文配置 writePolicy 与 App Contents 写权限。
+
 ## 1. 前置条件与 GitHub App
 
 准备一台可以访问GitHub API的Linux主机、Node.js 24、Docker Engine和Compose插件2.20+，以及指向该主机的域名。可按[Docker官方安装说明](https://docs.docker.com/engine/install/)准备容器环境，然后确认：
@@ -126,7 +128,7 @@ curl --fail http://127.0.0.1:18896/healthz
 预期health返回 `status:ok`，只代表进程存活。审核 `.channel/nginx-webhook.conf` 并加入已有HTTPS server，保留原站点配置：
 
 - `POST /webhooks/github`：GitHub签名事件。
-- `POST /connector/v1/…`：内网Agent的认证任务通道。
+- `POST /connector/v2/…`：内网Agent的认证任务通道。
 - 不把管理 `/tasks/*` 和健康 `/healthz` 反代到公网。
 
 先备份配置，执行 `nginx -t`，通过后再reload。官方Nginx容器的templates文件只在启动流程中做envsubst；修改模板后直接reload不会重新展开，须按现有部署方式生成运行配置并验证。容器网关使用Docker DNS动态解析上游，以适应Channel重建换IP。
@@ -145,7 +147,7 @@ curl --fail http://127.0.0.1:18896/healthz
 # 无签名应为400，说明请求已到达Channel而不是旧站点的404页面。
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://channel.example.com/webhooks/github -H 'Content-Type: application/json' -d '{}'
 # 无connector认证应为401。
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://channel.example.com/connector/v1/claim -H 'Content-Type: application/json' -d '{}'
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://channel.example.com/connector/v2/claim -H 'Content-Type: application/json' -d '{}'
 ```
 
 在GitHub App配置 `https://channel.example.com/webhooks/github`，Webhook Secret与前面文件一致，保持SSL verification开启，保存并确认Issue comment订阅。不要以API是否回显secret字段判断是否设置成功；检查真实delivery是否携带签名、接收端是否接受。
@@ -156,6 +158,6 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://channel.example.com/co
 
 让内网连接器启动后，用有仓库写权限的账号新发一条 `@your-app` 评论。核对GitHub delivery202、后台任务succeeded/sent和机器人回帖；同delivery重投不应产生第二条回复。仅200/204或health正常都不构成闭环成功。
 
-`deploy down`保留数据卷；配置变更渲染新bundle，保留同一projectName以复用数据库。等待任务结束，先停Agent再停Cloud并备份；启动时先Cloud后Agent。同名项目替换后不要再对旧bundle执行down。未知任务须人工对账，不能通过删库或重启盲目重试。完整命令和数据恢复见[运维文档](operations.md)。
+`deploy down`保留数据卷；v2 内部配置变更渲染新bundle，保留同一projectName以复用 v2 数据库。v1→v2 必须换新状态库/卷，不适用此复用步骤。等待任务结束，先停Agent再停Cloud并备份；启动时先Cloud后Agent。同名项目替换后不要再对旧bundle执行down。未知任务须人工对账，不能通过删库或重启盲目重试。完整命令和数据恢复见[运维文档](operations.md)。
 
 可选的 `deployment.image` 允许使用你已构建并分发的镜像；项目当前没有承诺一个公共可拉取的发布镜像，不要照抄不存在的registry地址。目标机没有Node时，可用该镜像运行render：把配置与输出目录按同一绝对路径挂入一次性容器，随后在宿主运行Docker Compose。默认源码构建路径是本篇已给出的流程。

@@ -5,6 +5,7 @@ import { TaskStore } from "../dist/store.js";
 import { DeliveryWorker } from "../dist/worker.js";
 import { PullCoordinator } from "../dist/pull.js";
 import { createChannelServer } from "../dist/server.js";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 const path = process.env.CHANNEL_CONFIG;
 const config = loadConfig(path);
@@ -21,7 +22,8 @@ config.bindings = [
 ];
 const store = new TaskStore(config.dataFile);
 store.recover();
-const db = new DatabaseSync(config.dataFile);
+// Synthetic observation tables live outside the production task database.
+const db = new DatabaseSync(join(dirname(config.dataFile), "smoke.db"));
 db.exec(
   "CREATE TABLE IF NOT EXISTS smoke_publications(taskId TEXT, text TEXT)",
 );
@@ -33,7 +35,7 @@ const github = {
   },
   readIssue: async () => ({ title: "synthetic issue", body: "fixture" }),
   readFile: async () => ({ content: "fixture" }),
-  publish: async (task, text) => {
+  publishComment: async (task, text) => {
     db.prepare("INSERT INTO smoke_publications VALUES (?, ?)").run(
       task.id,
       text,
@@ -59,7 +61,7 @@ const server = createChannelServer(
   coordinator,
 );
 server.on("request", (req, res) => {
-  if (req.url === "/connector/v1/claim")
+  if (req.url === "/connector/v2/claim")
     res.once("finish", () => {
       if (
         req.headers.authorization === "Bearer " + secrets.connectorToken &&

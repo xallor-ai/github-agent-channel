@@ -16,8 +16,18 @@ export class DeliveryWorker {
       if (!delivery) return false;
       try {
         await this.github.authorize(delivery);
-        const result = await this.github.publish(delivery, delivery.result!);
-        this.store.markDelivery(delivery.id, "sent", result.url);
+        if (!delivery.outcome) throw Error("Missing publication outcome");
+        const publication = delivery.outcome.publication;
+        if (publication.kind === "none")
+          throw new AccessDenied("No publication requested");
+        const result =
+          publication.kind === "pull_request"
+            ? await this.github.publishPullRequest(delivery, publication)
+            : await this.github.publishComment(delivery, delivery.outcome.text);
+        this.store.markDelivery(delivery.id, "sent", {
+          kind: publication.kind,
+          ...result,
+        });
       } catch (error) {
         this.store.markDelivery(
           delivery.id,

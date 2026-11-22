@@ -13,7 +13,7 @@ import {
 } from "../src/contracts.js";
 const input: NewTask = {
   deliveryId: "d1",
-  commentId: 1,
+  source: { event: "issue_comment", action: "created", commentId: 1 },
   bindingId: "b",
   installationId: 1,
   repositoryId: 2,
@@ -21,7 +21,7 @@ const input: NewTask = {
   repo: "repo",
   actorId: 3,
   actorLogin: "user",
-  issueNumber: 4,
+  target: { kind: "issue", number: 4 },
   prompt: "secret issue prompt",
 };
 async function fixture(t: test.TestContext, timeoutMs = 60000) {
@@ -40,7 +40,10 @@ async function fixture(t: test.TestContext, timeoutMs = 60000) {
       return { title: task.owner + "/" + task.repo, untrusted: true };
     },
     readFile: async () => ({ content: "file" }),
-    publish: async () => {
+    publishPullRequest: async () => {
+      throw new Error("Unexpected PR publication");
+    },
+    publishComment: async () => {
       publications++;
       return {
         id: 1,
@@ -82,7 +85,7 @@ async function fixture(t: test.TestContext, timeoutMs = 60000) {
     store.close();
   });
   const post = (path: string, body: unknown, token = "connector-token") =>
-    fetch(base + "/connector/v1/" + path, {
+    fetch(base + "/connector/v2/" + path, {
       method: "POST",
       headers: {
         authorization: "Bearer " + token,
@@ -117,7 +120,7 @@ test("connector auth precedes claim and caller auth precedes prompt disclosure",
   const next = f.store.accept({
     ...input,
     deliveryId: "d2",
-    commentId: 2,
+    source: { ...input.source, commentId: 2 },
   }).task;
   const response = await f.post("claim", {});
   assert.equal(response.status, 200);
@@ -164,13 +167,21 @@ test("claim one assignment, authorize scoped tools, persist idempotent result an
   const body = {
     leaseToken: lease.leaseToken,
     status: "succeeded",
-    text: "answer",
+    outcome: {
+      text: "answer",
+      artifacts: [],
+      publication: { kind: "comment" },
+    },
   };
   assert.equal((await f.post(`tasks/${task.id}/result`, body)).status, 200);
   assert.equal((await f.post(`tasks/${task.id}/result`, body)).status, 200);
   assert.equal(
-    (await f.post(`tasks/${task.id}/result`, { ...body, text: "other" }))
-      .status,
+    (
+      await f.post(`tasks/${task.id}/result`, {
+        ...body,
+        outcome: { ...body.outcome, text: "other" },
+      })
+    ).status,
     409,
   );
   assert.equal(
@@ -209,7 +220,11 @@ test("expiry fences tools and late result without automatic reissue", async (t) 
       await f.post(`tasks/${task.id}/result`, {
         leaseToken: lease.leaseToken,
         status: "succeeded",
-        text: "late",
+        outcome: {
+          text: "late",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
       })
     ).status,
     409,
@@ -228,7 +243,11 @@ test("strict and bounded bodies never invoke tools or accept a malformed result"
       await f.post(`tasks/${task.id}/result`, {
         leaseToken: lease.leaseToken,
         status: "succeeded",
-        text: "x".repeat(18001),
+        outcome: {
+          text: "x".repeat(18001),
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
       })
     ).status,
     400,
@@ -238,7 +257,11 @@ test("strict and bounded bodies never invoke tools or accept a malformed result"
       await f.post(`tasks/${task.id}/result`, {
         leaseToken: lease.leaseToken,
         status: "failed",
-        text: "ignored",
+        outcome: {
+          text: "ignored",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
       })
     ).status,
     400,
@@ -262,7 +285,11 @@ test("returned result cannot publish after actor loses permission", async (t) =>
   const body = {
     leaseToken: lease.leaseToken,
     status: "succeeded",
-    text: "result before revoke",
+    outcome: {
+      text: "result before revoke",
+      artifacts: [],
+      publication: { kind: "comment" },
+    },
   };
   assert.equal((await f.post(`tasks/${task.id}/result`, body)).status, 200);
   f.setAuthorized(false);
@@ -293,7 +320,11 @@ test("lease token scopes every tool and result; canonical retry ignores JSON key
       await f.post(`tasks/${task.id}/result`, {
         leaseToken: wrong,
         status: "succeeded",
-        text: "wrong",
+        outcome: {
+          text: "wrong",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
       })
     ).status,
     409,
@@ -302,13 +333,21 @@ test("lease token scopes every tool and result; canonical retry ignores JSON key
   const first = await f.post(`tasks/${task.id}/result`, {
     leaseToken: lease.leaseToken,
     status: "succeeded",
-    text: "correct",
-    responseId: "r",
+    outcome: {
+      text: "correct",
+      responseId: "r",
+      artifacts: [],
+      publication: { kind: "comment" },
+    },
   });
   assert.deepEqual(await first.json(), { accepted: true, duplicate: false });
   const second = await f.post(`tasks/${task.id}/result`, {
-    responseId: "r",
-    text: "correct",
+    outcome: {
+      publication: { kind: "comment" },
+      artifacts: [],
+      responseId: "r",
+      text: "correct",
+    },
     status: "succeeded",
     leaseToken: lease.leaseToken,
   });
@@ -338,7 +377,11 @@ test("storage failure returns retryable 503 and same result is persisted once on
   const payload = {
     leaseToken: lease.leaseToken,
     status: "succeeded",
-    text: "retained result",
+    outcome: {
+      text: "retained result",
+      artifacts: [],
+      publication: { kind: "comment" },
+    },
   };
   const first = await f.post(`tasks/${task.id}/result`, payload);
   assert.equal(first.status, 503);

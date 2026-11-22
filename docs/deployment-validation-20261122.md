@@ -2,7 +2,7 @@
 
 > 状态：旧部署里程碑的历史证据，不是当前操作教程。下文“Channel 到 OpenClaw 可达”属于旧直连假设；当前连接方向为内网主动访问 Channel。后续验收见[主动连接记录](outbound-validation-20261122.md)。
 
-> 当前网络方向已修正为内网主动连接ECS；云端直连Runtime不再支持。部署与协议以 [主动连接计划](outbound-connector-plan.md) 和 [运维说明](operations.md) 为准。本文早期设计/验收保留作历史记录。
+> 当前网络方向已修正为内网主动连接ECS；云端直连Runtime不再支持。部署与协议以 [主动连接计划](https://github.com/xallor-ai/github-agent-channel/blob/6c51ead/docs/outbound-connector-plan.md) 和 [运维说明](operations.md) 为准。本文早期设计/验收保留作历史记录。
 
 本次交付是仓库的配置与部署产品化：一份业务 YAML、文件/环境 secret 引用、CLI、可选 Caddy、现有 Nginx 路由片段、可复现 Docker 冒烟与 CI。它不代表用户的生产 GitHub App 已上线。
 

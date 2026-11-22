@@ -1,10 +1,11 @@
 import {
   AmbiguousExecution,
-  type DirectRuntimeConfig,
+  type OpenClawRuntimeConfig,
   type RuntimeConnector,
   type RuntimeResult,
   type Task,
   type ToolInvoker,
+  type RuntimeEvent,
 } from "./contracts.js";
 
 const tools = [
@@ -30,8 +31,15 @@ const tools = [
 ];
 
 export class OpenClawConnector implements RuntimeConnector {
+  readonly capabilities = {
+    provider: "openclaw",
+    readTools: true,
+    workspace: false,
+    cancel: false,
+    resume: false,
+  };
   constructor(
-    private config: DirectRuntimeConfig,
+    private config: OpenClawRuntimeConfig,
     private token: string,
     private fetcher: typeof fetch = fetch,
   ) {}
@@ -40,9 +48,15 @@ export class OpenClawConnector implements RuntimeConnector {
     task: Task,
     invoke: ToolInvoker,
     signal?: AbortSignal,
+    onEvent?: (event: RuntimeEvent) => Promise<void>,
   ): Promise<RuntimeResult> {
     const deadline = AbortSignal.timeout(this.config.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    await onEvent?.({
+      kind: "started",
+      provider: "openclaw",
+      runId: `github-channel:${task.id}`,
+    });
     let input: unknown[] = [
       { type: "message", role: "user", content: task.prompt },
     ];
@@ -168,6 +182,10 @@ export class OpenClawConnector implements RuntimeConnector {
         throw new Error("Runtime final answer exceeds comment limit");
       return {
         text,
+        artifacts: [],
+        publication: {
+          kind: task.target.kind === "repository" ? "none" : "comment",
+        },
         responseId: typeof payload.id === "string" ? payload.id : undefined,
       };
     }

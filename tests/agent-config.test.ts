@@ -13,6 +13,7 @@ test("agent config accepts file refs relative to config and rejects public HTTP 
   const cfg: any = {
     channel: { baseUrl: "https://channel.example.com", tokenFile: "token" },
     runtime: {
+      type: "openclaw",
       baseUrl: "http://127.0.0.1:18789",
       tokenFile: "token",
       agentId: "github",

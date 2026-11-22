@@ -313,7 +313,7 @@ try {
         "node",
         "--input-type=module",
         "-e",
-        "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync('/data/channel.db'); db.exec(\"CREATE TABLE smoke_persistence(value TEXT); INSERT INTO smoke_persistence VALUES ('retained');\"); db.close();",
+        "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync('/data/smoke.db'); db.exec(\"CREATE TABLE smoke_persistence(value TEXT); INSERT INTO smoke_persistence VALUES ('retained');\"); db.close();",
       ],
       true,
     );
@@ -426,7 +426,7 @@ import { AgentStore } from ${JSON.stringify(storeModule)};
 const store = new AgentStore(${JSON.stringify(join(root, "outbound-agent.db"))});
 const config = {
   channel: {baseUrl:${JSON.stringify("https://localhost:" + tlsPort)},tokenFile:'unused'},
-  runtime: {baseUrl:'http://127.0.0.1:9',tokenFile:'unused',agentId:'github',timeoutMs:10000,maxToolRounds:2},
+  runtime: {type:'openclaw',baseUrl:'http://127.0.0.1:9',tokenFile:'unused',agentId:'github',timeoutMs:10000,maxToolRounds:2},
   stateFile:'unused',pollIntervalMs:100,requestTimeoutMs:10000,
 };
 let modelCalls=0;
@@ -434,7 +434,7 @@ const runtime = {run: async (_task,invoke)=>{
   modelCalls++;
   const issue=await invoke('read_issue',{});
   assert.equal(issue.title,'synthetic issue');
-  return {text:'synthetic reply'};
+  return {text:'synthetic reply',artifacts:[],publication:{kind:'comment'}};
 }};
 try {
   const agent=new Agent(config,store,runtime,readFileSync(${JSON.stringify(join(root, "connector"))},'utf8'));
@@ -469,6 +469,22 @@ try {
       }
       assert.equal(task.status, "succeeded");
       assert.equal(task.deliveryStatus, "sent");
+      assert.deepEqual(task.target, { kind: "issue", number: 3 });
+      assert.deepEqual(task.source, {
+        event: "issue_comment",
+        action: "created",
+        commentId: 9,
+      });
+      assert.deepEqual(task.outcome, {
+        text: "synthetic reply",
+        artifacts: [],
+        publication: { kind: "comment" },
+      });
+      assert.deepEqual(task.publicationReceipt, {
+        kind: "comment",
+        id: 7,
+        url: "https://github.com/fixture/fixture/issues/3#issuecomment-7",
+      });
       const replay = await tlsRequest(
         tlsPort,
         ca,
@@ -493,7 +509,7 @@ try {
           "node",
           "--input-type=module",
           "-e",
-          "import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync('/data/channel.db');console.log(db.prepare('SELECT count(*) AS n FROM smoke_publications').get().n);db.close();",
+          "import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync('/data/smoke.db');console.log(db.prepare('SELECT count(*) AS n FROM smoke_publications').get().n);db.close();",
         ],
         true,
       );
@@ -512,6 +528,7 @@ try {
       const agentConfig = {
         channel: { baseUrl: "https://channel-edge", tokenFile: "connector" },
         runtime: {
+          type: "openclaw",
           baseUrl: "http://127.0.0.1:9",
           tokenFile: "connector",
           agentId: "github",
@@ -549,6 +566,31 @@ try {
       projects.push(agentTestCompose);
       compose(agentTestCompose, ["config", "-q"]);
       const crashedTask = randomUUID();
+      const crashAssignment = {
+        task: {
+          id: crashedTask,
+          deliveryId: randomUUID(),
+          bindingId: "synthetic",
+          installationId: 1,
+          repositoryId: 2,
+          owner: "fixture",
+          repo: "fixture",
+          actorId: 5,
+          actorLogin: "tester",
+          prompt: "synthetic crashed task",
+          target: { kind: "issue", number: 3 },
+          source: { event: "issue_comment", action: "created", commentId: 10 },
+          status: "running",
+          deliveryStatus: "pending",
+          createdAt: Date.now(),
+          error: null,
+          outcome: null,
+          runtime: null,
+          publicationReceipt: null,
+        },
+        leaseToken: "0".repeat(64),
+        expiresAt: Date.now() + 60000,
+      };
       compose(
         agentTestCompose,
         [
@@ -559,11 +601,9 @@ try {
           "node",
           "--input-type=module",
           "-e",
-          "import {AgentStore} from './dist/agent-store.js';const s=new AgentStore('/data/agent.db');s.begin({task:{id:'" +
-            crashedTask +
-            "'},leaseToken:'" +
-            "0".repeat(64) +
-            "',expiresAt:Date.now()+60000});process.exit(0);",
+          "import {AgentStore} from './dist/agent-store.js';const s=new AgentStore('/data/agent.db');s.begin(" +
+            JSON.stringify(crashAssignment) +
+            ");process.exit(0);",
         ],
         true,
       );
@@ -618,7 +658,7 @@ try {
               "node",
               "--input-type=module",
               "-e",
-              "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/channel.db');console.log(d.prepare('SELECT count(*) AS n FROM smoke_claims').get().n);d.close();",
+              "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/smoke.db');console.log(d.prepare('SELECT count(*) AS n FROM smoke_claims').get().n);d.close();",
             ],
             true,
           ),
@@ -761,7 +801,7 @@ try {
         "node",
         "--input-type=module",
         "-e",
-        "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync('/data/channel.db'); console.log(db.prepare('SELECT value FROM smoke_persistence').get().value); db.close();",
+        "import {DatabaseSync} from 'node:sqlite'; const db=new DatabaseSync('/data/smoke.db'); console.log(db.prepare('SELECT value FROM smoke_persistence').get().value); db.close();",
       ],
       true,
     );

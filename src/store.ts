@@ -2,13 +2,21 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { NewTask, Task, TaskState, DeliveryState } from "./contracts.js";
+import type {
+  NewTask,
+  Task,
+  DeliveryState,
+  PublicationReceipt,
+  RuntimeResult,
+  RuntimeEvent,
+} from "./contracts.js";
 
-export interface AssignmentResult {
-  status: "succeeded" | "failed" | "unknown";
-  text?: string;
-  responseId?: string;
-}
+import { initializeTaskSchema } from "./store-schema.js";
+import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
+
+export type AssignmentResult =
+  | { status: "succeeded"; outcome: RuntimeResult }
+  | { status: "failed" | "unknown" };
 
 /** Domain rejection only; infrastructure errors must remain retryable. */
 export class AssignmentConflict extends Error {}
@@ -19,25 +27,12 @@ export class TaskStore {
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.db
-      .exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY, deliveryId TEXT NOT NULL UNIQUE, commentId INTEGER NOT NULL,
-        bindingId TEXT NOT NULL, installationId INTEGER NOT NULL, repositoryId INTEGER NOT NULL,
-        owner TEXT NOT NULL, repo TEXT NOT NULL, actorId INTEGER NOT NULL, actorLogin TEXT NOT NULL,
-        issueNumber INTEGER NOT NULL, prompt TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','rejected','unknown')),
-        deliveryStatus TEXT NOT NULL CHECK(deliveryStatus IN ('pending','sending','sent','failed','unknown')),
-        result TEXT, error TEXT, createdAt INTEGER NOT NULL, responseId TEXT, commentUrl TEXT,
-        UNIQUE(installationId, repositoryId, commentId));
-      CREATE INDEX IF NOT EXISTS task_queue ON tasks(status,createdAt);
-      CREATE INDEX IF NOT EXISTS task_binding ON tasks(bindingId,status);
-      CREATE TABLE IF NOT EXISTS deliveries (deliveryId TEXT PRIMARY KEY, taskId TEXT NOT NULL REFERENCES tasks(id));
-      CREATE TABLE IF NOT EXISTS assignments (
-        taskId TEXT PRIMARY KEY REFERENCES tasks(id), workerId TEXT NOT NULL,
-        leaseHash TEXT NOT NULL, expiresAt INTEGER NOT NULL, resultDigest TEXT
-      );
-      CREATE INDEX IF NOT EXISTS assignment_worker ON assignments(workerId);`);
+    try {
+      initializeTaskSchema(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
   private transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -52,43 +47,57 @@ export class TaskStore {
   }
   get(id: string): Task | undefined {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id=?").get(id);
-    return row ? ({ ...row } as unknown as Task) : undefined;
+    if (!row) return undefined;
+    const { eventKey: _eventKey, ...data } = row;
+    return {
+      ...data,
+      target: JSON.parse(String(row.target)),
+      source: JSON.parse(String(row.source)),
+      outcome: row.outcome === null ? null : JSON.parse(String(row.outcome)),
+      runtime: row.runtime === null ? null : JSON.parse(String(row.runtime)),
+      publicationReceipt:
+        row.publicationReceipt === null
+          ? null
+          : JSON.parse(String(row.publicationReceipt)),
+    } as unknown as Task;
   }
   accept(input: NewTask): { task: Task; duplicate: boolean } {
     return this.transaction(() => {
+      const eventKey =
+        input.source.event === "issue_comment" &&
+        input.source.commentId !== undefined
+          ? JSON.stringify([
+              "comment",
+              input.installationId,
+              input.repositoryId,
+              input.source.commentId,
+            ])
+          : JSON.stringify(["delivery", input.deliveryId]);
       const delivery = this.db
         .prepare("SELECT taskId FROM deliveries WHERE deliveryId=?")
         .get(input.deliveryId);
       const existing = delivery
-        ? this.get(delivery.taskId as string)
-        : (this.db
-            .prepare(
-              "SELECT * FROM tasks WHERE deliveryId=? OR (installationId=? AND repositoryId=? AND commentId=?) ORDER BY CASE WHEN deliveryId=? THEN 0 ELSE 1 END LIMIT 1",
-            )
-            .get(
-              input.deliveryId,
-              input.installationId,
-              input.repositoryId,
-              input.commentId,
-              input.deliveryId,
-            ) as unknown as Task | undefined);
+        ? this.get(String(delivery.taskId))
+        : this.db
+            .prepare("SELECT id FROM tasks WHERE eventKey=?")
+            .get(eventKey);
       if (existing) {
         this.db
           .prepare(
-            "INSERT OR IGNORE INTO deliveries(deliveryId,taskId) VALUES (?,?)",
+            "INSERT OR IGNORE INTO deliveries(deliveryId,taskId) VALUES(?,?)",
           )
           .run(input.deliveryId, existing.id);
-        return { task: { ...existing }, duplicate: true };
+        return { task: this.get(String(existing.id))!, duplicate: true };
       }
       const id = randomUUID();
       this.db
         .prepare(
-          `INSERT INTO tasks (id, deliveryId, commentId, bindingId, installationId, repositoryId, owner, repo, actorId, actorLogin, issueNumber, prompt, status, deliveryStatus, createdAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'queued','pending',?)`,
+          `INSERT INTO tasks(id,deliveryId,eventKey,bindingId,installationId,repositoryId,owner,repo,actorId,actorLogin,prompt,status,deliveryStatus,createdAt,target,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued','pending',?,?,?)`,
         )
         .run(
           id,
           input.deliveryId,
-          input.commentId,
+          eventKey,
           input.bindingId,
           input.installationId,
           input.repositoryId,
@@ -96,33 +105,28 @@ export class TaskStore {
           input.repo,
           input.actorId,
           input.actorLogin,
-          input.issueNumber,
           input.prompt,
           Date.now(),
+          JSON.stringify(input.target),
+          JSON.stringify(input.source),
         );
       this.db
-        .prepare("INSERT INTO deliveries(deliveryId,taskId) VALUES (?,?)")
+        .prepare("INSERT INTO deliveries(deliveryId,taskId) VALUES(?,?)")
         .run(input.deliveryId, id);
       return { task: this.get(id)!, duplicate: false };
     });
   }
-  claim(): Task | undefined {
-    return this.transaction(() => {
-      const row = this.db
-        .prepare(
-          `SELECT id FROM tasks q WHERE q.status='queued' AND NOT EXISTS (
-        SELECT 1 FROM tasks busy WHERE busy.bindingId=q.bindingId AND (
-          busy.status IN ('running','unknown') OR
-          (busy.status='succeeded' AND busy.deliveryStatus IN ('pending','sending','unknown'))
-        )) ORDER BY q.createdAt,q.rowid LIMIT 1`,
-        )
-        .get();
-      if (!row) return undefined;
-      this.db
-        .prepare("UPDATE tasks SET status='running' WHERE id=?")
-        .run(row.id!);
-      return this.get(row.id as string);
-    });
+  recordRuntime(id: string, event: RuntimeEvent): void {
+    const task = this.get(id);
+    if (
+      !task ||
+      task.status !== "running" ||
+      (task.runtime && JSON.stringify(task.runtime) !== JSON.stringify(event))
+    )
+      throw new AssignmentConflict("Runtime handle conflicts");
+    this.db
+      .prepare("UPDATE tasks SET runtime=? WHERE id=? AND status='running'")
+      .run(JSON.stringify(event), id);
   }
   expireAssignments(now = Date.now()): void {
     this.db
@@ -189,7 +193,7 @@ export class TaskStore {
       WHERE t.id=? AND a.workerId=? AND a.leaseHash=? AND a.expiresAt>? AND t.status='running'`,
       )
       .get(taskId, workerId, leaseHash, now);
-    return row ? ({ ...row } as unknown as Task) : undefined;
+    return row ? this.get(String(row.id)) : undefined;
   }
   finishAssignment(
     taskId: string,
@@ -217,50 +221,58 @@ export class TaskStore {
         this.get(taskId)?.status !== "running"
       )
         throw new AssignmentConflict("Assignment is not active");
-      if (!["succeeded", "failed", "unknown"].includes(result.status))
-        throw new AssignmentConflict("Invalid assignment result");
       if (
-        result.status === "succeeded" &&
-        (!result.text?.trim() || result.text.length > 18000)
+        !["succeeded", "failed", "unknown"].includes(result.status) ||
+        Object.keys(result).some(
+          (key) =>
+            key !== "status" &&
+            !(result.status === "succeeded" && key === "outcome"),
+        )
       )
-        throw new AssignmentConflict("Invalid assignment text");
-      this.finish(
-        taskId,
-        result.status,
-        result.status === "succeeded" ? result.text : undefined,
-        result.status === "unknown"
-          ? "Connector execution requires reconciliation"
-          : result.status === "failed"
-            ? "Connector execution failed"
-            : undefined,
-        result.responseId,
-      );
+        throw new AssignmentConflict("Invalid assignment result");
+      let outcome: RuntimeResult | undefined;
+      if (result.status === "succeeded") {
+        try {
+          outcome = validateOutcome(result.outcome);
+          validateTaskOutcome(this.get(taskId)!, outcome);
+        } catch {
+          throw new AssignmentConflict("Invalid assignment outcome");
+        }
+      }
+      this.db
+        .prepare(
+          "UPDATE tasks SET status=?,outcome=?,error=?,deliveryStatus=? WHERE id=? AND status='running'",
+        )
+        .run(
+          result.status,
+          outcome ? JSON.stringify(outcome) : null,
+          result.status === "unknown"
+            ? "Connector execution requires reconciliation"
+            : result.status === "failed"
+              ? "Connector execution failed"
+              : null,
+          outcome?.publication.kind === "none" ? "skipped" : "pending",
+          taskId,
+        );
       this.db
         .prepare("UPDATE assignments SET resultDigest=? WHERE taskId=?")
         .run(digest, taskId);
       return false;
     });
   }
-  finish(
+  rejectAssignment(
     id: string,
-    status: TaskState,
-    result?: string,
-    error?: string,
-    responseId?: string,
+    status: "rejected" | "failed",
+    error: string,
   ): void {
-    if (!["succeeded", "failed", "rejected", "unknown"].includes(status))
-      throw new Error("Invalid task terminal state");
-    if (
-      status === "succeeded" &&
-      (typeof result !== "string" || !result.trim())
-    )
-      throw new Error("Successful task requires a result");
+    if (!["rejected", "failed"].includes(status) || !error)
+      throw Error("Invalid assignment rejection");
     const changed = this.db
       .prepare(
-        `UPDATE tasks SET status=?, result=?, error=?, responseId=? WHERE id=? AND status='running'`,
+        "UPDATE tasks SET status=?,error=? WHERE id=? AND status='running'",
       )
-      .run(status, result ?? null, error ?? null, responseId ?? null, id);
-    if (!changed.changes) throw new Error("Task is not running");
+      .run(status, error, id);
+    if (!changed.changes) throw new AssignmentConflict("Task is not running");
   }
   pendingDelivery(): Task | undefined {
     return this.transaction(() => {
@@ -276,15 +288,19 @@ export class TaskStore {
       return this.get(row.id as string);
     });
   }
-  markDelivery(id: string, status: DeliveryState, url?: string): void {
+  markDelivery(
+    id: string,
+    status: DeliveryState,
+    receipt?: PublicationReceipt,
+  ): void {
     if (!["sent", "failed", "unknown"].includes(status))
-      throw new Error("Invalid delivery transition");
+      throw Error("Invalid delivery transition");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET deliveryStatus=?, commentUrl=? WHERE id=? AND status='succeeded' AND deliveryStatus='sending'",
+        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status='succeeded' AND deliveryStatus='sending'",
       )
-      .run(status, url ?? null, id);
-    if (!changed.changes) throw new Error("Delivery is not sending");
+      .run(status, receipt ? JSON.stringify(receipt) : null, id);
+    if (!changed.changes) throw Error("Delivery is not sending");
   }
   recover(): void {
     this.transaction(() => {
@@ -296,27 +312,25 @@ export class TaskStore {
   resolveUnknownDelivery(
     id: string,
     terminal: "sent" | "failed",
-    url?: string,
+    receipt?: PublicationReceipt,
   ): void {
     if (!["sent", "failed"].includes(terminal))
-      throw new Error("Invalid delivery resolution");
+      throw Error("Invalid delivery resolution");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET deliveryStatus=?, commentUrl=? WHERE id=? AND status='succeeded' AND deliveryStatus='unknown'",
+        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status='succeeded' AND deliveryStatus='unknown'",
       )
-      .run(terminal, url ?? null, id);
-    if (!changed.changes) throw new Error("Delivery is not unknown");
+      .run(terminal, receipt ? JSON.stringify(receipt) : null, id);
+    if (!changed.changes) throw Error("Delivery is not unknown");
   }
-  resolveUnknown(id: string, terminal: "failed" | "succeeded"): void {
-    if (!["failed", "succeeded"].includes(terminal))
-      throw new Error("Invalid resolution");
+  resolveUnknown(id: string, terminal: "failed"): void {
+    if (terminal !== "failed") throw new Error("Invalid resolution");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET status=? WHERE id=? AND status='unknown' AND (?='failed' OR (result IS NOT NULL AND length(trim(result))>0))",
+        "UPDATE tasks SET status='failed' WHERE id=? AND status='unknown'",
       )
-      .run(terminal, id, terminal);
-    if (!changed.changes)
-      throw new Error("Task is not unknown or lacks a success result");
+      .run(id);
+    if (!changed.changes) throw new Error("Task is not unknown");
   }
   close(): void {
     if (!this.closed) {

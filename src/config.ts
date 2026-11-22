@@ -1,6 +1,5 @@
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { parse, stringify } from "yaml";
+import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 import { z } from "zod";
 import type { ChannelConfig } from "./contracts.js";
 import { resolveSecrets, SecretReferenceError } from "./secrets.js";
@@ -57,6 +56,29 @@ const schema = z.strictObject({
       owner: name,
       repo: name,
       enabled: z.boolean(),
+      events: z
+        .array(
+          z.enum([
+            "issue_comment.created",
+            "issues.opened",
+            "issues.labeled",
+            "pull_request.opened",
+            "pull_request.synchronize",
+            "push",
+          ]),
+        )
+        .min(1)
+        .max(6)
+        .optional(),
+      triggerLabel: name.max(100).optional(),
+      writePolicy: z
+        .strictObject({
+          baseBranch: name.max(200),
+          allowedPaths: z.array(name.max(1024)).min(1).max(100),
+          maxFiles: z.number().int().positive().max(100).optional(),
+          maxBytes: z.number().int().positive().max(524288).optional(),
+        })
+        .optional(),
     }),
   ),
   deployment: z
@@ -105,6 +127,8 @@ function validate(
   const ids = new Set<string>();
   const scopes = new Set<string>();
   for (const binding of config.bindings) {
+    if (binding.events?.includes("issues.labeled") && !binding.triggerLabel)
+      throw new Error("issues.labeled requires triggerLabel");
     const scope = `${binding.installationId}:${binding.repositoryId}`;
     if (ids.has(binding.id) || scopes.has(scope))
       throw new Error("Duplicate binding ID or repository scope");
@@ -135,47 +159,4 @@ export function loadConfig(
     throw new Error("Unable to read or parse channel configuration");
   }
   return validate(input, env, path);
-}
-export function getPublicConfig(config: ChannelConfig): ChannelConfig {
-  return structuredClone(config);
-}
-export class ConfigManager {
-  private config: ChannelConfig;
-  private revision = 1;
-  constructor(
-    private readonly path: string,
-    private readonly env: Environment = process.env,
-  ) {
-    this.config = loadConfig(path, env);
-  }
-  snapshot(): { revision: number; config: ChannelConfig } {
-    return { revision: this.revision, config: getPublicConfig(this.config) };
-  }
-  update(
-    next: unknown,
-    expectedRevision: number,
-  ): { revision: number; config: ChannelConfig } {
-    if (expectedRevision !== this.revision)
-      throw new Error("Configuration revision conflict");
-    const validated = validate(next, this.env, this.path);
-    const temporary = `${this.path}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(
-        temporary,
-        /\.json$/i.test(this.path)
-          ? JSON.stringify(validated, null, 2) + "\n"
-          : stringify(validated),
-        { flag: "wx", mode: 0o600 },
-      );
-      renameSync(temporary, this.path);
-    } catch (error) {
-      try {
-        unlinkSync(temporary);
-      } catch {}
-      throw error;
-    }
-    this.config = validated;
-    this.revision++;
-    return this.snapshot();
-  }
 }

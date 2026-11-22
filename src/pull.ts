@@ -19,24 +19,24 @@ const resultSchema = z.discriminatedUnion("status", [
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("succeeded"),
-    text: z
-      .string()
-      .min(1)
-      .max(18000)
-      .refine((x) => !!x.trim()),
-    responseId: z.string().min(1).max(1024).optional(),
+    outcome: outcomeSchema,
   }),
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("failed"),
-    responseId: z.string().min(1).max(1024).optional(),
   }),
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("unknown"),
-    responseId: z.string().min(1).max(1024).optional(),
   }),
 ]);
+import {
+  outcomeSchema,
+  validateOutcome,
+  validateTaskOutcome,
+  runtimeEventSchema,
+  MAX_RESULT_BYTES,
+} from "./outcomes.js";
 class BodyTooLarge extends Error {}
 class StaleAssignment extends Error {}
 async function jsonBody(req: IncomingMessage, limit: number): Promise<unknown> {
@@ -81,6 +81,7 @@ export class PullCoordinator {
       res.writeHead(status, {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
+        "X-Channel-Protocol": "2",
       });
       res.end(value === undefined ? undefined : JSON.stringify(value));
     };
@@ -99,7 +100,7 @@ export class PullCoordinator {
     }
     try {
       this.expire();
-      if (path === "/connector/v1/claim") {
+      if (path === "/connector/v2/claim") {
         z.strictObject({}).parse(await jsonBody(req, 4096));
         const leaseToken = randomBytes(32).toString("hex"),
           expiresAt = Date.now() + this.config.timeoutMs;
@@ -117,10 +118,9 @@ export class PullCoordinator {
         } catch (error) {
           // No request has reached the remote runtime; keep details out of the response.
           if (this.store.get(task.id)?.status === "running")
-            this.store.finish(
+            this.store.rejectAssignment(
               task.id,
               error instanceof AccessDenied ? "rejected" : "failed",
-              undefined,
               error instanceof AccessDenied
                 ? "Task authorization denied"
                 : "Task authorization unavailable",
@@ -136,13 +136,27 @@ export class PullCoordinator {
         return true;
       }
       const match = path.match(
-        /^\/connector\/v1\/tasks\/([0-9a-f-]{36})\/(tool|result)$/,
+        /^\/connector\/v2\/tasks\/([0-9a-f-]{36})\/(tool|result|execution)$/,
       );
       if (!match) {
         send(404, { error: "Not found" });
         return true;
       }
       const [, id, action] = match;
+      if (action === "execution") {
+        const data = z
+          .strictObject({ leaseToken: leaseSchema, event: runtimeEventSchema })
+          .parse(await jsonBody(req, 4096));
+        const task = this.assignment(id, data.leaseToken);
+        try {
+          this.store.recordRuntime(task.id, data.event);
+        } catch (error) {
+          if (error instanceof AssignmentConflict) throw new StaleAssignment();
+          throw error;
+        }
+        send(200, { accepted: true });
+        return true;
+      }
       if (action === "tool") {
         const data = toolSchema.parse(await jsonBody(req, 10000));
         const args =
@@ -162,12 +176,22 @@ export class PullCoordinator {
         send(200, output);
         return true;
       }
-      const data = resultSchema.parse(await jsonBody(req, 100000));
-      const result: AssignmentResult = {
-        status: data.status,
-        ...("text" in data ? { text: data.text } : {}),
-        ...(data.responseId ? { responseId: data.responseId } : {}),
-      };
+      const data = resultSchema.parse(await jsonBody(req, MAX_RESULT_BYTES));
+      if (data.status === "succeeded") {
+        const task = this.store.get(id);
+        if (task) {
+          try {
+            validateTaskOutcome(task, data.outcome);
+          } catch {
+            send(400, { error: "Invalid publication target" });
+            return true;
+          }
+        }
+      }
+      const result: AssignmentResult =
+        data.status === "succeeded"
+          ? { status: data.status, outcome: data.outcome }
+          : { status: data.status };
       // Canonical field order ensures JSON key order does not defeat result deduplication.
       const digest = hash(JSON.stringify(result));
       let duplicate: boolean;

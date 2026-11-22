@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, ConfigManager } from "../src/config.js";
+import { loadConfig } from "../src/config.js";
 import { resolveSecrets } from "../src/secrets.js";
 
 function fixture(t: any) {
@@ -39,16 +39,11 @@ function fixture(t: any) {
   return { dir, config, path, pem };
 }
 
-test("file secret references load relative to configuration, not process cwd, without entering snapshots", (t) => {
+test("file secret references load relative to configuration, not process cwd, without entering loaded configuration", (t) => {
   const { path, config } = fixture(t);
   const result = loadConfig(path, {});
   assert.deepEqual(result, config);
-  assert.equal(
-    JSON.stringify(new ConfigManager(path, {}).snapshot()).includes(
-      "admin-secret",
-    ),
-    false,
-  );
+  assert.equal(JSON.stringify(result).includes("admin-secret"), false);
 });
 
 test("configuration rejects ambiguous env and file secret references", (t) => {
@@ -73,16 +68,6 @@ test("missing and blank secret files fail with a field diagnostic, not file cont
   assert.throws(() => loadConfig(path, {}), /github.webhookSecret/);
 });
 
-test("invalid file secret update keeps the config and revision intact", (t) => {
-  const { path, config } = fixture(t);
-  const manager = new ConfigManager(path, {});
-  const before = manager.snapshot();
-  config.connector.tokenFile = "absent";
-  assert.throws(() => manager.update(config, 1), /connector.token/);
-  assert.deepEqual(manager.snapshot(), before);
-  assert.deepEqual(loadConfig(path, {}), before.config);
-});
-
 test("resolved file secrets preserve PEM newlines and remove token file trailing whitespace", (t) => {
   const { config, path, pem } = fixture(t);
   assert.deepEqual(resolveSecrets(config, path, {}), {
@@ -91,16 +76,4 @@ test("resolved file secrets preserve PEM newlines and remove token file trailing
     webhookSecret: "hook-secret",
     connectorToken: "runtime-secret",
   });
-});
-
-test("valid file reference update resolves against the original configuration directory", (t) => {
-  const { config, dir, path } = fixture(t);
-  const manager = new ConfigManager(path, {});
-  writeFileSync(join(dir, "new-token"), "replacement-secret\n");
-  config.connector.tokenFile = "new-token";
-  assert.equal(manager.update(config, 1).revision, 2);
-  assert.equal(
-    resolveSecrets(loadConfig(path, {}), path, {}).connectorToken,
-    "replacement-secret",
-  );
 });

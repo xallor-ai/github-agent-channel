@@ -1,3 +1,7 @@
+import {
+  publishDraftPullRequest,
+  validateProposal,
+} from "./github-publication.js";
 import { App } from "@octokit/app";
 import { Octokit } from "@octokit/core";
 import {
@@ -6,6 +10,7 @@ import {
   type ChannelConfig,
   type GitHubClient,
   type Task,
+  type PublicationRequest,
 } from "./contracts.js";
 
 const permissions = {
@@ -48,18 +53,15 @@ export class OctokitGitHubClient implements GitHubClient {
     );
     if (
       !found ||
-      ![
-        task.actorId,
-        task.issueNumber,
-        task.repositoryId,
-        task.installationId,
-      ].every((n) => Number.isSafeInteger(n) && n > 0) ||
+      ![task.actorId, task.repositoryId, task.installationId].every(
+        (n) => Number.isSafeInteger(n) && n > 0,
+      ) ||
       !/^[A-Za-z0-9-]{1,39}$/.test(task.actorLogin)
     )
       throw new AccessDenied("Task scope is not enabled");
     return found;
   }
-  async #client(task: Task): Promise<Octokit> {
+  async #client(task: Task, write = false): Promise<Octokit> {
     this.#binding(task);
     const installation = await this.#app.getInstallationOctokit(
       task.installationId,
@@ -69,7 +71,7 @@ export class OctokitGitHubClient implements GitHubClient {
     const auth = (await installation.auth({
       type: "installation",
       repositoryIds: [task.repositoryId],
-      permissions,
+      permissions: write ? { ...permissions, contents: "write" } : permissions,
     })) as { token: string };
     return new Octokit({
       auth: auth.token,
@@ -105,14 +107,21 @@ export class OctokitGitHubClient implements GitHubClient {
     await this.#authorized(task);
   }
   async readIssue(task: Task): Promise<unknown> {
+    if (
+      !task.target ||
+      task.target.kind === "repository" ||
+      !Number.isSafeInteger(task.target.number) ||
+      task.target.number < 1
+    )
+      throw new AccessDenied("Task has no issue scope");
     const client = await this.#authorized(task);
     const { data } = await client.request(
       "GET /repos/{owner}/{repo}/issues/{issue_number}",
-      { owner: task.owner, repo: task.repo, issue_number: task.issueNumber },
+      { owner: task.owner, repo: task.repo, issue_number: task.target.number },
     );
     return {
       untrusted: true,
-      number: task.issueNumber,
+      number: task.target.number,
       title: data.title,
       body: data.body,
     };
@@ -145,10 +154,28 @@ export class OctokitGitHubClient implements GitHubClient {
     if (bytes.length > MAX_FILE) throw new Error("File exceeds 128 KiB");
     return { untrusted: true, path, content: bytes.toString("utf8") };
   }
-  async publish(
+  async publishPullRequest(
+    task: Task,
+    proposal: Extract<PublicationRequest, { kind: "pull_request" }>,
+  ): Promise<{ id: number; url: string }> {
+    validateProposal(task, this.#binding(task).writePolicy, proposal);
+    await this.authorize(task);
+    const client = await this.#client(task, true);
+    return publishDraftPullRequest(task, proposal, client, () =>
+      this.authorize(task),
+    );
+  }
+  async publishComment(
     task: Task,
     text: string,
   ): Promise<{ id: number; url: string }> {
+    if (
+      !task.target ||
+      task.target.kind === "repository" ||
+      !Number.isSafeInteger(task.target.number) ||
+      task.target.number < 1
+    )
+      throw new AccessDenied("Task has no issue scope");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(task.id))
       throw new Error("Invalid task marker ID");
     const marker = `<!-- github-agent-channel:${task.id} -->`;
@@ -164,7 +191,7 @@ export class OctokitGitHubClient implements GitHubClient {
         {
           owner: task.owner,
           repo: task.repo,
-          issue_number: task.issueNumber,
+          issue_number: task.target.number,
           per_page: 100,
           page,
         },
@@ -197,7 +224,7 @@ export class OctokitGitHubClient implements GitHubClient {
         {
           owner: task.owner,
           repo: task.repo,
-          issue_number: task.issueNumber,
+          issue_number: task.target.number,
           body,
         },
       );

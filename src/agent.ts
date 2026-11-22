@@ -1,6 +1,15 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { OpenClawConnector } from "./connector.js";
+import { createRuntime } from "./runtime-factory.js";
+import {
+  targetSchema,
+  sourceSchema,
+  validateOutcome,
+  validateTaskOutcome,
+  runtimeEventSchema,
+  outcomeSchema,
+  publicationReceiptSchema,
+} from "./outcomes.js";
 import {
   AmbiguousExecution,
   type RuntimeConnector,
@@ -19,35 +28,34 @@ import {
 
 const uuid = z.string().uuid();
 const assignmentSchema = z.strictObject({
-  task: z
-    .object({
-      id: uuid,
-      prompt: z.string().max(16000),
-      deliveryId: z.string(),
-      commentId: z.number().int().positive(),
-      bindingId: z.string(),
-      installationId: z.number().int().positive(),
-      repositoryId: z.number().int().positive(),
-      owner: z.string(),
-      repo: z.string(),
-      actorId: z.number().int().positive(),
-      actorLogin: z.string(),
-      issueNumber: z.number().int().positive(),
-      status: z.literal("running"),
-      deliveryStatus: z.enum([
-        "pending",
-        "sending",
-        "sent",
-        "failed",
-        "unknown",
-      ]),
-      result: z.string().nullable(),
-      error: z.string().nullable(),
-      createdAt: z.number(),
-      responseId: z.string().nullable(),
-      commentUrl: z.string().nullable(),
-    })
-    .passthrough(),
+  task: z.strictObject({
+    id: uuid,
+    prompt: z.string().max(16000),
+    deliveryId: z.string(),
+    bindingId: z.string(),
+    installationId: z.number().int().positive(),
+    repositoryId: z.number().int().positive(),
+    owner: z.string(),
+    repo: z.string(),
+    actorId: z.number().int().positive(),
+    actorLogin: z.string(),
+    target: targetSchema,
+    source: sourceSchema,
+    status: z.literal("running"),
+    deliveryStatus: z.enum([
+      "pending",
+      "sending",
+      "sent",
+      "skipped",
+      "failed",
+      "unknown",
+    ]),
+    outcome: outcomeSchema.nullable(),
+    runtime: runtimeEventSchema.nullable(),
+    publicationReceipt: publicationReceiptSchema.nullable(),
+    error: z.string().nullable(),
+    createdAt: z.number(),
+  }),
   leaseToken: z.string().min(1).max(1024),
   expiresAt: z.number().positive(),
 });
@@ -125,7 +133,7 @@ export class Agent {
     if (!entry) return false;
     try {
       const receipt = await this.post(
-        "/connector/v1/tasks/" + entry.id + "/result",
+        "/connector/v2/tasks/" + entry.id + "/result",
         JSON.parse(entry.result!),
         signal,
       );
@@ -157,7 +165,7 @@ export class Agent {
   private async step(signal?: AbortSignal): Promise<boolean> {
     if (signal?.aborted) return false;
     if (await this.report(signal)) return true;
-    const claimed = await this.post("/connector/v1/claim", {}, signal);
+    const claimed = await this.post("/connector/v2/claim", {}, signal);
     if (claimed.status === 204) return false;
     const parsed = assignmentSchema.safeParse(claimed.data);
     if (!parsed.success) throw Error("Cloud assignment is invalid");
@@ -180,7 +188,7 @@ export class Agent {
             if (combined.aborted)
               throw new AmbiguousExecution("Execution interrupted");
             const response = await this.post(
-              "/connector/v1/tasks/" + assignment.task.id + "/tool",
+              "/connector/v2/tasks/" + assignment.task.id + "/tool",
               { leaseToken: assignment.leaseToken, name, args },
               combined,
             );
@@ -189,20 +197,28 @@ export class Agent {
             return response.data;
           },
           combined,
+          async (event) => {
+            const validated = runtimeEventSchema.parse(event);
+            this.store.recordRuntime(assignment.task.id, validated);
+            const receipt = await this.post(
+              "/connector/v2/tasks/" + assignment.task.id + "/execution",
+              { leaseToken: assignment.leaseToken, event: validated },
+              combined,
+            );
+            if (receipt.status !== 200)
+              throw new AmbiguousExecution(
+                "Runtime receipt acknowledgement is invalid",
+              );
+          },
         );
         if (combined.aborted)
           throw new AmbiguousExecution("Execution interrupted");
-        if (
-          !output.text.trim() ||
-          output.text.length > 18000 ||
-          (output.responseId && output.responseId.length > 1024)
-        )
-          throw Error("Invalid model result");
+        const validated = validateOutcome(output);
+        validateTaskOutcome(assignment.task, validated);
         result = {
           leaseToken: assignment.leaseToken,
           status: "succeeded",
-          text: output.text,
-          ...(output.responseId ? { responseId: output.responseId } : {}),
+          outcome: validated,
         };
       } catch (e) {
         result = {
@@ -227,7 +243,7 @@ export async function runAgent(
   const config = loadAgentConfig(configPath);
   const secrets = agentSecrets(config, configPath);
   const store = new AgentStore(config.stateFile);
-  const runtime = new OpenClawConnector(config.runtime, secrets.runtime);
+  const runtime = createRuntime(config, configPath);
   const agent = new Agent(config, store, runtime, secrets.channel);
   let failures = 0;
   try {

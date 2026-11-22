@@ -19,7 +19,6 @@ const cfg: ChannelConfig = {
     workerId: "local-worker",
     tokenEnv: "TOKEN",
     timeoutMs: 100,
-    maxToolRounds: 3,
   },
   bindings: [
     {
@@ -39,7 +38,7 @@ test("PR comment reconciliation accepts pull path and rejects unrelated paths", 
   await once(server, "listening");
   const task = s.accept({
     deliveryId: "pr",
-    commentId: 1,
+    source: { event: "issue_comment", action: "created", commentId: 1 },
     bindingId: "binding",
     installationId: 1,
     repositoryId: 2,
@@ -47,13 +46,26 @@ test("PR comment reconciliation accepts pull path and rejects unrelated paths", 
     repo: "repo",
     actorId: 3,
     actorLogin: "alice",
-    issueNumber: 5,
+    target: { kind: "pull_request", number: 5 },
     prompt: "review",
   }).task;
   const endpoint = `http://127.0.0.1:${(server.address() as any).port}/tasks/${task.id}/resolve-delivery`;
   try {
-    s.claim();
-    s.finish(task.id, "succeeded", "answer");
+    s.claimAssignment("worker", "hash", Date.now() + 60000);
+    s.finishAssignment(
+      task.id,
+      "worker",
+      "hash",
+      {
+        status: "succeeded",
+        outcome: {
+          text: "answer",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
+      },
+      "digest",
+    );
     s.pendingDelivery();
     s.markDelivery(task.id, "unknown");
     for (const path of [
@@ -86,7 +98,7 @@ test("PR comment reconciliation accepts pull path and rejects unrelated paths", 
       }),
     });
     assert.equal(response.status, 200);
-    assert.equal(s.get(task.id)?.commentUrl, url);
+    assert.equal(s.get(task.id)?.publicationReceipt?.url, url);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     s.close();
@@ -99,7 +111,7 @@ test("execution resolution rejects malformed and extra JSON fields without chang
   await once(server, "listening");
   const task = s.accept({
     deliveryId: "unknown",
-    commentId: 1,
+    source: { event: "issue_comment", action: "created", commentId: 1 },
     bindingId: "binding",
     installationId: 1,
     repositoryId: 2,
@@ -107,13 +119,19 @@ test("execution resolution rejects malformed and extra JSON fields without chang
     repo: "repo",
     actorId: 3,
     actorLogin: "alice",
-    issueNumber: 5,
+    target: { kind: "issue", number: 5 },
     prompt: "review",
   }).task;
   const endpoint = `http://127.0.0.1:${(server.address() as any).port}/tasks/${task.id}/resolve`;
   try {
-    s.claim();
-    s.finish(task.id, "unknown");
+    s.claimAssignment("worker", "hash", Date.now() + 60000);
+    s.finishAssignment(
+      task.id,
+      "worker",
+      "hash",
+      { status: "unknown" },
+      "digest",
+    );
     for (const raw of [
       "{",
       "null",
@@ -155,7 +173,7 @@ test("delivery reconciliation requires admin, explicit confirmation and a target
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
   const task = s.accept({
     deliveryId: "one",
-    commentId: 1,
+    source: { event: "issue_comment", action: "created", commentId: 1 },
     bindingId: "binding",
     installationId: 1,
     repositoryId: 2,
@@ -163,7 +181,7 @@ test("delivery reconciliation requires admin, explicit confirmation and a target
     repo: "repo",
     actorId: 3,
     actorLogin: "alice",
-    issueNumber: 5,
+    target: { kind: "issue", number: 5 },
     prompt: "review",
   }).task;
   const endpoint = base + "/tasks/" + task.id + "/resolve-delivery";
@@ -177,8 +195,21 @@ test("delivery reconciliation requires admin, explicit confirmation and a target
       body: JSON.stringify(data),
     });
   try {
-    s.claim();
-    s.finish(task.id, "succeeded", "answer");
+    s.claimAssignment("worker", "hash", Date.now() + 60000);
+    s.finishAssignment(
+      task.id,
+      "worker",
+      "hash",
+      {
+        status: "succeeded",
+        outcome: {
+          text: "answer",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
+      },
+      "digest",
+    );
     s.pendingDelivery();
     s.markDelivery(task.id, "unknown");
     const valid = {
@@ -219,12 +250,29 @@ test("delivery reconciliation requires admin, explicit confirmation and a target
       400,
     );
     assert.equal((await post(valid)).status, 200);
-    assert.equal(s.get(task.id)?.commentUrl, valid.url);
+    assert.equal(s.get(task.id)?.publicationReceipt?.url, valid.url);
     assert.equal(s.pendingDelivery(), undefined);
     assert.equal((await post(valid)).status, 409);
-    const second = s.accept({ ...task, deliveryId: "two", commentId: 2 }).task;
-    s.claim();
-    s.finish(second.id, "succeeded", "answer");
+    const second = s.accept({
+      ...task,
+      deliveryId: "two",
+      source: { ...task.source, commentId: 2 },
+    }).task;
+    s.claimAssignment("worker", "hash", Date.now() + 60000);
+    s.finishAssignment(
+      second.id,
+      "worker",
+      "hash",
+      {
+        status: "succeeded",
+        outcome: {
+          text: "answer",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
+      },
+      "digest",
+    );
     s.pendingDelivery();
     s.markDelivery(second.id, "unknown");
     const failed = await fetch(
@@ -296,14 +344,24 @@ test("signed HTTP delivery is persisted and independently completed; task query 
       receipt.taskId,
       "worker",
       "hash",
-      { status: "succeeded", text: "review done" },
+      {
+        status: "succeeded",
+        outcome: {
+          text: "review done",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
+      },
       "digest",
     );
     const worker = new DeliveryWorker(s, {
       authorize: async () => {},
       readIssue: async () => ({}),
       readFile: async () => ({}),
-      publish: async (_, text) => {
+      publishPullRequest: async () => {
+        throw new Error("Unexpected PR publication");
+      },
+      publishComment: async (_, text) => {
         published = text;
         return { id: 6, url: "https://github.com/comment/6" };
       },
@@ -318,6 +376,23 @@ test("signed HTTP delivery is persisted and independently completed; task query 
     ).json();
     assert.equal(status.status, "succeeded");
     assert.equal(status.deliveryStatus, "sent");
+    assert.deepEqual(status.target, { kind: "issue", number: 5 });
+    assert.deepEqual(status.source, {
+      event: "issue_comment",
+      action: "created",
+      commentId: 4,
+    });
+    assert.deepEqual(status.outcome, {
+      text: "review done",
+      artifacts: [],
+      publication: { kind: "comment" },
+    });
+    assert.deepEqual(status.publicationReceipt, {
+      kind: "comment",
+      id: 6,
+      url: "https://github.com/comment/6",
+    });
+    assert.equal(status.runtime, null);
     assert.equal(status.prompt, undefined);
     assert.equal(
       (

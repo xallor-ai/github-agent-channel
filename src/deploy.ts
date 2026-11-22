@@ -154,7 +154,7 @@ export function renderDeployment(
   const caddy = `${origin} {
   @webhook {
     method POST
-    path /webhooks/github /connector/v1/claim /connector/v1/tasks/*
+    path /webhooks/github /connector/v2/claim /connector/v2/tasks/*
   }
   handle @webhook {
     reverse_proxy ${project}-channel:3000
@@ -180,9 +180,9 @@ location = /webhooks/github {
     proxy_read_timeout 15s;
 }
 # Connector uses a dedicated bearer token; task tools/results require an active assignment.
-location ^~ /connector/v1/ {
+location ^~ /connector/v2/ {
     if ($request_method != POST) { return 405; }
-    client_max_body_size 100k;
+    client_max_body_size 2m;
     ${proxy}
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;

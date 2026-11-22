@@ -7,7 +7,7 @@ import { TaskStore } from "../src/store.js";
 import type { NewTask } from "../src/contracts.js";
 const input: NewTask = {
   deliveryId: "d1",
-  commentId: 1,
+  source: { event: "issue_comment", action: "created", commentId: 1 },
   bindingId: "b1",
   installationId: 1,
   repositoryId: 2,
@@ -15,7 +15,7 @@ const input: NewTask = {
   repo: "repo",
   actorId: 3,
   actorLogin: "user",
-  issueNumber: 4,
+  target: { kind: "issue", number: 4 },
   prompt: "hello",
 };
 function fixture(t: test.TestContext) {
@@ -38,7 +38,12 @@ test("assignment is atomic across connections and blocks one worker across bindi
   const s = open(),
     peer = open();
   const a = s.accept(input).task;
-  s.accept({ ...input, deliveryId: "d2", commentId: 2, bindingId: "b2" });
+  s.accept({
+    ...input,
+    deliveryId: "d2",
+    source: { ...input.source, commentId: 2 },
+    bindingId: "b2",
+  });
   const lease = s.claimAssignment("worker", "hash", 2000, 1000);
   assert.equal(lease?.id, a.id);
   assert.equal(peer.claimAssignment("worker", "other", 2000, 1000), undefined);
@@ -62,13 +67,24 @@ test("expiry and restart never replay execution or allow late success", (t) => {
       a.id,
       "worker",
       "hash",
-      { status: "succeeded", text: "late" },
+      {
+        status: "succeeded",
+        outcome: {
+          text: "late",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
+      },
       "digest",
       2000,
     ),
   );
   s.resolveUnknown(a.id, "failed");
-  const b = s.accept({ ...input, deliveryId: "d2", commentId: 2 }).task;
+  const b = s.accept({
+    ...input,
+    deliveryId: "d2",
+    source: { ...input.source, commentId: 2 },
+  }).task;
   s.claimAssignment("worker", "hash2", 4000, 3000);
   s.close();
   const restarted = open();
@@ -86,14 +102,18 @@ test("result and digest commit together, identical retry persists across restart
   s.claimAssignment("worker", "hash", 2000, 1000);
   const result = {
     status: "succeeded" as const,
-    text: "answer",
-    responseId: "r1",
+    outcome: {
+      text: "answer",
+      responseId: "r1",
+      artifacts: [],
+      publication: { kind: "comment" as const },
+    },
   };
   assert.equal(
     s.finishAssignment(a.id, "worker", "hash", result, "same", 1500),
     false,
   );
-  assert.equal(s.get(a.id)?.result, "answer");
+  assert.equal(s.get(a.id)?.outcome?.text, "answer");
   s.close();
   const peer = open();
   peer.recover();

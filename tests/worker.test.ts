@@ -10,7 +10,7 @@ import {
 } from "../src/contracts.js";
 const input: NewTask = {
   deliveryId: "d1",
-  commentId: 1,
+  source: { event: "issue_comment", action: "created", commentId: 1 },
   bindingId: "b",
   installationId: 1,
   repositoryId: 2,
@@ -18,7 +18,7 @@ const input: NewTask = {
   repo: "repo",
   actorId: 3,
   actorLogin: "alice",
-  issueNumber: 4,
+  target: { kind: "issue", number: 4 },
   prompt: "review",
 };
 function github(overrides: Partial<GitHubClient> = {}): GitHubClient {
@@ -26,7 +26,10 @@ function github(overrides: Partial<GitHubClient> = {}): GitHubClient {
     authorize: async () => {},
     readIssue: async () => ({}),
     readFile: async () => ({}),
-    publish: async () => ({
+    publishPullRequest: async () => {
+      throw new Error("Unexpected PR publication");
+    },
+    publishComment: async () => ({
       id: 10,
       url: "https://github.com/org/repo/issues/4#issuecomment-10",
     }),
@@ -42,7 +45,14 @@ function ready(t: test.TestContext) {
     task.id,
     "worker",
     "hash",
-    { status: "succeeded", text: "answer" },
+    {
+      status: "succeeded",
+      outcome: {
+        text: "answer",
+        artifacts: [],
+        publication: { kind: "comment" },
+      },
+    },
     "digest",
   );
   return { store, task };
@@ -53,7 +63,7 @@ test("delivery worker publishes persisted connector result once", async (t) => {
   const worker = new DeliveryWorker(
     store,
     github({
-      publish: async (received, text) => {
+      publishComment: async (received, text) => {
         assert.equal(received.id, task.id);
         assert.equal(text, "answer");
         attempts++;
@@ -68,6 +78,11 @@ test("delivery worker publishes persisted connector result once", async (t) => {
   assert.equal(await worker.tick(), false);
   assert.equal(attempts, 1);
   assert.equal(store.get(task.id)?.deliveryStatus, "sent");
+  assert.deepEqual(store.get(task.id)?.publicationReceipt, {
+    kind: "comment",
+    id: 10,
+    url: "https://github.com/org/repo/issues/4#issuecomment-10",
+  });
 });
 test("lost publication result becomes unknown and is never retried automatically", async (t) => {
   const { store, task } = ready(t);
@@ -75,7 +90,7 @@ test("lost publication result becomes unknown and is never retried automatically
   const worker = new DeliveryWorker(
     store,
     github({
-      publish: async () => {
+      publishComment: async () => {
         attempts++;
         throw new AmbiguousExecution();
       },
@@ -95,7 +110,7 @@ test("permission revoked before publication blocks writes", async (t) => {
       authorize: async () => {
         throw new AccessDenied();
       },
-      publish: async () => {
+      publishComment: async () => {
         attempts++;
         throw new Error("unexpected");
       },
@@ -121,7 +136,7 @@ test("overlapping ticks do not publish twice", async (t) => {
   const worker = new DeliveryWorker(
     store,
     github({
-      publish: async () => {
+      publishComment: async () => {
         attempts++;
         await gate;
         return { id: 1, url: "url" };

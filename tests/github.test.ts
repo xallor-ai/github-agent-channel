@@ -34,7 +34,8 @@ const task = {
   repo: "repo",
   actorId: 3,
   actorLogin: "reader",
-  issueNumber: 5,
+  target: { kind: "issue", number: 5 },
+  source: { event: "issue_comment", action: "created", commentId: 10 },
 } as Task;
 function fixture(
   options: {
@@ -166,14 +167,17 @@ test("publish reconciles only bot marker and posts once on ambiguous failure", a
     user: { login: "helper[bot]" },
   };
   const a = fixture({ comments: [existing] });
-  assert.equal((await a.client.publish(task, "result")).id, 8);
+  assert.equal((await a.client.publishComment(task, "result")).id, 8);
   assert.equal(a.calls.filter((x) => x.method === "POST").length, 1);
   const b = fixture({
     comments: [{ ...existing, user: { login: "attacker" } }],
   });
-  assert.equal((await b.client.publish(task, "result")).id, 9);
+  assert.equal((await b.client.publishComment(task, "result")).id, 9);
   const c = fixture({ failWrite: true });
-  await assert.rejects(c.client.publish(task, "result"), AmbiguousExecution);
+  await assert.rejects(
+    c.client.publishComment(task, "result"),
+    AmbiguousExecution,
+  );
   assert.equal(
     c.calls.filter((x) => x.method === "POST" && x.path.endsWith("/comments"))
       .length,
@@ -187,18 +191,23 @@ test("comment scan bound refuses creation and excessive response is refused", as
       user: { login: "x" },
     })),
   });
-  await assert.rejects(a.client.publish(task, "result"), AmbiguousExecution);
+  await assert.rejects(
+    a.client.publishComment(task, "result"),
+    AmbiguousExecution,
+  );
   assert.equal(
     a.calls.filter((x) => x.method === "POST" && x.path.endsWith("/comments"))
       .length,
     0,
   );
-  await assert.rejects(fixture().client.publish(task, "x".repeat(20001)));
+  await assert.rejects(
+    fixture().client.publishComment(task, "x".repeat(20001)),
+  );
 });
 test("network authorization failure and revoked permission never permit writes", async () => {
   for (const option of [{ failRead: true }, { revokeOnSecondCheck: true }]) {
     const { client, calls } = fixture(option);
-    await assert.rejects(client.publish(task, "result"));
+    await assert.rejects(client.publishComment(task, "result"));
     assert.equal(
       calls.filter((x) => x.method === "POST" && x.path.endsWith("/comments"))
         .length,
@@ -208,10 +217,34 @@ test("network authorization failure and revoked permission never permit writes",
 });
 test("expired static scoped token never retries the comment write", async () => {
   const { client, calls } = fixture({ writeStatus: 401 });
-  await assert.rejects(client.publish(task, "result"));
+  await assert.rejects(client.publishComment(task, "result"));
   assert.equal(
     calls.filter((x) => x.method === "POST" && x.path.endsWith("/comments"))
       .length,
     1,
+  );
+});
+
+test("pull request targets use their canonical number for discussion reads and comments", async () => {
+  const f = fixture();
+  const pullTask: Task = {
+    ...task,
+    target: { kind: "pull_request", number: 5 },
+    source: { event: "pull_request", action: "opened" },
+  };
+  await f.client.readIssue(pullTask);
+  await f.client.publishComment(pullTask, "result");
+  assert.ok(
+    f.calls.some(
+      (call) =>
+        call.method === "GET" && call.path === "/repos/org/repo/issues/5",
+    ),
+  );
+  assert.ok(
+    f.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.path === "/repos/org/repo/issues/5/comments",
+    ),
   );
 });

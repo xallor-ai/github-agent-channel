@@ -9,6 +9,12 @@ export function renderAgentDeployment(
   configPath: string,
   outputDir: string,
 ): { composePath: string; runtimeConfigPath: string } {
+  if (config.runtime.type === "acp")
+    throw Error(
+      "ACP deployment is native-only; container rendering is unsupported",
+    );
+  if (config.runtime.type !== "openclaw")
+    throw Error("Explicit runtime type is required");
   const project = config.deployment?.projectName ?? "github-channel-agent";
   const network = config.deployment?.network;
   const image = config.deployment?.image;
@@ -25,6 +31,8 @@ export function renderAgentDeployment(
   const root = dirname(resolve(configPath));
   const dir = resolve(outputDir);
   const runtime = structuredClone(config);
+  if (runtime.runtime.type === "acp")
+    throw Error("ACP deployment is native-only");
   delete runtime.deployment;
   runtime.stateFile = "/data/agent.db";
   const secrets: Record<string, { file: string } | { environment: string }> =

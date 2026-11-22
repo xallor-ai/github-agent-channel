@@ -46,7 +46,8 @@ test("valid signed mention constructs only server scope", async () => {
   const result = await run(event());
   assert.equal(result?.repositoryId, 2);
   assert.equal(result?.actorId, 3);
-  assert.equal(result?.issueNumber, 5);
+  assert.deepEqual(result?.target, { kind: "issue", number: 5 });
+  assert.equal(result?.source.commentId, 4);
 });
 
 test("accepts bot slug mentions while rejecting lookalike names", async () => {

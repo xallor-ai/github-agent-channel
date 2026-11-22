@@ -1,17 +1,15 @@
-import { ConfigManager } from "./config.js";
+import { loadConfig } from "./config.js";
 import { TaskStore } from "./store.js";
 import { OctokitGitHubClient } from "./github.js";
 import { PullCoordinator } from "./pull.js";
 import { DeliveryWorker } from "./worker.js";
 import { createChannelServer } from "./server.js";
 import { resolveSecrets } from "./secrets.js";
+import { StorageSchemaError } from "./store-schema.js";
 
 try {
-  const manager = new ConfigManager(
-    process.env.CHANNEL_CONFIG ?? "config.local.yaml",
-  );
-  const config = manager.snapshot().config;
   const configPath = process.env.CHANNEL_CONFIG ?? "config.local.yaml";
+  const config = loadConfig(configPath);
   const secrets = resolveSecrets(config, configPath);
   const store = new TaskStore(config.dataFile);
   store.recover();
@@ -52,9 +50,11 @@ try {
       // Persisted running/sending states recover as unknown after shutdown; no automatic rerun.
       setTimeout(() => process.exit(0), 1000).unref();
     });
-} catch {
+} catch (error) {
   console.error(
-    "Channel startup failed: check configuration and required environment references",
+    error instanceof StorageSchemaError
+      ? error.message
+      : "Channel startup failed: check configuration and required environment references",
   );
   process.exitCode = 1;
 }

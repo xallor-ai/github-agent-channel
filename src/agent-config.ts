@@ -25,18 +25,44 @@ const ref = {
   tokenFile: z.string().min(1).optional(),
   tokenEnv: envName.optional(),
 };
+const commandSchema = z.strictObject({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  timeoutMs: z.number().int().min(1).max(3600000),
+});
+export const acpSchema = z.strictObject({
+  type: z.literal("acp"),
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  timeoutMs: z.number().int().min(1).max(3600000),
+  workspaces: z.record(z.string().regex(/^[1-9][0-9]*$/), z.string().min(1)),
+  envRefs: z.record(envName, envName).default({}),
+  permissionPolicy: z.enum(["deny", "allow-once"]),
+  verification: commandSchema.optional(),
+  publication: z
+    .strictObject({
+      kind: z.literal("pull_request"),
+      baseBranch: z.string().min(1),
+    })
+    .optional(),
+});
+export type AcpRuntimeConfig = z.infer<typeof acpSchema>;
 const schema = z.strictObject({
   channel: z.strictObject({
     baseUrl: z.string().refine((v) => origin(v, true)),
     ...ref,
   }),
-  runtime: z.strictObject({
-    baseUrl: z.string().refine((v) => origin(v, false)),
-    ...ref,
-    agentId: z.string().min(1),
-    timeoutMs: z.number().int().min(1).max(3600000),
-    maxToolRounds: z.number().int().min(1).max(100),
-  }),
+  runtime: z.union([
+    z.strictObject({
+      type: z.literal("openclaw"),
+      baseUrl: z.string().refine((v) => origin(v, false)),
+      ...ref,
+      agentId: z.string().min(1),
+      timeoutMs: z.number().int().min(1).max(3600000),
+      maxToolRounds: z.number().int().min(1).max(100),
+    }),
+    acpSchema,
+  ]),
   stateFile: z.string().min(1),
   pollIntervalMs: z.number().int().min(100).max(60000),
   requestTimeoutMs: z.number().int().min(100).max(60000),
@@ -68,6 +94,7 @@ export function agentSecrets(
 ) {
   const read = (name: "channel" | "runtime") => {
     const ref = config[name];
+    if ("type" in ref && ref.type === "acp") return "";
     if ((ref.tokenFile === undefined) === (ref.tokenEnv === undefined))
       throw Error(name + ".token requires exactly one File or Env reference");
     let token: string | undefined;
