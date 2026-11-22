@@ -1,5 +1,7 @@
 # 可选：在 ECS 自建 Channel 服务
 
+状态：可选部署教程。ECS 不是产品必须依赖；其他具备等效网络、Docker 与 HTTPS 条件的 Linux 主机也可按同一服务职责部署。
+
 已有管理员提供的Channel地址和连接器token时，无需执行本篇，直接回到[完整接入主线](setup.md)。本篇面向要自己运行服务端的人：ECS保存GitHub凭据、验签、任务和回帖，内网连接器主动连接它；ECS不配置内网OpenClaw地址或Gateway token。
 
 ## 1. 前置条件与 GitHub App

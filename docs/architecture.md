@@ -1,11 +1,13 @@
 # GitHub Agent Channel 架构
 
+状态：当前架构说明。产品目标为通用 GitHub Channel；OpenClaw 只是首个适配器。当前 CLI 仍固定装配 OpenClaw，任务/结果协议仍限于评论场景，不能宣称已完成多 Runtime 支持。完整源码对照见[实现地图](implementation-map.md)，目标差距见[治理记录](governance-review-20261122.md)。
+
 ## 网络方向与职责
 
 ```mermaid
 flowchart LR
   GH[GitHub] -->|签名 Webhook| E[HTTPS Edge]
-  E --> C[Channel ECS]
+  E --> C[Channel 服务端]
   C --> Q[(SQLite 任务与 assignment)]
   C -->|Installation Token 操作| GH
   A[内网主动连接器] -->|HTTPS claim/tool/result| E
@@ -13,7 +15,7 @@ flowchart LR
   A -->|本机 Responses API| O[OpenClaw]
 ```
 
-Channel 是 Runtime 无关的 GitHub 协作入口；OpenClaw 是第一个本地Runtime适配器。云端不持有OpenClaw地址或模型token，不主动连接内网，不需要隧道或入站端口。
+Channel 的产品定位是 Runtime 无关的 GitHub 协作入口；当前唯一实现的适配器是 OpenClaw。服务端不持有内网 Runtime 地址或模型 token，不主动连接内网。ECS 是一种部署方式，非产品依赖；内网无需隧道或入站端口。
 
 ## 边界
 
@@ -22,7 +24,7 @@ Channel 是 Runtime 无关的 GitHub 协作入口；OpenClaw 是第一个本地R
 - **PullCoordinator**：给已认证连接器原子分配任务，校验调用者权限，产生限时lease capability。处理受控工具请求和幂等结果提交。
 - **GitHub Client/DeliveryWorker**：凭据不出ECS；每次工具和回帖重新授权。回帖结果不明时停在unknown，不盲目重发。
 - **内网Agent**：只出站。模型调用前写journal；模型工具请求回到ECS授权执行；结果持久化后提交。没有GitHub写凭据。
-- **RuntimeConnector**：隔离OpenClaw Responses协议、工具续调用、超时和结果语义；未来Runtime实现复用任务通道。
+- **RuntimeConnector**：接口用于隔离执行差异；当前 `connector.ts` 实现 OpenClaw Responses、两种读取工具的续调用和文本结果。`runAgent()` 固定创建这个适配器，尚无 provider 注册、能力协商或通用运行产物。
 
 ## 持久性与执行保证
 

@@ -1,10 +1,12 @@
 # 主动连接运维与恢复
 
+状态：当前运行契约；目前只覆盖 OpenClaw 分析回帖适配器。通用 Channel 的其他能力状态见[能力台账](capabilities.md)。
+
 首次接入从[完整配置主线](setup.md)开始；自建服务端看[可选ECS部署](ecs-setup.md)。本文用于部署后的诊断、升级、备份和未知任务对账。
 
 ## 两端职责和前置条件
 
-ECS 只运行 Channel 和 HTTPS 入口。内网运行本仓库 Agent 连接器与既有 OpenClaw。所有跨网请求由 Agent 发往 ECS；ECS 不调用内网地址。需要 Node24，容器命令要求 Compose插件2.20+。旧独立 `docker-compose` 不受支持。
+Channel 服务端运行接入、任务、GitHub 授权与发布，HTTPS 由入口层处理；ECS 是可选的自建部署示例。内网运行本仓库 Agent 连接器与当前适配的 OpenClaw。所有跨网请求由连接器发往服务端，服务端不调用内网地址。需要 Node24，容器命令要求 Compose插件2.20+。旧独立 `docker-compose` 不受支持。
 
 GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull requests Write。绑定的仓库 ID、installation ID 和 owner/repo 由服务端固定。每次领取、工具请求和回帖前重新核验调用者仓库权限。
 

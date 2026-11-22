@@ -1,4 +1,6 @@
-# 完整接入：从 OpenClaw 到 GitHub 机器人回帖
+# OpenClaw 适配器：完整配置与回帖验收
+
+状态：当前已实现适配器的操作教程。GitHub Agent Channel 的产品定位是通用 GitHub 通道；本篇只讲 OpenClaw 的接入，不是所有 Runtime 的协议规范，也不包含尚未实现的代码修改/创建 PR 能力。产品、实现和其他能力状态从[文档索引](README.md)进入。
 
 本篇是使用入口，按顺序完成后应能在绑定仓库评论 `@机器人`，由内网 OpenClaw 分析并回帖。自建 ECS 不是每个使用者都要做的事：已有 Channel 服务时，拿到服务地址和连接器 token 即可；没有服务时，先完成[可选的 ECS 自建部署](ecs-setup.md)，再回到本文。
 
