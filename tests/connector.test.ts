@@ -31,6 +31,94 @@ const settings = {
   timeoutMs: 100,
   maxToolRounds: 3,
 };
+test("repository tasks expose only file reads and retain analysis without a comment", async () => {
+  const requests: Array<{
+    tools: Array<{ name: string }>;
+    previous_response_id?: string;
+  }> = [];
+  const connector = new OpenClawConnector(settings, "secret", (async (
+    _url,
+    init,
+  ) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    if (requests.length === 1)
+      return Response.json({
+        id: "file-read",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "read_file",
+            call_id: "file",
+            arguments: '{"path":"README.md"}',
+          },
+        ],
+      });
+    return Response.json({
+      id: "analysis",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Repository analysis" }],
+        },
+      ],
+    });
+  }) as typeof fetch);
+  const invocations: string[] = [];
+  const result = await connector.run(
+    {
+      ...task,
+      target: {
+        kind: "repository",
+        ref: "refs/heads/main",
+        sha: "a".repeat(40),
+      },
+      source: { event: "push" },
+    },
+    async (name) => {
+      invocations.push(name);
+      return { content: "readme" };
+    },
+  );
+  assert.deepEqual(invocations, ["read_file"]);
+  assert.deepEqual(
+    requests.map((request) => request.tools.map((tool) => tool.name)),
+    [["read_file"], ["read_file"]],
+  );
+  assert.equal(requests[1].previous_response_id, "file-read");
+  assert.equal(result.text, "Repository analysis");
+  assert.deepEqual(result.publication, { kind: "none" });
+});
+test("repository tasks reject unsolicited issue reads before invoking cloud tools", async () => {
+  const connector = new OpenClawConnector(settings, "secret", (async () =>
+    Response.json({
+      id: "invalid",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          name: "read_issue",
+          call_id: "issue",
+          arguments: "{}",
+        },
+      ],
+    })) as typeof fetch);
+  let calls = 0;
+  await assert.rejects(
+    connector.run(
+      { ...task, target: { kind: "repository" }, source: { event: "push" } },
+      async () => {
+        calls++;
+        return {};
+      },
+    ),
+    /Invalid runtime tool call/,
+  );
+  assert.equal(calls, 0);
+});
 test("returns an explicit outcome from completed assistant output and scopes session to task", async () => {
   const calls: any[] = [];
   const fetcher = async (url: any, opts: any) => {

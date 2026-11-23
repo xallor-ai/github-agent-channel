@@ -118,7 +118,7 @@ JS
 }
 ```
 
-`agents.entries.github` 中的 **github就是agentId**。它默认继承已有模型配置；需要指定模型时，在这个entry里增加 `model`。`tools.deny`限制该Agent的内置工具，客户端提供的 `read_issue/read_file` 由连接器处理并交回ECS。`tools.toolSearch=false`在2026.11.3中是全局设置，不是entry内字段；它直接提供少量客户端工具的定义。共享Gateway时先评估该全局修改对其他Agent的影响，或者使用独立profile。
+`agents.entries.github` 中的 **github就是agentId**。它默认继承已有模型配置；需要指定模型时，在这个entry里增加 `model`。`tools.deny`限制该Agent的内置工具，客户端提供的 `read_issue/read_file` 由连接器处理并交回ECS。repository/push 任务只提供 `read_file`，分析保存在任务 outcome 中，不尝试向不存在的 Issue 发评论；文件仍从默认分支读取，不能当作指定 push SHA 的代码审查。`tools.toolSearch=false`在2026.11.3中是全局设置，不是entry内字段；它直接提供少量客户端工具的定义。共享Gateway时先评估该全局修改对其他Agent的影响，或者使用独立profile。
 
 先审阅片段并备份自己的配置，再执行（以下以新profile为例；已有专用默认实例去掉profile参数）：
 
