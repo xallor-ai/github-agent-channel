@@ -19,6 +19,8 @@ GitHub App 平台教程引用 modern-github-book 附录 B/C，链接在适配器
 
 后续复核与逐项治理状态见 [v2 代码与文档复核](code-document-review.md)。其中区分修正前证据与当前关闭状态，不以历史测试通过覆盖新发现。
 
+最新真实 OpenClaw 评审、重投去重及连续复核证据见 [Channel v2 真实评审闭环](channel-review-validation-20261123.md)。这不代表 ACP 编码→PR 已验收。
+
 ## 保留的历史证据
 
 | 文档                                               | 范围                                              |

@@ -33,6 +33,7 @@
 - Compare pinned SDK/runtime implementations before adding workspace, session or GitHub tooling. Prefer maintained protocol/SDK implementations; keep task policy and auth in Channel.
 - Current reuse: Octokit for GitHub App/Git Data/PR APIs, official ACP TypeScript SDK for harness protocol. Adapter-specific APIs must not become requirements on every Runtime.
 - Update capabilities, implementation map, relevant guide/examples and evidence with each change. Do not rebrand a partial adapter or mocked test as universal runtime interoperability.
+- Review changes through the GitHub Agent Channel with an exact commit/base and supplied diff/context; record the real delivery/task/runtime/publication receipt and verify model claims. Local review or fixture success alone does not complete this loop. Current OpenClaw tools do not fetch arbitrary commit/PR diffs; never substitute default-branch files for the review target.
 - Bridge config loading returns separate config and resolved secrets; resolve credentials once, pass only the runtime token to its factory, and render only config. OpenClaw configuration types are inferred from the schema. Do not restore unused capabilities declarations.
 - CLI init templates come from src/examples.ts; keep deploy example files and guide YAML consistent.
 - Secret File references and agent stateFile are relative to config; native cloud dataFile is relative to cwd. Container paths are fixed /data. Fresh v2 stores are required for this breaking revision.

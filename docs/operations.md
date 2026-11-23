@@ -85,6 +85,8 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 ## 预构建镜像
 
+用一次性容器生成部署 bundle 时，生成用户应与后续执行 Compose 的部署账号一致，并确保它能读到引用的 secret。否则生成器创建的700目录可能属于root，普通账号运行 Compose 时会报 `.env: permission denied`。确需由root生成时，只修正该次输出目录和配置的归属，不放宽所有 secret 权限；本次实际遇到并解决的情况见[真实评审闭环](channel-review-validation-20261123.md)。
+
 两端配置可选 `deployment.image: registry.example.com/team/github-agent-channel:<commit>`，生成器只使用image而不要求目标主机build context。未设置时仍从当前源码目录构建。镜像需包含编译后的dist和生产依赖（仓库Dockerfile）。
 
 目标机没有Node时，可用同一镜像运行配置生成CLI。将配置目录及输出目录按相同绝对路径挂载到一次性容器，执行 `node dist/cli.js deploy render <cloud-config> <bundle>`（Agent用 `agent deploy render`），然后在宿主执行 `docker compose -f <bundle>/compose.yaml up -d --wait`。secret文件仍由宿主Docker按生成引用挂载，不复制到镜像。生成容器与长期服务的UID应正确配置；应用服务保持UID1000。
