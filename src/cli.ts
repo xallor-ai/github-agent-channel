@@ -26,7 +26,7 @@ async function main(argv: string[]) {
         console.log(
           JSON.stringify(
             renderAgentDeployment(
-              loadAgentConfig(source),
+              loadAgentConfig(source).config,
               source,
               argv[4] ?? ".channel-agent",
             ),

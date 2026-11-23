@@ -10,16 +10,8 @@ import {
   outcomeSchema,
   publicationReceiptSchema,
 } from "./outcomes.js";
-import {
-  AmbiguousExecution,
-  type RuntimeConnector,
-  type Task,
-} from "./contracts.js";
-import {
-  loadAgentConfig,
-  agentSecrets,
-  type AgentConfig,
-} from "./agent-config.js";
+import { AmbiguousExecution, type RuntimeConnector } from "./contracts.js";
+import { loadAgentConfig, type AgentConfig } from "./agent-config.js";
 import {
   AgentStore,
   type Assignment,
@@ -240,10 +232,9 @@ export async function runAgent(
   configPath: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const config = loadAgentConfig(configPath);
-  const secrets = agentSecrets(config, configPath);
+  const { config, secrets } = loadAgentConfig(configPath);
   const store = new AgentStore(config.stateFile);
-  const runtime = createRuntime(config, configPath);
+  const runtime = createRuntime(config.runtime, configPath, secrets.runtime);
   const agent = new Agent(config, store, runtime, secrets.channel);
   let failures = 0;
   try {

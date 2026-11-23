@@ -39,7 +39,7 @@ assert.equal(reopened.get(id)?.outcome?.artifacts?.[0].kind, "change_set");
 
 Files: `src/agent-config.ts`, `src/runtime-factory.ts`, `src/acp-connector.ts`, `src/runtime-workspace.ts`, `src/agent-deploy.ts`; `tests/acp-connector.test.ts`, `tests/runtime-factory.test.ts`.
 
-Consumes shared types in spec; produces `createRuntime(config,configPath): RuntimeConnector`. Required discriminator; ACP command/cwd map/env references configured locally. Reuse SDK app API; real child-process fixture exercises protocol. Use native Git only to inspect prepared clean workspaces/collect changes, existing Agent edits. Explicit configured verification command records test report.
+Consumes shared types in spec; produces `createRuntime(runtime,configPath,token?): RuntimeConnector`. Required discriminator; ACP command/cwd map/env references configured locally. Reuse SDK app API; real child-process fixture exercises protocol. Use native Git only to inspect prepared clean workspaces/collect changes, existing Agent edits. Explicit configured verification command records test report.
 
 - [x] Tests fail for ACP selection, workspace scope drift, protocol interruption, result collection and cancellation ambiguity.
 - [x] Implement factory/schema and ACP SDK connection with bounded output, no secret logging, no cloud/admin environment leakage.

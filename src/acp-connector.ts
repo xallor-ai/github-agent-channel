@@ -46,13 +46,6 @@ export function runtimeEnvironment(
 }
 const activeWorkspaces = new Set<string>();
 export class AcpConnector implements RuntimeConnector {
-  readonly capabilities = {
-    provider: "acp",
-    readTools: false,
-    workspace: true,
-    cancel: true,
-    resume: false,
-  };
   constructor(
     private config: AcpRuntimeConfig,
     private configPath: string,

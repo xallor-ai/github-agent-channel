@@ -27,6 +27,21 @@
 
 本轮完成验证：Windows Node 24.18.0 全量 **150项通过、0失败**；类型、构建、代码格式、20份文档的151个本地链接与25个表格列数检查通过。独立复核实测 Git 的 H/h/S/s 标志及 gitlink 输出，未发现新增缺陷。仅修改一个生产模块，复用索引检查和 HEAD 读取，无新增依赖或配置项；未重跑 Linux/Docker 或真实模型/GitHub 验收。
 
+## 代码洁净度收敛（2026-11-23）
+
+| 项目             | 实施结果                                                                                                                      |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 无用导入         | 删除 agent 的 Task 与 pull 的 validateOutcome；启用 noUnusedLocals/noUnusedParameters                                         |
+| 无消费者能力声明 | 删除 RuntimeConnector 和两适配器的 capabilities；factory 测试改为检查实际构造的适配器                                         |
+| 重复读取凭据     | loadAgentConfig 一次返回分离的 config/secrets；bridge 直接使用，factory 不再读文件；CLI 渲染仅传 config                       |
+| 配置类型双份维护 | 删除 contracts 中 OpenClaw 手写接口，从唯一配置 schema 推导                                                                   |
+| 弱类型响应解析   | 接收到 unknown 后校验 status 和完成响应结构；畸形消息或非字符串工具 arguments 在工具调用前拒绝；仍忽略 reasoning 等非最终输出 |
+| 多余导出         | acpSchema、artifactSchema、publicationSchema、outcomeShape 和凭据解析函数收回模块私有                                         |
+
+新回归先复现三项缺口：凭据无单次加载结果、非字符串工具 arguments 被 JSON.parse 强制转换后调用工具、畸形 completed 输出产生 TypeError。修正后定向测试通过。schema 和格式检查不替代真实模型验收；没有修改授权、租约、结果持久化或发布策略。
+
+本轮验证：`npx tsx --test --test-concurrency=1 tests/*.test.ts` **153通过、0失败**。首次并行运行151通过、2失败，失败分别涉及本地HTTP 1秒期限和启动进程10秒期限；不修改代码或超时的单独复跑14项通过，随后串行全量通过，因此不把首次并行运行记录为全绿。启用 unused 检查后的类型检查、构建、格式检查通过；20份文档、151个本地链接、26个表格检查通过。额外实际渲染确认生成配置不含解析后的凭据值。独立源码复核未发现新增问题。生产源码净减少8行；无新增依赖、配置字段或公网协议变更。本轮未重跑 Linux/Docker 或真实模型/GitHub 验收。
+
 ## 原审查发现
 
 | ID  | 优先级 | 位置                                                                                                                                                                                                                           | 问题与影响                                                                                               | 修正建议                                                     |

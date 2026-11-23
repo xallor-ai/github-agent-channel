@@ -30,11 +30,11 @@
 | [github-publication.ts](../src/github-publication.ts) | 显式 writePolicy；基线/路径/模式检查；服务端分支、Git Data commit 和 draft PR；每次写入重授权             |
 | [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment 或 pull_request；none 已在存储置 skipped                                  |
 | [outcomes.ts](../src/outcomes.ts)                     | source/target/runtime/产物/发布 schema；有界 payload，拒绝额外身份字段                                    |
-| [agent-config.ts](../src/agent-config.ts)             | type 必填：openclaw 或 acp；命令、工作区、环境引用由管理员配置                                            |
+| [agent-config.ts](../src/agent-config.ts)             | type 必填；类型从 schema 推导，加载一次返回分离的 config/secrets；命令与工作区由管理员配置                |
 | [agent-store.ts](../src/agent-store.ts)               | schema v2 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
 | [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
-| [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，无默认 provider 和未知类型回退                                            |
-| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 适配器；两种受控读取工具，返回明确评论/none outcome                                    |
+| [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，接收已解析 token，不再读取凭据或保留空能力声明                            |
+| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；两种受控读取工具，返回明确评论/none outcome                          |
 | [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
 | [runtime-workspace.ts](../src/runtime-workspace.ts)   | 干净 clone 的 origin/目标 SHA/元数据检查；共用索引校验拒绝隐藏修改；收集实际变更，不 clone/reset/push     |
 | [cli.ts](../src/cli.ts)                               | 初始化、校验、渲染、生命周期、agent run；不安装 harness/App 或替用户开启 writePolicy                      |

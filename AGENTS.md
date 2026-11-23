@@ -33,10 +33,12 @@
 - Compare pinned SDK/runtime implementations before adding workspace, session or GitHub tooling. Prefer maintained protocol/SDK implementations; keep task policy and auth in Channel.
 - Current reuse: Octokit for GitHub App/Git Data/PR APIs, official ACP TypeScript SDK for harness protocol. Adapter-specific APIs must not become requirements on every Runtime.
 - Update capabilities, implementation map, relevant guide/examples and evidence with each change. Do not rebrand a partial adapter or mocked test as universal runtime interoperability.
+- Bridge config loading returns separate config and resolved secrets; resolve credentials once, pass only the runtime token to its factory, and render only config. OpenClaw configuration types are inferred from the schema. Do not restore unused capabilities declarations.
 - CLI init templates come from src/examples.ts; keep deploy example files and guide YAML consistent.
 - Secret File references and agent stateFile are relative to config; native cloud dataFile is relative to cwd. Container paths are fixed /data. Fresh v2 stores are required for this breaking revision.
 - Node24 required. npm run channel uses source CLI; npm start uses compiled cloud main. Docker defaults to cloud, generated bridge command overrides it.
 - doctor is offline; healthz is process liveness. Unit/HTTP and Docker smoke use synthetic GitHub/model behavior. smoke:openclaw uses a real model with synthetic read tools. Live outcomes require separate evidence.
+- Type checking enables noUnusedLocals and noUnusedParameters. Keep protocol inputs unknown until schema validation; do not reintroduce any-based response parsing.
 - CI is .github/workflows/checks.yml. format:check covers src/tests/scripts; validate Markdown, configuration examples and links separately.
 
 ## Invariants

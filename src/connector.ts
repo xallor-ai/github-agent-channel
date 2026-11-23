@@ -1,6 +1,7 @@
+import { z } from "zod";
+import type { OpenClawRuntimeConfig } from "./agent-config.js";
 import {
   AmbiguousExecution,
-  type OpenClawRuntimeConfig,
   type RuntimeConnector,
   type RuntimeResult,
   type Task,
@@ -30,14 +31,41 @@ const tools = [
   },
 ];
 
+const textContentSchema = z.union([
+  z.object({ type: z.literal("output_text"), text: z.string() }),
+  z
+    .object({ type: z.string().refine((type) => type !== "output_text") })
+    .transform(() => ({ type: "ignored" as const })),
+]);
+const responseSchema = z.object({
+  id: z.string().min(1).optional(),
+  status: z.literal("completed"),
+  output: z.array(
+    z.union([
+      z.object({
+        type: z.literal("function_call"),
+        name: z.string(),
+        call_id: z.string().min(1),
+        arguments: z.string(),
+      }),
+      z.object({
+        type: z.literal("message"),
+        role: z.string(),
+        content: z.array(textContentSchema),
+      }),
+      z
+        .object({
+          type: z
+            .string()
+            .refine((type) => type !== "function_call" && type !== "message"),
+        })
+        .transform(() => ({ type: "ignored" as const })),
+    ]),
+  ),
+});
+const statusSchema = z.object({ status: z.string() });
+
 export class OpenClawConnector implements RuntimeConnector {
-  readonly capabilities = {
-    provider: "openclaw",
-    readTools: true,
-    workspace: false,
-    cancel: false,
-    resume: false,
-  };
   constructor(
     private config: OpenClawRuntimeConfig,
     private token: string,
@@ -97,7 +125,7 @@ export class OpenClawConnector implements RuntimeConnector {
           );
         throw new Error(`Runtime rejected request (HTTP ${response.status})`);
       }
-      let payload: any;
+      let payload: unknown;
       try {
         if (Number(response.headers.get("content-length") ?? 0) > 2_000_000)
           throw Error("too large");
@@ -121,28 +149,31 @@ export class OpenClawConnector implements RuntimeConnector {
           "Runtime response invalid or interrupted; execution state unknown",
         );
       }
-      if (payload?.status !== "completed") {
-        if (["failed", "cancelled", "incomplete"].includes(payload?.status))
+      const status = statusSchema.safeParse(payload);
+      if (!status.success || status.data.status !== "completed") {
+        if (
+          status.success &&
+          ["failed", "cancelled", "incomplete"].includes(status.data.status)
+        )
           throw new Error("Runtime ended without a completed response");
         throw new AmbiguousExecution(
           "Runtime has no confirmed terminal status",
         );
       }
-      if (!Array.isArray(payload.output))
-        throw new Error("Runtime output is invalid");
-      const calls = payload.output.filter(
-        (item: any) => item.type === "function_call",
+      const parsed = responseSchema.safeParse(payload);
+      if (!parsed.success) throw new Error("Runtime output is invalid");
+      const responseData = parsed.data;
+      const calls = responseData.output.filter(
+        (item) => item.type === "function_call",
       );
       if (calls.length) {
-        if (calls.length > 8 || typeof payload.id !== "string" || !payload.id)
+        if (calls.length > 8 || !responseData.id)
           throw new Error("Invalid runtime tool response");
         input = [];
         const seen = new Set<string>();
         for (const call of calls) {
           if (
             !tools.some((tool) => tool.name === call.name) ||
-            typeof call.call_id !== "string" ||
-            !call.call_id ||
             seen.has(call.call_id)
           )
             throw new Error("Invalid runtime tool call");
@@ -160,21 +191,14 @@ export class OpenClawConnector implements RuntimeConnector {
             output: JSON.stringify(result),
           });
         }
-        previous = payload.id;
+        previous = responseData.id;
         continue;
       }
-      const text = payload.output
-        .filter(
-          (item: any) => item.type === "message" && item.role === "assistant",
-        )
-        .flatMap((item: any) =>
-          Array.isArray(item.content) ? item.content : [],
-        )
-        .filter(
-          (item: any) =>
-            item.type === "output_text" && typeof item.text === "string",
-        )
-        .map((item: any) => item.text)
+      const text = responseData.output
+        .filter((item) => item.type === "message" && item.role === "assistant")
+        .flatMap((item) => (item.type === "message" ? item.content : []))
+        .filter((item) => item.type === "output_text")
+        .map((item) => item.text)
         .join("\n")
         .trim();
       if (!text) throw new Error("Runtime provided no final answer");
@@ -186,7 +210,7 @@ export class OpenClawConnector implements RuntimeConnector {
         publication: {
           kind: task.target.kind === "repository" ? "none" : "comment",
         },
-        responseId: typeof payload.id === "string" ? payload.id : undefined,
+        responseId: responseData.id,
       };
     }
     throw new Error("Runtime tool round limit reached");

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadAgentConfig, agentSecrets } from "../src/agent-config.js";
+import { loadAgentConfig } from "../src/agent-config.js";
 
 test("agent config accepts file refs relative to config and rejects public HTTP and GitHub keys", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-config-"));
@@ -26,13 +26,13 @@ test("agent config accepts file refs relative to config and rejects public HTTP 
   };
   const save = () => writeFileSync(path, JSON.stringify(cfg));
   save();
-  const parsed = loadAgentConfig(path, {});
+  const { config: parsed, secrets } = loadAgentConfig(path, {});
   assert.equal(parsed.stateFile, join(dir, "state.db"));
-  assert.equal(agentSecrets(parsed, path, {}).channel, "secret-value");
+  assert.equal(secrets.channel, "secret-value");
   cfg.deployment = { image: "ghcr.io/example/agent:1.2.3" };
   save();
   assert.equal(
-    loadAgentConfig(path).deployment?.image,
+    loadAgentConfig(path).config.deployment?.image,
     "ghcr.io/example/agent:1.2.3",
   );
   for (const image of [

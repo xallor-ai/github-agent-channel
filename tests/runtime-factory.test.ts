@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRuntime } from "../src/runtime-factory.js";
-import { agentSecrets, loadAgentConfig } from "../src/agent-config.js";
+import { loadAgentConfig } from "../src/agent-config.js";
+import { AcpConnector } from "../src/acp-connector.js";
 import { OpenClawConnector } from "../src/connector.js";
 import { mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,14 +24,10 @@ const config: any = {
   requestTimeoutMs: 1000,
 };
 test("factory selects ACP without a Gateway secret and rejects container rendering", () => {
-  assert.equal(
-    createRuntime(config, "agent.yaml").capabilities?.provider,
-    "acp",
+  assert.ok(
+    createRuntime(config.runtime, "agent.yaml") instanceof AcpConnector,
   );
-  assert.equal(
-    agentSecrets(config, "agent.yaml", { CHANNEL: "secret" }).runtime,
-    "",
-  );
+
   assert.throws(
     () => renderAgentDeployment(config, "agent.yaml", "unused"),
     /native/i,
@@ -38,8 +35,7 @@ test("factory selects ACP without a Gateway secret and rejects container renderi
 });
 test("unknown runtime is rejected", () => {
   assert.throws(
-    () =>
-      createRuntime({ ...config, runtime: { type: "invalid" } }, "agent.yaml"),
+    () => createRuntime({ type: "invalid" } as never, "agent.yaml"),
     /runtime/i,
   );
 });
@@ -66,11 +62,19 @@ test("runtime type is mandatory and explicit OpenClaw and ACP configs load", (t)
   };
   writeFileSync(path, JSON.stringify(openclaw));
   assert.throws(() => loadAgentConfig(path), /runtime/);
-  assert.throws(() => createRuntime(openclaw, path), /runtime/);
+  assert.throws(
+    () => createRuntime(openclaw.runtime as never, path),
+    /runtime/,
+  );
   (openclaw.runtime as any).type = "openclaw";
   writeFileSync(path, JSON.stringify(openclaw));
+  const loadedOpenclaw = loadAgentConfig(path);
   assert.ok(
-    createRuntime(loadAgentConfig(path), path) instanceof OpenClawConnector,
+    createRuntime(
+      loadedOpenclaw.config.runtime,
+      path,
+      loadedOpenclaw.secrets.runtime,
+    ) instanceof OpenClawConnector,
   );
   const input = {
     ...config,
@@ -80,7 +84,8 @@ test("runtime type is mandatory and explicit OpenClaw and ACP configs load", (t)
   delete input.runtime.args;
   delete input.runtime.envRefs;
   writeFileSync(path, JSON.stringify(input));
-  const loaded = loadAgentConfig(path);
+  const { config: loaded, secrets } = loadAgentConfig(path);
+  assert.equal(secrets.runtime, undefined);
   assert.equal(loaded.runtime.type, "acp");
   if (loaded.runtime.type === "acp") {
     assert.deepEqual(loaded.runtime.args, []);
@@ -89,4 +94,47 @@ test("runtime type is mandatory and explicit OpenClaw and ACP configs load", (t)
   delete input.runtime.permissionPolicy;
   writeFileSync(path, JSON.stringify(input));
   assert.throws(() => loadAgentConfig(path), /Invalid agent configuration/);
+});
+test("loaded credentials are a single snapshot and runtime construction does not reread files", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "runtime-snapshot-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "agent.json");
+  const token = join(dir, "token");
+  writeFileSync(token, "gateway-secret");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      ...config,
+      channel: { baseUrl: "https://channel.example", tokenEnv: "CHANNEL" },
+      runtime: {
+        type: "openclaw",
+        baseUrl: "http://localhost",
+        tokenFile: "token",
+        agentId: "github",
+        timeoutMs: 1000,
+        maxToolRounds: 2,
+      },
+    }),
+  );
+  let reads = 0;
+  const loaded = loadAgentConfig(path, {
+    get CHANNEL() {
+      reads++;
+      return "connector-secret";
+    },
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(loaded.secrets, {
+    channel: "connector-secret",
+    runtime: "gateway-secret",
+  });
+  assert.equal(JSON.stringify(loaded.config).includes("gateway-secret"), false);
+  rmSync(token);
+  assert.ok(
+    createRuntime(
+      loaded.config.runtime,
+      path,
+      loaded.secrets.runtime,
+    ) instanceof OpenClawConnector,
+  );
 });

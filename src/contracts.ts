@@ -28,15 +28,6 @@ export interface Binding {
     maxBytes?: number;
   };
 }
-export interface OpenClawRuntimeConfig {
-  type: "openclaw";
-  baseUrl: string;
-  tokenEnv?: string;
-  tokenFile?: string;
-  agentId: string;
-  timeoutMs: number;
-  maxToolRounds: number;
-}
 export interface ChannelConfig {
   server: {
     host: string;
@@ -138,13 +129,6 @@ export interface RuntimeResult {
   publication: PublicationRequest;
 }
 export interface RuntimeConnector {
-  capabilities?: {
-    provider: string;
-    readTools: boolean;
-    workspace: boolean;
-    cancel: boolean;
-    resume: boolean;
-  };
   run(
     task: Task,
     invoke: ToolInvoker,

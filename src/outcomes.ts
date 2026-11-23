@@ -63,7 +63,7 @@ const files = z
     "Change set too large",
   );
 const name = z.string().min(1).max(200);
-export const artifactSchema = z.discriminatedUnion("kind", [
+const artifactSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("text"),
     name,
@@ -90,7 +90,7 @@ export const artifactSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({ kind: z.literal("change_set"), name, baseSha: sha, files }),
 ]);
-export const publicationSchema = z.discriminatedUnion("kind", [
+const publicationSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
   z.strictObject({ kind: z.literal("comment") }),
   z.strictObject({
@@ -102,7 +102,7 @@ export const publicationSchema = z.discriminatedUnion("kind", [
     files,
   }),
 ]);
-export const outcomeShape = {
+const outcomeShape = {
   text: z.string().max(18000),
   responseId: z.string().min(1).max(1024).optional(),
   artifacts: z.array(artifactSchema).max(10),

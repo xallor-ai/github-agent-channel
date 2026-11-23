@@ -32,7 +32,6 @@ const resultSchema = z.discriminatedUnion("status", [
 ]);
 import {
   outcomeSchema,
-  validateOutcome,
   validateTaskOutcome,
   runtimeEventSchema,
   MAX_RESULT_BYTES,

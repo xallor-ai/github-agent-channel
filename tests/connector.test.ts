@@ -206,3 +206,49 @@ test("timeout and nonterminal runtime responses remain ambiguous", async () => {
     );
   }
 });
+
+test("tool arguments must be a JSON string, not a coerced primitive", async () => {
+  let invoked = false;
+  const c = new OpenClawConnector(settings, "secret", (async () =>
+    Response.json({
+      status: "completed",
+      id: "r",
+      output: [
+        {
+          type: "function_call",
+          name: "read_issue",
+          call_id: "c",
+          arguments: 42,
+        },
+      ],
+    })) as typeof fetch);
+  await assert.rejects(
+    c.run(task, async () => {
+      invoked = true;
+      return {};
+    }),
+  );
+  assert.equal(invoked, false);
+});
+
+test("malformed completed output is rejected before any tool call", async () => {
+  for (const output of [
+    [null],
+    [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: 42 }],
+      },
+    ],
+  ]) {
+    const c = new OpenClawConnector(settings, "secret", (async () =>
+      Response.json({ status: "completed", output })) as typeof fetch);
+    await assert.rejects(
+      c.run(task, async () => {
+        throw Error("must not invoke");
+      }),
+      /Runtime output is invalid/,
+    );
+  }
+});

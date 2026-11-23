@@ -45,7 +45,7 @@ type PublicationRequest =
 type RuntimeEvent = { kind: "started"; runId: string; provider: string };
 ```
 
-`RuntimeConnector.run(task, invoke, signal?, onEvent?)` 接受规范 Task 并返回规范 outcome，onEvent 必须 await 落盘。`capabilities` 描述 provider、readTools、workspace、cancel、resume；不支持的恢复能力不伪造。
+`RuntimeConnector.run(task, invoke, signal?, onEvent?)` 接受规范 Task 并返回规范 outcome，onEvent 必须 await 落盘。适配器由显式 runtime.type 选择，运行事件记录 provider；删除无生产消费者的 capabilities 声明。不支持的取消/恢复行为在对应适配器文档中明确说明，不假设存在能力协商。
 
 `GitHubClient.publishPullRequest(task, request)` 返回 `{id,url}`；只有显式 PR publication 才调用。评论使用明确的 `publishComment(task,text)`。每个适配器必须显式选择 publication，不允许缺失字段或服务端回退推断。产物可独立保存，不要求总是发评论。
 

@@ -30,7 +30,7 @@ const commandSchema = z.strictObject({
   args: z.array(z.string()).default([]),
   timeoutMs: z.number().int().min(1).max(3600000),
 });
-export const acpSchema = z.strictObject({
+const acpSchema = z.strictObject({
   type: z.literal("acp"),
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
@@ -47,22 +47,21 @@ export const acpSchema = z.strictObject({
     .optional(),
 });
 export type AcpRuntimeConfig = z.infer<typeof acpSchema>;
+const openclawSchema = z.strictObject({
+  type: z.literal("openclaw"),
+  baseUrl: z.string().refine((v) => origin(v, false)),
+  ...ref,
+  agentId: z.string().min(1),
+  timeoutMs: z.number().int().min(1).max(3600000),
+  maxToolRounds: z.number().int().min(1).max(100),
+});
+export type OpenClawRuntimeConfig = z.infer<typeof openclawSchema>;
 const schema = z.strictObject({
   channel: z.strictObject({
     baseUrl: z.string().refine((v) => origin(v, true)),
     ...ref,
   }),
-  runtime: z.union([
-    z.strictObject({
-      type: z.literal("openclaw"),
-      baseUrl: z.string().refine((v) => origin(v, false)),
-      ...ref,
-      agentId: z.string().min(1),
-      timeoutMs: z.number().int().min(1).max(3600000),
-      maxToolRounds: z.number().int().min(1).max(100),
-    }),
-    acpSchema,
-  ]),
+  runtime: z.union([openclawSchema, acpSchema]),
   stateFile: z.string().min(1),
   pollIntervalMs: z.number().int().min(100).max(60000),
   requestTimeoutMs: z.number().int().min(100).max(60000),
@@ -87,14 +86,15 @@ const schema = z.strictObject({
 export type AgentConfig = z.infer<typeof schema>;
 type Env = Record<string, string | undefined>;
 
-export function agentSecrets(
+function agentSecrets(
   config: AgentConfig,
   path: string,
   env: Env = process.env,
 ) {
-  const read = (name: "channel" | "runtime") => {
-    const ref = config[name];
-    if ("type" in ref && ref.type === "acp") return "";
+  const read = (
+    name: string,
+    ref: { tokenFile?: string; tokenEnv?: string },
+  ) => {
     if ((ref.tokenFile === undefined) === (ref.tokenEnv === undefined))
       throw Error(name + ".token requires exactly one File or Env reference");
     let token: string | undefined;
@@ -108,12 +108,15 @@ export function agentSecrets(
     if (!token?.trim()) throw Error(name + ".token is empty");
     return token.trim();
   };
-  return { channel: read("channel"), runtime: read("runtime") };
+  return {
+    channel: read("channel", config.channel),
+    runtime:
+      config.runtime.type === "openclaw"
+        ? read("runtime", config.runtime)
+        : undefined,
+  };
 }
-export function loadAgentConfig(
-  path: string,
-  env: Env = process.env,
-): AgentConfig {
+export function loadAgentConfig(path: string, env: Env = process.env) {
   let input: unknown;
   try {
     input = parse(readFileSync(path, "utf8"));
@@ -127,7 +130,7 @@ export function loadAgentConfig(
         (parsed.error.issues[0].path.join(".") || "configuration"),
     );
   const config = parsed.data;
-  agentSecrets(config, path, env);
+  const secrets = agentSecrets(config, path, env);
   config.stateFile = resolve(dirname(resolve(path)), config.stateFile);
-  return config;
+  return { config, secrets };
 }
