@@ -79,7 +79,7 @@ export class OpenClawConnector implements RuntimeConnector {
     onEvent?: (event: RuntimeEvent) => Promise<void>,
   ): Promise<RuntimeResult> {
     const availableTools = tools.filter(
-      (tool) => task.target.kind !== "repository" || tool.name !== "read_issue",
+      (tool) => task.target.kind !== "repository" || tool.name === "read_file",
     );
     const deadline = AbortSignal.timeout(this.config.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
