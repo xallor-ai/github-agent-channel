@@ -142,6 +142,69 @@ test("unknown tools, incomplete status and malformed arguments do not succeed", 
     );
   }
 });
+test("rejects a duplicate call ID after executing the first valid tool call", async () => {
+  const invocations: Array<{ name: string; args: unknown }> = [];
+  const connector = new OpenClawConnector(settings, "secret", (async () =>
+    Response.json({
+      id: "duplicate-call-id-response",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          call_id: "first-call-id",
+          name: "read_issue",
+          arguments: "{}",
+        },
+        {
+          type: "function_call",
+          call_id: "first-call-id",
+          name: "read_issue",
+          arguments: "{}",
+        },
+      ],
+    })) as typeof fetch);
+
+  await assert.rejects(
+    connector.run(task, async (name, args) => {
+      invocations.push({ name, args });
+      return { title: "issue" };
+    }),
+    /Invalid runtime tool call/,
+  );
+  assert.deepEqual(invocations, [{ name: "read_issue", args: {} }]);
+});
+
+test("rejects an unknown tool after executing the first valid tool call", async () => {
+  const invocations: Array<{ name: string; args: unknown }> = [];
+  const connector = new OpenClawConnector(settings, "secret", (async () =>
+    Response.json({
+      id: "unknown-tool-response",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          call_id: "valid-call-id",
+          name: "read_issue",
+          arguments: "{}",
+        },
+        {
+          type: "function_call",
+          call_id: "unknown-call-id",
+          name: "write_issue",
+          arguments: "{}",
+        },
+      ],
+    })) as typeof fetch);
+
+  await assert.rejects(
+    connector.run(task, async (name, args) => {
+      invocations.push({ name, args });
+      return { title: "issue" };
+    }),
+    /Invalid runtime tool call/,
+  );
+  assert.deepEqual(invocations, [{ name: "read_issue", args: {} }]);
+});
 test("transport interruption is ambiguous, not retried", async () => {
   let count = 0;
   const connector = new OpenClawConnector(settings, "secret", (async () => {
