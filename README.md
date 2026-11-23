@@ -56,7 +56,7 @@ npm run channel -- agent run ./agent-data/agent.local.yaml
 
 ## 开发与验证
 
-修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。当前已验收 OpenClaw 读取差异并回帖，ACP 真实编码→PR 仍待单独验收。
+修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。OpenClaw 读取差异并回帖、OpenCode ACP 实际编码→验证→PR→Channel 评审均已有[真实验收记录](docs/acp-live-validation-20261124.md)。
 
 ```sh
 npm test

@@ -133,3 +133,16 @@ editing/model behavior. They do not establish compatibility with a particular re
 coding harness or live GitHub/model acceptance; record that separately before use.
 
 Cloud event/writePolicy, App Contents permission, fresh state stores and complete acceptance checklist: [Channel v2 contract](protocol-v2.md).
+
+## Validated native harness
+
+[Live acceptance](acp-live-validation-20261124.md) used an existing OpenCode 1.3.17
+installation with `opencode acp --pure` and a private provider profile. The harness
+edited a real repository file; Channel independently verified it and published PR #4.
+Use absolute executable and workspace paths. If the harness reads its profile via
+HOME/XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_CACHE_HOME/XDG_STATE_HOME, explicitly map
+those directories through `envRefs`; keep credentials in that private profile.
+Verification receives neither those harness references nor bridge credentials.
+After publication the edited checkout remains dirty: review it and prepare a fresh
+clean clone for another task. Channel does not silently reset the worktree.
+This validates one installed harness, not universal ACP compatibility.
