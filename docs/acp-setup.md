@@ -11,7 +11,10 @@ before writing a deployment bundle.
 
 Prepare a dedicated clean local Git checkout with `origin` pointing to the task's
 `https://github.com/OWNER/REPO.git` (GitHub SSH forms also work). Configure the
-numeric repository ID and absolute checkout path. Relative workspace paths resolve
+numeric repository ID and absolute checkout path. For a repository task with an
+explicit target SHA (such as a push), HEAD must equal that SHA before the harness
+can start. A detached HEAD at that commit is accepted; the ref name is not used
+to switch branches. Prepare the checkout yourself; a mismatch is rejected. Relative workspace paths resolve
 against the agent configuration file. Do not share a checkout between bridge
 processes. This adapter does not clone, reset, clean, commit or push the checkout.
 
@@ -69,6 +72,11 @@ configuration, fsmonitor, hooks, external diff/textconv, submodule inspection an
 network protocols are disabled. Repository filters, executable helper configuration,
 includes, partial clones, linked worktrees, alternate object stores and metadata
 redirection are rejected. Use a normal dedicated clone without those features.
+Index entries marked `skip-worktree` or `assume-unchanged` are rejected both
+before execution and whenever changes are collected, including after verification.
+These flags can hide modified files from Git status/diff. Channel does not clear
+them or reset files automatically. A flag introduced after execution starts causes
+the existing unknown/reconciliation path, rather than an incomplete publication.
 The local Git configuration is fingerprinted before execution and must remain
 unchanged when collecting results. These checks do not provide an OS isolation
 boundary against another native process concurrently changing the checkout.

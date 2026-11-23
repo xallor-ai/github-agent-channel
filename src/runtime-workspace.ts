@@ -128,6 +128,16 @@ export function git(cwd: string, ...args: string[]): string {
     );
   return runGit(cwd, args);
 }
+function validateIndex(cwd: string): void {
+  // -v exposes assume-unchanged as lowercase tags and skip-worktree as S/s.
+  // NUL records keep filenames (including newlines) out of flag parsing.
+  for (const entry of git(cwd, "ls-files", "--stage", "-v", "-z").split("\0")) {
+    if (/^[a-zS]/.test(entry))
+      throw Error("Git index flags can hide changes; workspace is unsupported");
+    if (/^. 160000 /.test(entry))
+      throw Error("Submodule workspaces are unsupported");
+  }
+}
 export function inspectWorkspace(path: string, task: Task) {
   const cwd = realpathSync.native(path);
   if (realpathSync.native(git(cwd, "rev-parse", "--show-toplevel")) !== cwd)
@@ -139,12 +149,7 @@ export function inspectWorkspace(path: string, task: Task) {
   );
   if (!match || match[1].toLowerCase() !== expected)
     throw Error("Workspace origin does not match task repository");
-  if (
-    git(cwd, "ls-files", "--stage")
-      .split("\n")
-      .some((line) => line.startsWith("160000 "))
-  )
-    throw Error("Submodule workspaces are unsupported");
+  validateIndex(cwd);
   if (
     git(
       cwd,
@@ -155,9 +160,16 @@ export function inspectWorkspace(path: string, task: Task) {
     )
   )
     throw Error("Workspace must be clean");
+  const baseSha = git(cwd, "rev-parse", "HEAD");
+  if (
+    task.target.kind === "repository" &&
+    task.target.sha !== undefined &&
+    task.target.sha.toLowerCase() !== baseSha
+  )
+    throw Error("Workspace HEAD does not match task target SHA");
   return {
     cwd,
-    baseSha: git(cwd, "rev-parse", "HEAD"),
+    baseSha,
     metadataHash: metadata(cwd),
   };
 }
@@ -168,6 +180,7 @@ export function collectChanges(
 ): ChangedFile[] {
   cwd = realpathSync.native(cwd);
   metadata(cwd, metadataHash);
+  validateIndex(cwd);
   if (git(cwd, "rev-parse", "HEAD") !== baseSha)
     throw Error("Runtime changed HEAD; refusing publication");
   // A staged mode/type change can be cancelled out by the working-tree state

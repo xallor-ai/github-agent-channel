@@ -25,6 +25,7 @@
 - Bindings events are opt-in; subscribing all GitHub events does not implement them. PR writes require explicit writePolicy. Core derives the head branch and validates repository, base SHA, paths and actor.
 - Cloud Inbox and local journal protect different network boundaries. Startup/expiry uncertainty is not proof execution stopped; no automatic model or GitHub side-effect replay. Unknown execution may only be reconciled to failed, not promoted to success.
 - ACP process permissions are not an OS sandbox. Dedicated normal clean clones only; no shared workspaces, symlinks/submodules/alternate Git metadata. The harness and verification subprocesses must not inherit bridge credentials; verification does not receive harness auth envRefs.
+- Reject skip-worktree/assume-unchanged index flags at workspace admission and every change collection; they hide actual edits from Git. A repository target SHA must match workspace HEAD before ACP starts. Never silently clear flags, reset or switch branches.
 - ACP native bridge is supported; ACP Docker render explicitly fails. Do not imply the provided Channel image bundles a coding harness or a workspace sandbox.
 
 ## Reuse and maintenance

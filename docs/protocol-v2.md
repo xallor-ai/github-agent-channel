@@ -43,7 +43,7 @@ allowedPaths 支持精确文件和以 `/` 或 `/**` 结尾的目录前缀；不�
 | `POST /connector/v2/tasks/<id>/tool`      | `{leaseToken,name,args}`；当前受控读取工具为 read_issue/read_file                      |
 | `POST /connector/v2/tasks/<id>/result`    | `{leaseToken,status:"succeeded",outcome}` 或 `{leaseToken,status:"failed"或"unknown"}` |
 
-所有任务的 target/source 必填。Issue/PR 的号码在 target.number，仓库目标可以携带 ref/sha；评论 ID 只在原始 source.commentId。安装、仓库和 actor 来自服务端，不允许 Runtime 提交替换字段。
+所有任务的 target/source 必填。Issue/PR 的号码在 target.number，仓库目标可以携带 ref/sha；ACP 对明确的 target.sha 校验工作区 HEAD，不匹配时拒绝启动，不自动切分支；评论 ID 只在原始 source.commentId。安装、仓库和 actor 来自服务端，不允许 Runtime 提交替换字段。
 
 成功 outcome 必须包含 text、artifacts 数组、publication 对象。publication 为 comment、none 或带 baseBranch/baseSha/files 的 pull_request。支持 text、link、test_report、change_set 产物。结果有界并严格拒绝额外字段；相同 canonical outcome 重传仅确认，内容不同返回409。HTTPS edge 支持2MB结果正文，实际结果 schema 有更细的限制。
 

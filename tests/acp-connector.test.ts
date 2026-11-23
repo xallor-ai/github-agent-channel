@@ -93,6 +93,107 @@ test("metadata mutation is rejected before collecting changes", () => {
     /metadata/,
   );
 });
+
+for (const flag of ["--skip-worktree", "--assume-unchanged"]) {
+  test(`${flag} cannot hide changes from workspace admission or collection`, async () => {
+    const f = fixture();
+    const initial = inspectWorkspace(f.dir, task);
+    f.git("update-index", flag, "file.txt");
+    // Reject the flag even before the hidden content differs.
+    assert.throws(() => inspectWorkspace(f.dir, task), /index flags/i);
+    writeFileSync(join(f.dir, "file.txt"), "hidden change");
+    assert.throws(
+      () => collectChanges(f.dir, initial.baseSha, initial.metadataHash),
+      /index flags/i,
+    );
+    await assert.rejects(
+      f.connector.run(task, async () => ({})),
+      /index flags/i,
+    );
+    assert.equal(
+      existsSync(join(f.dir, ".git", "received-prompt.json")),
+      false,
+    );
+    assert.equal(
+      readFileSync(join(f.dir, "file.txt"), "utf8"),
+      "hidden change",
+    );
+  });
+
+  test(`verification cannot hide an additional modified file using ${flag}`, async () => {
+    const f = fixture();
+    writeFileSync(join(f.dir, "helper.txt"), "original helper");
+    f.git("add", "helper.txt");
+    f.git("commit", "-m", "helper");
+    f.config.verification.args = [
+      "-e",
+      `require('node:child_process').execFileSync('git',['update-index','${flag}','helper.txt']);require('node:fs').writeFileSync('helper.txt','hidden verification change')`,
+    ];
+    await assert.rejects(
+      f.connector.run(task, async () => ({})),
+      /unknown/i,
+    );
+    assert.equal(
+      readFileSync(join(f.dir, "helper.txt"), "utf8"),
+      "hidden verification change",
+    );
+  });
+}
+
+test("push target mismatch rejects a clean workspace before harness launch", async () => {
+  const f = fixture();
+  const baseSha = f.git("rev-parse", "HEAD");
+  writeFileSync(join(f.dir, "file.txt"), "new revision");
+  f.git("add", "file.txt");
+  f.git("commit", "-m", "target");
+  const targetSha = f.git("rev-parse", "HEAD");
+  f.git("checkout", "--detach", baseSha);
+  await assert.rejects(
+    f.connector.run(
+      {
+        ...task,
+        source: { event: "push" },
+        target: {
+          kind: "repository",
+          ref: "refs/heads/feature",
+          sha: targetSha,
+        },
+      },
+      async () => {
+        throw Error("Unexpected issue read");
+      },
+    ),
+    /target SHA/i,
+  );
+  assert.equal(existsSync(join(f.dir, ".git", "received-prompt.json")), false);
+  assert.equal(f.git("rev-parse", "HEAD"), baseSha);
+  assert.equal(f.git("status", "--porcelain"), "");
+});
+
+test("matching push SHA runs from its pinned detached workspace", async () => {
+  const f = fixture();
+  const sha = f.git("rev-parse", "HEAD");
+  f.git("checkout", "--detach", sha);
+  const result = await f.connector.run(
+    {
+      ...task,
+      source: { event: "push" },
+      target: {
+        kind: "repository",
+        ref: "refs/heads/feature",
+        sha: sha.toUpperCase(),
+      },
+    },
+    async () => {
+      throw Error("Unexpected issue read");
+    },
+  );
+  assert.equal(
+    result.artifacts.find((a) => a.kind === "change_set")?.baseSha,
+    sha,
+  );
+  assert.equal(result.publication.kind, "pull_request");
+});
 test("change bytes match the 512 KiB outcome boundary", () => {
   const f = fixture();
   const sha = f.git("rev-parse", "HEAD");
