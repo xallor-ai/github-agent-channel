@@ -104,7 +104,15 @@ export class OctokitGitHubClient implements GitHubClient {
     return client;
   }
   async authorize(task: Task): Promise<void> {
-    await this.#authorized(task);
+    const client = await this.#authorized(task);
+    if (task.target.kind === "pull_request") {
+      const { data } = await client.request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+        { owner: task.owner, repo: task.repo, pull_number: task.target.number },
+      );
+      if (data.state !== "open" || data.merged !== false)
+        throw new AccessDenied("Target pull request is not confirmed open");
+    }
   }
   async readIssue(task: Task): Promise<unknown> {
     if (

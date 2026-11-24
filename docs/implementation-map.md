@@ -21,7 +21,7 @@
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | [main.ts](../src/main.ts)                             | 一次性加载服务端配置，装配 HTTP/队列/发布 worker；只显示安全 schema 拒绝诊断                              |
 | [server.ts](../src/server.ts)                         | Webhook、健康、管理员状态与人工对账；严格按 target 校验发布 receipt URL                                   |
-| [webhook.ts](../src/webhook.ts)                       | 验签、事件/action/binding/人类身份/触发规则；构造 source 与 target                                        |
+| [webhook.ts](../src/webhook.ts)                       | 验签并核对事件、绑定、发起人和触发条件；PR 事件与 PR 评论只接收 open 快照，构造 source 与 target |
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
 | [config.ts](../src/config.ts)                         | 云端 schema；事件与 PR writePolicy；仅 loadConfig，无运行中设置 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |

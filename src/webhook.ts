@@ -85,6 +85,7 @@ export async function normalizeWebhook(
     if (
       !positive(comment?.id) ||
       !positive(issue?.number) ||
+      (issue.pull_request && issue.state !== "open") ||
       comment.user?.type !== "User" ||
       comment.user.id !== sender.id ||
       comment.user.login !== sender.login ||
@@ -122,6 +123,7 @@ export async function normalizeWebhook(
   const item = headers.event === "issues" ? event.issue : event.pull_request;
   if (
     !positive(item?.number) ||
+    (headers.event === "pull_request" && item.state !== "open") ||
     typeof item.title !== "string" ||
     item.title.length > 500 ||
     (item.body !== null &&
