@@ -246,8 +246,8 @@ test("rejects a duplicate call ID after executing the first valid tool call", as
         {
           type: "function_call",
           call_id: "first-call-id",
-          name: "read_issue",
-          arguments: "{}",
+          name: "read_file",
+          arguments: '{"path":"README.md"}',
         },
       ],
     })) as typeof fetch);
