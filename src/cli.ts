@@ -7,18 +7,79 @@ import { renderAgentDeployment } from "./agent-deploy.js";
 import { loadConfig } from "./config.js";
 import { renderDeployment } from "./deploy.js";
 import { buildDoctorReport, runComposeLifecycle } from "./lifecycle.js";
+import { adminCommand, pairCommand, repoCommand } from "./self-service-cli.js";
 
 const sample = cloudExample;
 function help() {
   console.log(
     "github-agent-channel\n  init [directory] (ECS configuration)\n  agent init [directory]\n  agent check|run [agent-config]\n  agent deploy render [agent-config] [output-dir]\n  agent deploy up|down|status [output-dir]\n  config check [path]\n  config print-public [path]\n  doctor [path] (offline configuration and Compose checks)\n  deploy render [path] [output-dir]\n  deploy up|down|status [output-dir]\n",
   );
+  console.log(
+    "  admin invite <channel-url> <github-user-id> <new-invite-file>\n  admin revoke <channel-url> <device-id>\n  agent pair <invite-file> [agent-config]\n  agent repo status|apply <declaration.yaml> [agent-config]",
+  );
 }
 async function main(argv: string[]) {
   const [command, action] = argv;
   const path = resolve(argv[2] ?? "config.local.yaml");
   if (!command || command === "--help" || command === "-h") return help();
+  if (command === "admin") {
+    console.log(
+      JSON.stringify(
+        await adminCommand(argv.slice(1), process.env.CHANNEL_ADMIN_TOKEN),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   if (command === "agent") {
+    if (action === "pair") {
+      if (!argv[2] || argv.length > 4)
+        throw Error("Use: agent pair <invite-file> [agent-config]");
+      let githubToken = process.env.CHANNEL_PAIR_GITHUB_TOKEN;
+      if (!githubToken && !process.stdin.isTTY) {
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        for await (const chunk of process.stdin) {
+          const data = Buffer.from(chunk);
+          if ((bytes += data.length) > 16384)
+            throw Error("GitHub token on stdin is too long");
+          chunks.push(data);
+        }
+        githubToken = Buffer.concat(chunks).toString("utf8").trim();
+      }
+      console.log(
+        JSON.stringify(
+          await pairCommand(
+            argv[2],
+            resolve(argv[3] ?? "agent.local.yaml"),
+            githubToken,
+          ),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    if (action === "repo") {
+      const op = argv[2];
+      if ((op !== "status" && op !== "apply") || !argv[3] || argv.length > 5)
+        throw Error(
+          "Use: agent repo status|apply <declaration.yaml> [agent-config]",
+        );
+      console.log(
+        JSON.stringify(
+          await repoCommand(
+            op,
+            argv[3],
+            resolve(argv[4] ?? "agent.local.yaml"),
+          ),
+          null,
+          2,
+        ),
+      );
+      return;
+    }
     if (action === "deploy") {
       const operation = argv[2];
       if (operation === "render") {

@@ -10,16 +10,7 @@ github:
   webhookSecretFile: secrets/github-webhook-secret
   botLogin: your-app[bot]
 connector:
-  workerId: local-openclaw
-  tokenFile: secrets/connector-token
   timeoutMs: 300000
-bindings: []
-# - id: example
-#   installationId: 123
-#   repositoryId: 456
-#   owner: example-org
-#   repo: example-repo
-#   enabled: true
 deployment:
   mode: external
   publicUrl: https://channel.example.com

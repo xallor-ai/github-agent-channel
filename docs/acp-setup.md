@@ -21,7 +21,7 @@ processes. This adapter does not clone, reset, clean, commit or push the checkou
 ```yaml
 channel:
   baseUrl: https://channel.example.com
-  tokenEnv: CHANNEL_CONNECTOR_TOKEN
+  tokenFile: secrets/connector-token
 runtime:
   type: acp
   command: /absolute/path/to/acp-harness
@@ -44,6 +44,7 @@ pollIntervalMs: 1000
 requestTimeoutMs: 10000
 ```
 
+First [pair this device and apply the repository declaration](agent-self-service.md).
 Launch with `npm run channel -- agent run /path/to/agent.yaml` using Node 24.
 The command and arguments above are placeholders for an administrator-installed
 ACP-compatible harness, not a bundled executable. Authenticate/configure that
@@ -108,7 +109,7 @@ credentials and bridge secrets are excluded. It still shares the native OS ident
 and filesystem, so this environment boundary is not an OS sandbox.
 
 PR proposal generation requires `runtime.publication`, and actual publication
-separately requires the cloud binding's `writePolicy`; the cloud checks the base
+separately requires an administrator's cloud `writeProfiles` entry for the installation/repository IDs; the cloud checks the base
 SHA, allowed paths and actor again. A failed or unknown verification exit code
 disables publication (`kind: none`) while preserving changes and the test report.
 Before verification, the adapter captures the candidate change set relative to
@@ -132,7 +133,7 @@ Local tests use a real child process speaking ACP through the SDK, with syntheti
 editing/model behavior. They do not establish compatibility with a particular real
 coding harness or live GitHub/model acceptance; record that separately before use.
 
-Cloud event/writePolicy, App Contents permission, fresh state stores and complete acceptance checklist: [Channel v2 contract](protocol-v2.md).
+Repository events and cloud write profiles, App Contents permission, fresh state stores and complete acceptance checklist: [Channel v2 contract](protocol-v2.md).
 
 ## Validated native harness
 

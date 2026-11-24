@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 // Container-only synthetic integration harness. Never included in production image.
 import { loadConfig } from "../dist/config.js";
 import { resolveSecrets } from "../dist/secrets.js";
@@ -10,17 +11,24 @@ import { DatabaseSync } from "node:sqlite";
 const path = process.env.CHANNEL_CONFIG;
 const config = loadConfig(path);
 const secrets = resolveSecrets(config, path);
-config.bindings = [
-  {
-    id: "synthetic",
-    installationId: 1,
-    repositoryId: 2,
-    owner: "fixture",
-    repo: "fixture",
-    enabled: true,
-  },
-];
 const store = new TaskStore(config.dataFile);
+const credential = readFileSync(
+  "/run/secrets/fixture_connector",
+  "utf8",
+).trim();
+if (!store.activeBinding(1, 2))
+  store.registry.apply(
+    {
+      deviceId: "smoke-worker",
+      administratorId: 5,
+      installationId: 1,
+      repositoryId: 2,
+      owner: "fixture",
+      repo: "fixture",
+    },
+    0,
+    { enabled: true, events: ["issue_comment.created"] },
+  );
 store.recover();
 // Synthetic observation tables live outside the production task database.
 const db = new DatabaseSync(join(dirname(config.dataFile), "smoke.db"));
@@ -50,7 +58,7 @@ const coordinator = new PullCoordinator(
   store,
   github,
   config.connector,
-  secrets.connectorToken,
+  (token) => (token === credential ? { deviceId: "smoke-worker" } : undefined),
 );
 const worker = new DeliveryWorker(store, github);
 const server = createChannelServer(
@@ -64,7 +72,7 @@ server.on("request", (req, res) => {
   if (req.url === "/connector/v2/claim")
     res.once("finish", () => {
       if (
-        req.headers.authorization === "Bearer " + secrets.connectorToken &&
+        req.headers.authorization === "Bearer " + credential &&
         [200, 204].includes(res.statusCode)
       )
         db.prepare("INSERT INTO smoke_claims VALUES (1)").run();

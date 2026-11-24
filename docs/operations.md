@@ -14,21 +14,21 @@ GitHub App 启用 Issue comment，权限 Metadata/Contents Read、Issues/Pull re
 
 ## 配置迁移与凭据
 
-之前的云端 `runtime` 配置已移除。云端现在使用 `connector.workerId/tokenFile或tokenEnv/timeoutMs`。旧版直连配置将校验失败，不能静默沿用。v1 任务协议和旧数据库也被拒绝，没有自动迁移。新部署前按[v2 契约](protocol-v2.md)准备新状态库。
+之前的云端 `runtime` 配置已移除。云端 connector 只需 timeoutMs；仓库规则通过[设备配对与登记](agent-self-service.md)管理。旧静态 bindings 和共享凭据不是后备入口。旧版直连配置将校验失败，不能静默沿用。v1 任务协议和旧数据库也被拒绝，没有自动迁移。新部署前按[v2 契约](protocol-v2.md)准备新状态库。
 
-内网的 `agent.local.yaml` 配置 `channel`（ECS URL 与连接器token）、`runtime`（显式 type 和对应配置）、`stateFile`、轮询/请求时间。OpenClaw Responses必须启用；单次Runtime超时应短于云端领取期限，给工具请求/结果回传留余量。
+内网的 `agent.local.yaml` 配置 `channel`（ECS URL 与配对时生成的设备令牌）、`runtime`（显式 type 和对应配置）、`stateFile`、轮询/请求时间。OpenClaw Responses必须启用；单次Runtime超时应短于云端领取期限，给工具请求/结果回传留余量。
 
 每项secret只允许Env/File之一。File相对配置文件目录解析；PEM保留换行，token去首尾空白。Linux容器UID1000，secret文件建议0600 owner1000或0640 group1000，父目录受限。云端管理token不能与connector token复用。Agent数据库含任务和未确认结果，需受保护且持久化。
 
-配置初始化不生成或上传GitHub私钥，也不修改GitHub App。用 `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"` 在受控本机生成各类独立token，再保存文件；不要提交或贴入聊天。
+服务端凭据按[ECS 部署](ecs-setup.md)写入受限文件；设备令牌由配对命令生成。不要提交秘密文件或贴入聊天。
 
-云端校验：`npm run channel -- config check <cloud.yaml>`。Agent校验：`npm run channel -- agent check <agent.yaml>`。`doctor`只查离线配置与Compose版本；没有enabled binding会提示。
+云端校验：`npm run channel -- config check <cloud.yaml>`。Agent校验：`npm run channel -- agent check <agent.yaml>`。`doctor`只查离线配置与Compose版本，不查询在线绑定；用 agent repo status 查看。
 
 ## 入口
 
 已有Nginx用external，将生成片段加入现有HTTPS server；容器网关须与Channel加入共同 `deployment.network`，不能从网关容器用127.0.0.1访问宿主回环端口。片段使用Docker DNS动态解析，支持Channel重建换IP。
 
-公网允许POST `/webhooks/github`（GitHub HMAC签名）和 `/connector/v2/`（独立Bearer，任务操作再验证lease）。管理 `/tasks/*` 与 `/healthz` 只通过宿主回环/受控私网访问。Caddy采用相同策略。
+公网允许POST `/webhooks/github`（GitHub HMAC签名）和 `/connector/v2/`（独立Bearer，任务操作再验证lease）。管理 `/admin/*`、`/tasks/*` 与 `/healthz` 只通过宿主回环/受控私网访问。Caddy采用相同策略。
 
 只修改Nginx镜像的templates文件再reload不会重新执行envsubst；需先在隔离配置中展开和 `nginx -t`，再受控发布并reload。不要覆盖其他站点。
 
@@ -44,12 +44,12 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 ## v2 内部升级与回滚
 
-以下复用卷步骤仅适用于 schema v2→v2；v1→v2 不支持迁移，必须使用新数据路径/卷并保留旧数据。
+以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 3、连接器 journal 2）。不兼容的旧库须保留，改用新路径/卷。
 
 生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
 1. 等待运行任务结束；先停止Agent，再停止Cloud（down不带-v）。
-2. 备份SQLite及存在的WAL/SHM文件、secret引用和生成配置。
+2. 在服务停止后一起备份任务库、独立设备身份库（`<dataFile>.devices`）、journal 及各自存在的 WAL/SHM 文件、secret引用和生成配置。
 3. 生成新bundle，用相同projectName启动Cloud，再启动Agent。
 4. 检查两端日志/状态、私网health、授权评论回帖。
 
@@ -81,7 +81,7 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 ## 边界
 
-当前支持一个云实例的一个连接器身份（其任务受enabled bindings限制），不宣称多租户隔离或多worker路由。Agent journal的SQLite排他锁防止多个进程共享状态并执行；崩溃由OS释放锁。不能在不支持可靠文件锁的共享文件系统上运行。
+同一服务可登记多个设备。各设备只能领取当前归属自己的有效修订下的任务；不要在设备间复制令牌或 journal。Agent journal的SQLite排他锁防止多个进程共享状态并执行；崩溃由OS释放锁。不能在不支持可靠文件锁的共享文件系统上运行。
 
 隔离冒烟不调用真实GitHub或生产模型；公网ACME、真实GitHub事件和真实OpenClaw回帖需单独记录。旧直接调用架构和相关验证仅作为历史资料，不是当前部署说明。
 

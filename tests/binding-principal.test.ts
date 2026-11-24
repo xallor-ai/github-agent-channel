@@ -68,6 +68,8 @@ test("binding principal uses App installation and metadata-only repo token, reso
   assert.deepEqual(await verify(), {
     deviceId: "laptop",
     administratorId: 34,
+    owner: repo.owner.login,
+    repo: repo.name,
     installationId: 56,
     repositoryId: 12,
   });

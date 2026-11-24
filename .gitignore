@@ -16,3 +16,6 @@ channel-data/
 agent-data/
 agent.local.*
 secrets/
+
+*.devices
+*.devices-*

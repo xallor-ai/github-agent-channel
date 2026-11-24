@@ -91,11 +91,8 @@ function config(mode, localPort) {
       webhookSecretFile: "hook",
     },
     connector: {
-      workerId: "smoke-worker",
-      tokenFile: "connector",
       timeoutMs: 30000,
     },
-    bindings: [],
     deployment: {
       mode,
       publicUrl: "https://smoke.example.com",
@@ -364,6 +361,12 @@ try {
       }
       // Second phase uses production cloud HTTP/coordinator/store and delivery
       // worker, with synthetic GitHub only. Runtime executes on outbound client.
+      parsed.services.channel.volumes.push({
+        type: "bind",
+        source: join(root, "connector"),
+        target: "/run/secrets/fixture_connector",
+        read_only: true,
+      });
       parsed.services.channel.command = [
         "node",
         "/app/scripts/smoke-fixture-server.mjs",

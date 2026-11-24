@@ -1,3 +1,6 @@
+import { DeviceService } from "./device-service.js";
+import { BindingPrincipalVerifier } from "./binding-principal.js";
+import { AccessDenied } from "./contracts.js";
 import { loadConfig } from "./config.js";
 import { TaskStore } from "./store.js";
 import { OctokitGitHubClient } from "./github.js";
@@ -13,12 +16,57 @@ try {
   const secrets = resolveSecrets(config, configPath);
   const store = new TaskStore(config.dataFile);
   store.recover();
-  const github = new OctokitGitHubClient(config, secrets.privateKey);
+  const devices = new DeviceService({
+    dbPath: config.dataFile + ".devices",
+    adminToken: secrets.adminToken,
+    registry: store.registry,
+    appId: config.github.appId,
+    privateKey: secrets.privateKey,
+  });
+  const verifier = new BindingPrincipalVerifier(
+    config.github.appId,
+    secrets.privateKey,
+    async (token) => devices.authenticate(token),
+  );
+  const lookup = (installationId: number, repositoryId: number) => {
+    const b = store.activeBinding(installationId, repositoryId);
+    if (!b || !devices.isActive(b.deviceId)) return undefined;
+    const policy = config.writeProfiles?.find(
+      (p) =>
+        p.installationId === installationId && p.repositoryId === repositoryId,
+    )?.policy;
+    return { ...b, writePolicy: policy };
+  };
+  const github = new OctokitGitHubClient(
+    config,
+    secrets.privateKey,
+    lookup,
+    async (task) => {
+      const b = lookup(task.installationId, task.repositoryId);
+      const device = b && devices.principalForDevice(b.deviceId);
+      if (
+        !b ||
+        b.id !== task.bindingId ||
+        !device ||
+        device.githubUserId !== b.administratorId
+      )
+        throw new AccessDenied("Binding is no longer active");
+      const verified = await verifier.verifyPaired(device, {
+        owner: task.owner,
+        repo: task.repo,
+      });
+      if (
+        verified.installationId !== task.installationId ||
+        verified.repositoryId !== task.repositoryId
+      )
+        throw new AccessDenied("Binding scope changed");
+    },
+  );
   const coordinator = new PullCoordinator(
     store,
     github,
     config.connector,
-    secrets.connectorToken,
+    (credential) => devices.authenticate(credential),
   );
   const worker = new DeliveryWorker(store, github);
   const server = createChannelServer(
@@ -26,7 +74,15 @@ try {
     store,
     secrets.webhookSecret,
     secrets.adminToken,
-    coordinator,
+    {
+      async handle(req, res) {
+        return (
+          (await devices.handle(req, res)) ||
+          (await coordinator.handle(req, res))
+        );
+      },
+    },
+    lookup,
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(

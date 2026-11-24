@@ -72,7 +72,9 @@ function fixture(
             }),
       },
     ],
-  } as ChannelConfig;
+  } as unknown as ChannelConfig & {
+    bindings: import("../src/contracts.js").Binding[];
+  };
   const fetcher = (async (input: any, init: any) => {
     const path = decodeURIComponent(new URL(String(input)).pathname);
     const method = init?.method ?? "GET";
@@ -125,7 +127,16 @@ function fixture(
     });
   }) as typeof fetch;
   return {
-    client: new OctokitGitHubClient(config, key, fetcher),
+    client: new OctokitGitHubClient(
+      config,
+      key,
+      (i, r) =>
+        config.bindings.find(
+          (b) => b.installationId === i && b.repositoryId === r,
+        ),
+      async () => {},
+      fetcher,
+    ),
     calls,
     mutations: () =>
       calls.filter(

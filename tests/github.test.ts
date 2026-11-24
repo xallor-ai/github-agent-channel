@@ -24,7 +24,9 @@ const config = {
       enabled: true,
     },
   ],
-} as ChannelConfig;
+} as unknown as ChannelConfig & {
+  bindings: import("../src/contracts.js").Binding[];
+};
 const task = {
   id: "task-1",
   bindingId: "b",
@@ -112,7 +114,16 @@ function fixture(
     });
   }) as typeof fetch;
   return {
-    client: new OctokitGitHubClient(config, privateKey, fetchImpl),
+    client: new OctokitGitHubClient(
+      config,
+      privateKey,
+      (i, r) =>
+        config.bindings.find(
+          (b) => b.installationId === i && b.repositoryId === r,
+        ),
+      async () => {},
+      fetchImpl,
+    ),
     calls,
   };
 }

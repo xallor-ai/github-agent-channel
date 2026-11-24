@@ -74,13 +74,9 @@ export function buildDoctorReport(
     mode: "offline",
     config: "valid",
     secrets: "references-resolved",
-    enabledBindings: config.bindings.filter((binding) => binding.enabled)
-      .length,
-    warnings: config.bindings.some((binding) => binding.enabled)
-      ? []
-      : ["No enabled repository bindings: all comments will be ignored"],
+    bindings: "online device registry (not checked offline)",
     deployment: config.deployment?.mode ?? "external",
-    connector: config.connector.workerId,
+    leaseTimeoutMs: config.connector.timeoutMs,
     compose: { status: "available", version: detectComposeVersion(spawn) },
   };
 }

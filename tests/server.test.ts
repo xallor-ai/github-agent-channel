@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
@@ -15,31 +16,22 @@ const cfg: ChannelConfig = {
     webhookSecretEnv: "SECRET",
     botLogin: "channel[bot]",
   },
-  connector: {
-    workerId: "local-worker",
-    tokenEnv: "TOKEN",
-    timeoutMs: 100,
-  },
-  bindings: [
-    {
-      id: "binding",
-      installationId: 1,
-      repositoryId: 2,
-      owner: "org",
-      repo: "repo",
-      enabled: true,
-    },
-  ],
+  connector: { timeoutMs: 100 },
 };
 test("PR comment reconciliation accepts pull path and rejects unrelated paths", async () => {
   const s = new TaskStore(":memory:");
+  seedBinding(
+    s,
+    { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
+    "worker",
+  );
   const server = createChannelServer(cfg, s, "secret", "admin");
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const task = s.accept({
     deliveryId: "pr",
     source: { event: "issue_comment", action: "created", commentId: 1 },
-    bindingId: "binding",
+    bindingId: "1:2:worker:1",
     installationId: 1,
     repositoryId: 2,
     owner: "org",
@@ -106,13 +98,18 @@ test("PR comment reconciliation accepts pull path and rejects unrelated paths", 
 });
 test("execution resolution rejects malformed and extra JSON fields without changing unknown state", async () => {
   const s = new TaskStore(":memory:");
+  seedBinding(
+    s,
+    { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
+    "worker",
+  );
   const server = createChannelServer(cfg, s, "secret", "admin");
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const task = s.accept({
     deliveryId: "unknown",
     source: { event: "issue_comment", action: "created", commentId: 1 },
-    bindingId: "binding",
+    bindingId: "1:2:worker:1",
     installationId: 1,
     repositoryId: 2,
     owner: "org",
@@ -167,6 +164,11 @@ test("execution resolution rejects malformed and extra JSON fields without chang
 });
 test("delivery reconciliation requires admin, explicit confirmation and a target-scoped comment URL", async () => {
   const s = new TaskStore(":memory:");
+  seedBinding(
+    s,
+    { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
+    "worker",
+  );
   const server = createChannelServer(cfg, s, "secret", "admin");
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -174,7 +176,7 @@ test("delivery reconciliation requires admin, explicit confirmation and a target
   const task = s.accept({
     deliveryId: "one",
     source: { event: "issue_comment", action: "created", commentId: 1 },
-    bindingId: "binding",
+    bindingId: "1:2:worker:1",
     installationId: 1,
     repositoryId: 2,
     owner: "org",
@@ -299,6 +301,11 @@ test("delivery reconciliation requires admin, explicit confirmation and a target
 });
 test("signed HTTP delivery is persisted and independently completed; task query requires auth", async () => {
   const s = new TaskStore(":memory:");
+  seedBinding(
+    s,
+    { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
+    "worker",
+  );
   const server = createChannelServer(cfg, s, "secret", "admin");
   server.listen(0, "127.0.0.1");
   await once(server, "listening");

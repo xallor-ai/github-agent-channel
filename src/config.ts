@@ -1,4 +1,3 @@
-import { bindingEvent } from "./binding-events.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -44,32 +43,22 @@ const schema = z.strictObject({
     botLogin: name,
   }),
   connector: z.strictObject({
-    workerId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
-    tokenEnv: envName.optional(),
-    tokenFile: name.optional(),
     timeoutMs: z.number().int().min(1000).max(3_600_000),
   }),
-  bindings: z.array(
-    z.strictObject({
-      id: name,
-      installationId: positiveId,
-      repositoryId: positiveId,
-      owner: name,
-      repo: name,
-      enabled: z.boolean(),
-      events: z.array(bindingEvent).min(1).max(6).optional(),
-      requireMention: z.boolean().optional(),
-      triggerLabel: name.max(100).optional(),
-      writePolicy: z
-        .strictObject({
+  writeProfiles: z
+    .array(
+      z.strictObject({
+        installationId: positiveId,
+        repositoryId: positiveId,
+        policy: z.strictObject({
           baseBranch: name.max(200),
           allowedPaths: z.array(name.max(1024)).min(1).max(100),
           maxFiles: z.number().int().positive().max(100).optional(),
           maxBytes: z.number().int().positive().max(524288).optional(),
-        })
-        .optional(),
-    }),
-  ),
+        }),
+      }),
+    )
+    .optional(),
   deployment: z
     .strictObject({
       mode: z.enum(["external", "caddy"]),
@@ -113,23 +102,14 @@ function validate(
     throw new Error(`Invalid channel configuration at ${path}`);
   }
   const config = parsed.data;
-  const ids = new Set<string>();
   const scopes = new Set<string>();
-  for (const binding of config.bindings) {
-    if (binding.events?.includes("issues.labeled") && !binding.triggerLabel)
-      throw new Error("issues.labeled requires triggerLabel");
-    const scope = `${binding.installationId}:${binding.repositoryId}`;
-    if (ids.has(binding.id) || scopes.has(scope))
-      throw new Error("Duplicate binding ID or repository scope");
-    ids.add(binding.id);
-    scopes.add(scope);
+  for (const p of config.writeProfiles ?? []) {
+    const k = p.installationId + ":" + p.repositoryId;
+    if (scopes.has(k)) throw Error("Duplicate write profile");
+    scopes.add(k);
   }
   try {
-    const secrets = resolveSecrets(config, configPath, env);
-    if (secrets.connectorToken === secrets.adminToken)
-      throw new SecretReferenceError(
-        "connector.token must differ from server.adminToken",
-      );
+    resolveSecrets(config, configPath, env);
   } catch (error) {
     if (error instanceof SecretReferenceError) throw error;
     throw new Error("Invalid channel secret references");

@@ -75,7 +75,7 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 | S02 | 每次工具和外部回写重新授权       | 已实现；读取、评论及每次 Git Data/PR 写入前均重新授权                                       | github.test.ts、github-publication.test.ts、worker.test.ts                                   | 本次本地失权用例通过                                 |
 | S03 | 模型不能覆盖目标仓库/Issue/身份  | 已实现；可信上下文来自已保存任务，工具参数严格检查                                          | webhook.test.ts、pull.test.ts                                                                | 本次本地通过                                         |
 | S04 | Webhook 持久化后 ACK             | 已实现                                                                                      | server.test.ts、store.test.ts                                                                | 本次本地通过                                         |
-| S05 | 云端 assignment、lease、结果幂等 | 已实现；单可信 worker，未知任务阻塞继续执行                                                 | [pull-store.test.ts](../tests/pull-store.test.ts)、pull.test.ts                              | 本次本地通过                                         |
+| S05 | 云端 assignment、lease、结果幂等 | 已实现；按设备与绑定修订领取，未知任务阻塞继续执行                                                 | [pull-store.test.ts](../tests/pull-store.test.ts)、pull.test.ts                              | 本次本地通过                                         |
 | S06 | 内网 journal、重启和重复结果处理 | 已实现；运行中断转 unknown，结果重传不重跑模型                                              | [agent-store.test.ts](../tests/agent-store.test.ts)、[agent.test.ts](../tests/agent.test.ts) | 本次本地通过                                         |
 | S07 | 写仓副作用与对账                 | 部分实现；publication 状态和 receipt 持久化，未知不重放；中间 blob/commit/branch 不自动恢复 | github-publication/worker 测试                                                               | 丢响应、失权、冲突本地通过                           |
 | S08 | 写路径、基线与分支策略           | 已实现固定 baseBranch、base SHA 校验、任务分支、路径/模式/数量/大小限制                     | github-publication.test.ts                                                                   | 本地通过；写权限需显式配置                           |
@@ -86,7 +86,7 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 
 | 能力 | 当前证据 | 尚缺 |
 | --- | --- | --- |
-| 动态登记 | [登记库测试](../tests/binding-registry.test.ts)：重启保留、修订冲突、设备隔离 | 授权配对/API、本地声明同步、切换受理与领取 |
+| 动态登记 | [登记库测试](../tests/binding-registry.test.ts)：重启保留、修订冲突、设备隔离 | 配对、显式 apply、同库受理与设备领取已接线；真实验收单列 |
 | 离线等待 | [任务库测试](../tests/pull-store.test.ts)：排队 24 小时边界与重投不续期 | 真实双设备双仓验收 |
 
 ## 本次验证与限制

@@ -7,6 +7,7 @@ import { Octokit } from "@octokit/core";
 import {
   AccessDenied,
   AmbiguousExecution,
+  type BindingLookup,
   type ChannelConfig,
   type GitHubClient,
   type Task,
@@ -28,6 +29,8 @@ export class OctokitGitHubClient implements GitHubClient {
   constructor(
     config: ChannelConfig,
     privateKey: string,
+    private readonly lookup: BindingLookup,
+    private readonly verifyManager: (task: Task) => Promise<void>,
     fetchImpl: typeof fetch = fetch,
   ) {
     this.#config = config;
@@ -42,17 +45,12 @@ export class OctokitGitHubClient implements GitHubClient {
     });
   }
   #binding(task: Task) {
-    const found = this.#config.bindings.find(
-      (b) =>
-        b.enabled &&
-        b.id === task.bindingId &&
-        b.installationId === task.installationId &&
-        b.repositoryId === task.repositoryId &&
-        b.owner === task.owner &&
-        b.repo === task.repo,
-    );
+    const found = this.lookup(task.installationId, task.repositoryId);
     if (
-      !found ||
+      !found?.enabled ||
+      found.id !== task.bindingId ||
+      found.owner !== task.owner ||
+      found.repo !== task.repo ||
       ![task.actorId, task.repositoryId, task.installationId].every(
         (n) => Number.isSafeInteger(n) && n > 0,
       ) ||
@@ -80,6 +78,8 @@ export class OctokitGitHubClient implements GitHubClient {
     });
   }
   async #authorized(task: Task): Promise<Octokit> {
+    this.#binding(task);
+    await this.verifyManager(task);
     const client = await this.#client(task);
     const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
       owner: task.owner,
@@ -101,6 +101,7 @@ export class OctokitGitHubClient implements GitHubClient {
       !["admin", "maintain", "write"].includes(data.permission)
     )
       throw new AccessDenied("Actor is not authorized");
+    this.#binding(task);
     return client;
   }
   async authorize(task: Task): Promise<void> {

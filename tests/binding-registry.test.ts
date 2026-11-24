@@ -4,10 +4,16 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BindingRegistry } from "../src/binding-registry.js";
+import { TaskStore } from "../src/store.js";
 
 const scope = { installationId: 11, repositoryId: 22 };
-const proof = { ...scope, deviceId: "bridge-A", administratorId: 44 };
+const proof = {
+  ...scope,
+  owner: "org",
+  repo: "repo",
+  deviceId: "bridge-A",
+  administratorId: 44,
+};
 const enabled = { enabled: true, events: ["push", "issue_comment.created"] };
 const disabled = { enabled: false, events: [] };
 
@@ -15,9 +21,9 @@ test("retries are idempotent; a stale enable cannot undo a disable, including af
   const dir = mkdtempSync(join(tmpdir(), "channel-registry-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, "bindings.db");
-  let db = new DatabaseSync(file);
+  let db = new TaskStore(file);
   try {
-    let registry = new BindingRegistry(db);
+    let registry = db.registry;
     const first = registry.apply(proof, 0, enabled);
     assert.equal(first.revision, 1);
     assert.deepEqual(
@@ -30,8 +36,8 @@ test("retries are idempotent; a stale enable cannot undo a disable, including af
     assert.deepEqual(registry.apply(proof, 1, enabled), first);
     const stopped = registry.apply(proof, 1, disabled);
     db.close();
-    db = new DatabaseSync(file);
-    registry = new BindingRegistry(db);
+    db = new TaskStore(file);
+    registry = db.registry;
     assert.deepEqual(registry.get(scope), stopped);
     assert.throws(() => registry.apply(proof, 0, enabled), /revision/i);
     assert.throws(() => registry.apply(proof, 1, enabled), /revision/i);
@@ -43,9 +49,9 @@ test("retries are idempotent; a stale enable cannot undo a disable, including af
 });
 
 test("a second device cannot use another binding, even with the latest revision or after disable", () => {
-  const db = new DatabaseSync(":memory:");
+  const db = new TaskStore(":memory:");
   try {
-    const registry = new BindingRegistry(db);
+    const registry = db.registry;
     registry.apply(proof, 0, enabled);
     const other = { ...proof, deviceId: "bridge-B" };
     assert.throws(() => registry.apply(other, 1, disabled), /device/i);
@@ -62,9 +68,9 @@ test("a second device cannot use another binding, even with the latest revision 
 });
 
 test("invalid declarations and obsolete revisions cannot change the stored decision", () => {
-  const db = new DatabaseSync(":memory:");
+  const db = new TaskStore(":memory:");
   try {
-    const registry = new BindingRegistry(db);
+    const registry = db.registry;
     for (const value of [
       { enabled: true, events: [] },
       { enabled: true, events: ["unknown"] },
@@ -89,25 +95,24 @@ test("invalid declarations and obsolete revisions cannot change the stored decis
   }
 });
 
-test("registry refuses an unrelated sqliteBackup table without changing its contents or header", () => {
-  const db = new DatabaseSync(":memory:");
+test("integrated task store refuses the retired registry without altering its contents or header", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "channel-old-registry-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, "old.db");
+  let db = new DatabaseSync(file);
+  db.exec(
+    "CREATE TABLE bindings(value TEXT); INSERT INTO bindings VALUES ('keep'); PRAGMA application_id=1112097860; PRAGMA user_version=1;",
+  );
+  db.close();
+  assert.throws(() => new TaskStore(file), /left intact/);
+  db = new DatabaseSync(file);
   try {
-    db.exec(
-      "CREATE TABLE sqliteBackup(value TEXT); INSERT INTO sqliteBackup VALUES ('keep')",
-    );
-    assert.throws(() => new BindingRegistry(db), /left intact/);
+    assert.equal(db.prepare("SELECT value FROM bindings").get()?.value, "keep");
     assert.equal(
-      db.prepare("SELECT value FROM sqliteBackup").get()?.value,
-      "keep",
+      db.prepare("PRAGMA application_id").get()?.application_id,
+      1112097860,
     );
-    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 0);
-    assert.equal(db.prepare("PRAGMA application_id").get()?.application_id, 0);
-    assert.equal(
-      db
-        .prepare("SELECT count(*) n FROM sqlite_master WHERE name='bindings'")
-        .get()?.n,
-      0,
-    );
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 1);
   } finally {
     db.close();
   }

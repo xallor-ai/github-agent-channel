@@ -2,7 +2,7 @@
 
 状态：当前已实现适配器的操作教程。GitHub Agent Channel 的产品定位是通用 GitHub 通道；本篇只讲 OpenClaw 的接入，不是所有 Runtime 的协议规范，编码与 PR 路径使用[ACP 适配器](acp-setup.md)，不是本 OpenClaw 读取适配器的能力。产品、实现和其他能力状态从[文档索引](README.md)进入。
 
-本篇是使用入口，按顺序完成后应能在绑定仓库评论 `@机器人`，由内网 OpenClaw 分析并回帖。自建 ECS 不是每个使用者都要做的事：已有 Channel 服务时，拿到服务地址和连接器 token 即可；没有服务时，先完成[可选的 ECS 自建部署](ecs-setup.md)，再回到本文。
+本篇是使用入口，按顺序完成后应能在绑定仓库评论 `@机器人`，由内网 OpenClaw 分析并回帖。自建 ECS 不是每个使用者都要做的事：已有 Channel 服务时，拿到服务地址和发给 GitHub 用户的一次性邀请即可；没有服务时，先完成[可选的 ECS 自建部署](ecs-setup.md)，再回到本文。
 
 当前实现是本仓库的独立连接器进程，不是在 OpenClaw 的 channels 列表里填一个 GitHub Webhook URL。连接器只向公网发起 HTTPS 请求；OpenClaw 留在本机或内网。
 
@@ -17,8 +17,8 @@
 | 资料                  | 示例与用途                                                                     |
 | --------------------- | ------------------------------------------------------------------------------ |
 | Channel origin        | `https://channel.example.com`；不要带 `/webhooks/github` 或 `/connector/v2`    |
-| 连接器 token          | 与 ECS 的 `connector.tokenFile/Env` 指向同一个值；安全传递为文件，不贴入 Issue |
-| 已绑定仓库、bot login | 例如 `example-org/example-repo`、`example-robot[bot]`                          |
+| 设备配对邀请 | 管理员按配置者的 GitHub 数字用户 ID 签发；通过私密渠道传递。 |
+| 目标仓库、bot login | 例如 `example-org/example-repo`、`example-robot[bot]`                          |
 | 执行期限              | 云端 `connector.timeoutMs`，示例300秒；本地Runtime超时180秒，留出回传余量      |
 
 还需要本地 OpenClaw 的模型 Provider/API凭据，以及 Gateway token。**模型 API key、OpenClaw Gateway token、Channel 连接器 token 是三件不同的东西**。GitHub PEM 私钥和Webhook Secret属于ECS，不放到内网连接器。
@@ -29,10 +29,10 @@ GitHub App 的注册、安装、权限和事件订阅请阅读书稿[附录 B：
 
 ## 1. 获取连接器源码
 
-目前主动连接实现位于开发分支；在合入默认分支前，请明确检出它：
+使用和服务端相同、包含设备配对命令的版本：
 
 ```sh
-git clone --branch codex/outbound-connector --single-branch https://github.com/xallor-ai/github-agent-channel.git
+git clone https://github.com/xallor-ai/github-agent-channel.git
 cd github-agent-channel
 node --version
 npm ci --ignore-scripts
@@ -146,16 +146,16 @@ openclaw --profile github-channel gateway run --bind loopback --port 18790
 npm run channel -- agent init ./agent-data
 ```
 
-会创建 `agent-data/agent.local.yaml` 和 `agent-data/secrets/`。放入两个文本文件：
+会创建 `agent-data/agent.local.yaml` 和 `agent-data/secrets/`。按以下方式准备本机凭据：
 
-- `secrets/connector-token`：管理员提供的Channel连接器token。
+- `secrets/connector-token`：由配对命令在此机器生成的专用设备令牌；首次配对前不要创建这个文件。
 - `secrets/openclaw-gateway-token`：本机Gateway实际使用的token原始值，不带JSON引号。若使用上面新profile，就是其 `gateway.auth.token`。不要复制模型API key。
 
-文件可用受控编辑器或安全传输保存，不要把值写进shell参数。两个文件都不会由init自动生成，也不能分别随机生成两个不同的connector token。Linux原生进程以当前用户运行时，设置：
+文件可用受控编辑器或安全传输保存，不要把值写进shell参数。先放好 Gateway token，Linux 原生进程以当前用户运行时，设置：
 
 ```sh
 chmod 700 agent-data/secrets
-chmod 600 agent-data/secrets/connector-token agent-data/secrets/openclaw-gateway-token
+chmod 600 agent-data/secrets/openclaw-gateway-token
 ```
 
 容器方式还需按第6节调整组读取权限，使UID1000能读取文件。
@@ -181,10 +181,11 @@ requestTimeoutMs: 15000
 `channel.baseUrl`是ECS入口origin，`runtime.baseUrl`是从连接器所在环境能访问的Gateway origin，均不带 `/v1/responses`；连接器会补协议路径。`tokenFile`和 `stateFile` 相对配置文件目录解析。每个token也可改用 `tokenEnv` 引用环境变量，但同一项不能同时写Env和File。
 
 ```sh
+gh auth token --hostname github.com | npm run channel -- agent pair ./agent-data/secrets/invite.private ./agent-data/agent.local.yaml
 npm run channel -- agent check ./agent-data/agent.local.yaml
 ```
 
-预期显示 `Agent configuration valid`。这只证明配置与secret引用有效，尚不代表模型或GitHub可用。
+按[仓库自助接入指南](agent-self-service.md)创建本机声明并显式 apply，待 status 显示 active。上述 check 预期显示 `Agent configuration valid`。这只证明配置与secret引用有效，尚不代表模型或GitHub可用。
 
 ## 5. 先验证本机模型与工具续调用
 
@@ -322,7 +323,7 @@ JS
 
 | 现象                           | 优先检查                                                                                  |
 | ------------------------------ | ----------------------------------------------------------------------------------------- |
-| ECS connector返回401           | 两端connector token不一致；不要拿Gateway或admin token代替                                 |
+| ECS connector返回401           | 检查设备是否已配对、凭据路径是否正确、设备是否已撤销                                 |
 | Gateway返回401                 | runtime token与Gateway实际认证值不一致                                                    |
 | Gateway返回404                 | Responses未启用、URL/端口错误；访问根路径404不等于Gateway没有运行                         |
 | 容器连接127.0.0.1失败          | 容器的loopback不是宿主或另一个容器；检查共同网络、Gateway bind和别名                      |
@@ -336,4 +337,4 @@ JS
 
 ## 无需提及的只读接入
 
-在要启用的仓库 binding 中设置 `requireMention: false` 和 `events: [issue_comment.created, issues.opened, pull_request.opened, pull_request.synchronize]`。当前静态部署需重新渲染并加载服务端配置。匹配的人类流量可能消耗模型资源；先用只读 Runtime、关闭 writePolicy，检查普通评论、重复投递和机器人自身回帖。
+在要启用的仓库 binding 中设置 `requireMention: false` 和 `events: [issue_comment.created, issues.opened, pull_request.opened, pull_request.synchronize]`。在本机声明中填写最新 revision 并显式 apply。匹配的人类流量可能消耗模型资源；先用只读 Runtime、不配置云端 writeProfiles，检查普通评论、重复投递和机器人自身回帖。

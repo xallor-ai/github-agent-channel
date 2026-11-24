@@ -11,6 +11,7 @@ import type {
   RuntimeEvent,
 } from "./contracts.js";
 
+import { BindingRegistry } from "./binding-registry.js";
 import { initializeTaskSchema } from "./store-schema.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 
@@ -23,18 +24,31 @@ export type AssignmentResult =
 /** Domain rejection only; infrastructure errors must remain retryable. */
 export class AssignmentConflict extends Error {}
 
+export class StaleBinding extends Error {}
+export class InvalidAssignmentOutcome extends Error {}
+
 export class TaskStore {
   private readonly db: DatabaseSync;
+  readonly registry: BindingRegistry;
   private closed = false;
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     try {
       initializeTaskSchema(this.db);
+      this.registry = new BindingRegistry(this.db);
     } catch (error) {
       this.db.close();
       throw error;
     }
+  }
+  activeBinding(installationId: number, repositoryId: number) {
+    const record = this.registry.get({ installationId, repositoryId });
+    if (!record?.enabled) return undefined;
+    return {
+      ...record,
+      id: `${installationId}:${repositoryId}:${record.deviceId}:${record.revision}`,
+    };
   }
   private transaction<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
@@ -49,7 +63,9 @@ export class TaskStore {
   }
   get(id: string): Task | undefined {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id=?").get(id);
-    if (!row) return undefined;
+    return row ? this.decodeTask(row) : undefined;
+  }
+  private decodeTask(row: Record<string, unknown>): Task {
     const { eventKey: _eventKey, ...data } = row;
     return {
       ...data,
@@ -65,6 +81,22 @@ export class TaskStore {
   }
   accept(input: NewTask): { task: Task; duplicate: boolean } {
     return this.transaction(() => {
+      const binding = this.activeBinding(
+        input.installationId,
+        input.repositoryId,
+      );
+      const sourceKey =
+        input.source.event === "push"
+          ? "push"
+          : `${input.source.event}.${input.source.action}`;
+      if (
+        !binding ||
+        binding.id !== input.bindingId ||
+        binding.owner !== input.owner ||
+        binding.repo !== input.repo ||
+        !binding.events.some((event) => event === sourceKey)
+      )
+        throw new StaleBinding("Binding changed before acceptance");
       const eventKey =
         input.source.event === "issue_comment" &&
         input.source.commentId !== undefined
@@ -168,12 +200,12 @@ export class TaskStore {
       if (busy) return undefined;
       const row = this.db
         .prepare(
-          `SELECT id FROM tasks q WHERE q.status='queued' AND NOT EXISTS (
-        SELECT 1 FROM tasks busy WHERE busy.bindingId=q.bindingId AND (
+          `SELECT q.id FROM tasks q JOIN bindings b USING (installationId,repositoryId) WHERE q.status='queued' AND b.deviceId=? AND NOT EXISTS (
+        SELECT 1 FROM tasks busy WHERE busy.installationId=q.installationId AND busy.repositoryId=q.repositoryId AND (
           busy.status IN ('running','unknown') OR (busy.status='succeeded' AND busy.deliveryStatus IN ('pending','sending','unknown'))
         )) ORDER BY q.createdAt,q.rowid LIMIT 1`,
         )
-        .get();
+        .get(workerId);
       if (!row) return undefined;
       this.db
         .prepare(
@@ -201,7 +233,7 @@ export class TaskStore {
       WHERE t.id=? AND a.workerId=? AND a.leaseHash=? AND a.expiresAt>? AND t.status='running'`,
       )
       .get(taskId, workerId, leaseHash, now);
-    return row ? this.get(String(row.id)) : undefined;
+    return row ? this.decodeTask(row) : undefined;
   }
   finishAssignment(
     taskId: string,
@@ -220,14 +252,17 @@ export class TaskStore {
         )
         .get(taskId, workerId, leaseHash);
       if (!row) throw new AssignmentConflict("Assignment not found");
+      const task = this.get(taskId)!;
+      if (
+        this.activeBinding(task.installationId, task.repositoryId)?.id !==
+        task.bindingId
+      )
+        throw new AssignmentConflict("Binding revision changed");
       if (row.resultDigest !== null) {
         if (row.resultDigest === digest) return true;
         throw new AssignmentConflict("Conflicting assignment result");
       }
-      if (
-        Number(row.expiresAt) <= now ||
-        this.get(taskId)?.status !== "running"
-      )
+      if (Number(row.expiresAt) <= now || task.status !== "running")
         throw new AssignmentConflict("Assignment is not active");
       if (
         !["succeeded", "failed", "unknown"].includes(result.status) ||
@@ -242,9 +277,9 @@ export class TaskStore {
       if (result.status === "succeeded") {
         try {
           outcome = validateOutcome(result.outcome);
-          validateTaskOutcome(this.get(taskId)!, outcome);
+          validateTaskOutcome(task, outcome);
         } catch {
-          throw new AssignmentConflict("Invalid assignment outcome");
+          throw new InvalidAssignmentOutcome("Invalid assignment outcome");
         }
       }
       this.db

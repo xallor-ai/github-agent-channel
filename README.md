@@ -22,6 +22,7 @@ GitHub ──签名Webhook──▶ Channel服务 ──评论/PR──▶ GitHu
 
 | 文档                                     | 什么时候读                                        |
 | ---------------------------------------- | ------------------------------------------------- |
+| **[配对与仓库自助接入](docs/agent-self-service.md)** | 领取邀请、在本地设置规则、查看生效修订、停用仓库 |
 | **[OpenClaw 适配器接入](docs/setup.md)** | 当前已实现适配器：从配置到真实 GitHub 回帖验收    |
 | [ECS自建部署（可选）](docs/ecs-setup.md) | 没有现成Channel服务，或需要自己维护公网入口时     |
 | [运行与恢复](docs/operations.md)         | 日志排错、secret权限、更新回滚、备份与unknown对账 |
@@ -33,19 +34,19 @@ GitHub App的注册、权限、安装与事件订阅引用配套书稿[附录 B]
 
 ## 从哪里开始
 
-需要Node.js 24；容器方式需要Compose插件2.20+。OpenClaw已验证版本为2026.11.3。当前主动连接实现位于 `codex/outbound-connector` 分支，尚未自动合并到默认分支：
+需要Node.js 24；容器方式需要Compose插件2.20+。OpenClaw已验证版本为2026.11.3。两端使用同一支持设备配对的发布版本：
 
 ```sh
-git clone --branch codex/outbound-connector --single-branch https://github.com/xallor-ai/github-agent-channel.git
+git clone https://github.com/xallor-ai/github-agent-channel.git
 cd github-agent-channel
 npm ci --ignore-scripts
 ```
 
-**已有Channel服务**：取得服务origin和connector token，从[主线](docs/setup.md)准备OpenClaw，然后：
+**已有Channel服务**：取得服务 origin 和一次性配对邀请，从[主线](docs/setup.md)准备OpenClaw，然后：
 
 ```sh
 npm run channel -- agent init ./agent-data
-# 按主线编辑YAML、放置secret并完成模型探针后：
+# 填写配置后，先按自助接入指南完成配对、显式启用仓库，再校验并启动：
 npm run channel -- agent check ./agent-data/agent.local.yaml
 npm run channel -- agent run ./agent-data/agent.local.yaml
 ```
@@ -68,4 +69,4 @@ npm run smoke:deployment
 
 模型探针 `npm run smoke:openclaw` 会实际调用Provider，应先按主线配置本地Gateway token；它使用合成工具数据，不访问真实GitHub。容器冒烟和单元测试同样不能替代公网验收。
 
-已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖和重投去重验收，见[记录](docs/outbound-validation-20261122.md)。默认只启用评论提及；其他支持事件须逐项配置。PR 发布默认关闭，须显式设置 writePolicy。当前仍为单可信连接器身份，不宣称多租户隔离或外部执行恰好一次。
+已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖和重投去重验收，见[记录](docs/outbound-validation-20261122.md)。这是早期版本的验收。当前版本由设备显式登记仓库和事件，只有已配对设备才能领取其绑定任务；PR 发布另需管理员配置 writeProfiles。多设备的真实验收以能力台账为准。

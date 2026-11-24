@@ -58,7 +58,14 @@ export class BindingPrincipalVerifier {
     const target = selectionSchema.parse(input);
     const device = pairedDevice.safeParse(await this.authenticate(credential));
     if (!device.success) throw new AccessDenied("Device is not paired");
-    const { deviceId, githubUserId } = device.data;
+    return this.verifyPaired(device.data, target);
+  }
+  async verifyPaired(
+    principal: z.infer<typeof pairedDevice>,
+    input: unknown,
+  ): Promise<Parameters<BindingRegistry["apply"]>[0]> {
+    const { deviceId, githubUserId } = pairedDevice.parse(principal);
+    const target = selectionSchema.parse(input);
     const app = this.#app.octokit;
     const { data: installed } = await app.request(
       "GET /repos/{owner}/{repo}/installation",
@@ -115,6 +122,8 @@ export class BindingPrincipalVerifier {
       throw new AccessDenied("Repository identity changed");
     return {
       deviceId,
+      owner: current.owner.login,
+      repo: current.name,
       administratorId: githubUserId,
       installationId: installationId.data,
       repositoryId: selected.id,

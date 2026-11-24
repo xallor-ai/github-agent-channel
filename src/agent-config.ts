@@ -21,6 +21,7 @@ const origin = (value: string, channel: boolean) => {
     return false;
   }
 };
+export const channelOrigin = z.string().refine((v) => origin(v, true));
 const ref = {
   tokenFile: z.string().min(1).optional(),
   tokenEnv: envName.optional(),
@@ -58,7 +59,7 @@ const openclawSchema = z.strictObject({
 export type OpenClawRuntimeConfig = z.infer<typeof openclawSchema>;
 const schema = z.strictObject({
   channel: z.strictObject({
-    baseUrl: z.string().refine((v) => origin(v, true)),
+    baseUrl: channelOrigin,
     ...ref,
   }),
   runtime: z.union([openclawSchema, acpSchema]),
@@ -86,37 +87,39 @@ const schema = z.strictObject({
 export type AgentConfig = z.infer<typeof schema>;
 type Env = Record<string, string | undefined>;
 
+function readAgentToken(
+  name: string,
+  ref: { tokenFile?: string; tokenEnv?: string },
+  path: string,
+  env: Env,
+) {
+  if ((ref.tokenFile === undefined) === (ref.tokenEnv === undefined))
+    throw Error(name + ".token requires exactly one File or Env reference");
+  let token: string | undefined;
+  try {
+    token = ref.tokenFile
+      ? readFileSync(resolve(dirname(resolve(path)), ref.tokenFile), "utf8")
+      : env[ref.tokenEnv!];
+  } catch {
+    throw Error(name + ".token file is unreadable");
+  }
+  if (!token?.trim()) throw Error(name + ".token is empty");
+  return token.trim();
+}
 function agentSecrets(
   config: AgentConfig,
   path: string,
   env: Env = process.env,
 ) {
-  const read = (
-    name: string,
-    ref: { tokenFile?: string; tokenEnv?: string },
-  ) => {
-    if ((ref.tokenFile === undefined) === (ref.tokenEnv === undefined))
-      throw Error(name + ".token requires exactly one File or Env reference");
-    let token: string | undefined;
-    try {
-      token = ref.tokenFile
-        ? readFileSync(resolve(dirname(resolve(path)), ref.tokenFile), "utf8")
-        : env[ref.tokenEnv!];
-    } catch {
-      throw Error(name + ".token file is unreadable");
-    }
-    if (!token?.trim()) throw Error(name + ".token is empty");
-    return token.trim();
-  };
   return {
-    channel: read("channel", config.channel),
+    channel: readAgentToken("channel", config.channel, path, env),
     runtime:
       config.runtime.type === "openclaw"
-        ? read("runtime", config.runtime)
+        ? readAgentToken("runtime", config.runtime, path, env)
         : undefined,
   };
 }
-export function loadAgentConfig(path: string, env: Env = process.env) {
+export function readAgentSettings(path: string) {
   let input: unknown;
   try {
     input = parse(readFileSync(path, "utf8"));
@@ -130,7 +133,22 @@ export function loadAgentConfig(path: string, env: Env = process.env) {
         (parsed.error.issues[0].path.join(".") || "configuration"),
     );
   const config = parsed.data;
-  const secrets = agentSecrets(config, path, env);
+
   config.stateFile = resolve(dirname(resolve(path)), config.stateFile);
-  return { config, secrets };
+  return config;
+}
+export function loadChannelClient(
+  path: string,
+  config = readAgentSettings(path),
+  env: Env = process.env,
+) {
+  return {
+    baseUrl: config.channel.baseUrl,
+    timeout: config.requestTimeoutMs,
+    token: readAgentToken("channel", config.channel, path, env),
+  };
+}
+export function loadAgentConfig(path: string, env: Env = process.env) {
+  const config = readAgentSettings(path);
+  return { config, secrets: agentSecrets(config, path, env) };
 }

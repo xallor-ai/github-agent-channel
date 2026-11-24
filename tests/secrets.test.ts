@@ -19,11 +19,8 @@ function fixture(t: any) {
       botLogin: "test[bot]",
     },
     connector: {
-      tokenFile: "token",
-      workerId: "local-worker",
       timeoutMs: 1000,
     },
-    bindings: [],
   };
   const pem =
     "-----BEGIN PRIVATE KEY-----\nfixture-only\n-----END PRIVATE KEY-----\n";
@@ -31,7 +28,6 @@ function fixture(t: any) {
     "app.pem": pem,
     admin: "admin-secret\n",
     hook: "hook-secret\n",
-    token: "runtime-secret\n",
   }))
     writeFileSync(join(dir, name), value);
   const path = join(dir, "config.json");
@@ -74,6 +70,5 @@ test("resolved file secrets preserve PEM newlines and remove token file trailing
     privateKey: pem,
     adminToken: "admin-secret",
     webhookSecret: "hook-secret",
-    connectorToken: "runtime-secret",
   });
 });
