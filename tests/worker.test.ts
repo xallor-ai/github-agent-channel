@@ -149,3 +149,32 @@ test("overlapping ticks do not publish twice", async (t) => {
   await first;
   assert.equal(attempts, 1);
 });
+
+test("unavailable preflight does not freeze the next queued task", async (t) => {
+  const { store, task } = ready(t);
+  const next = store.accept({
+    ...input,
+    deliveryId: "next",
+    source: { ...input.source, commentId: 2 },
+  }).task;
+  let writes = 0;
+  const w = new DeliveryWorker(
+    store,
+    github({
+      authorize: async () => {
+        throw Error("PR unavailable");
+      },
+      publishComment: async () => {
+        writes++;
+        throw Error("unexpected");
+      },
+    }),
+  );
+  await w.tick();
+  assert.equal(writes, 0);
+  assert.equal(store.get(task.id)?.deliveryStatus, "failed");
+  assert.equal(
+    store.claimAssignment("worker", "next", Date.now() + 60000)?.id,
+    next.id,
+  );
+});

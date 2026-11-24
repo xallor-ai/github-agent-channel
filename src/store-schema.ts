@@ -15,7 +15,7 @@ export function requireSchemaVersion(
 ): boolean {
   const existing = db
     .prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'",
     )
     .all();
   const version = db.prepare("PRAGMA user_version").get()?.user_version;

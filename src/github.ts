@@ -104,7 +104,15 @@ export class OctokitGitHubClient implements GitHubClient {
     return client;
   }
   async authorize(task: Task): Promise<void> {
-    await this.#authorized(task);
+    const client = await this.#authorized(task);
+    if (task.target.kind === "pull_request") {
+      const { data } = await client.request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+        { owner: task.owner, repo: task.repo, pull_number: task.target.number },
+      );
+      if (data.state !== "open" || data.merged !== false)
+        throw new AccessDenied("Target pull request is not confirmed open");
+    }
   }
   async readIssue(task: Task): Promise<unknown> {
     if (
@@ -154,12 +162,19 @@ export class OctokitGitHubClient implements GitHubClient {
     if (bytes.length > MAX_FILE) throw new Error("File exceeds 128 KiB");
     return { untrusted: true, path, content: bytes.toString("utf8") };
   }
+  private async authorizeWrite(task: Task): Promise<void> {
+    try {
+      await this.authorize(task);
+    } catch {
+      throw new AccessDenied("Cannot confirm authorization for GitHub write");
+    }
+  }
   async publishPullRequest(
     task: Task,
     proposal: Extract<PublicationRequest, { kind: "pull_request" }>,
   ): Promise<{ id: number; url: string }> {
     validateProposal(task, this.#binding(task).writePolicy, proposal);
-    await this.authorize(task);
+    await this.authorizeWrite(task);
     const client = await this.#client(task, true);
     return publishDraftPullRequest(task, proposal, client, () =>
       this.authorize(task),
@@ -217,7 +232,7 @@ export class OctokitGitHubClient implements GitHubClient {
         );
     }
     // Re-check after the paginated read, immediately before the outbound effect.
-    await this.authorize(task);
+    await this.authorizeWrite(task);
     try {
       const { data } = await client.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
