@@ -12,7 +12,7 @@ GitHub ──签名Webhook──▶ Channel服务 ──评论/PR──▶ GitHu
                       本仓库连接器 ──适配器──▶ Runtime（OpenClaw / ACP）
 ```
 
-当前提供独立出站 bridge。OpenClaw 适配器用于读取分析；ACP 适配器复用现有编码 harness，收集实际文件变更和验证结果，服务端按显式策略创建 draft PR。配置、任务和结果使用严格 v2 契约，不兼容旧版。真实模型→代码→GitHub PR 尚需独立验收。
+当前提供独立出站 bridge。OpenClaw 适配器用于读取分析；ACP 适配器复用现有编码 harness，收集实际文件变更和验证结果，服务端按显式策略创建 draft PR。配置、任务和结果使用严格 v2 契约，不兼容旧版。真实编码建 PR 已验收；同一 PR 续改仍是[产品契约](docs/product-contract.md)中的目标。
 
 ## 配置文档
 

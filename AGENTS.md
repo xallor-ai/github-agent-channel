@@ -9,6 +9,8 @@
 
 ## Read first
 
+- [Product contract](docs/product-contract.md) defines the approved scope. Map feature changes to C/W acceptance criteria; current implementation evidence belongs in the capability ledger.
+
 - Read docs/README.md, docs/implementation-map.md, docs/architecture.md and relevant source/tests before feature work or external research. Requirements describe intended scope; source shows what exists. Record any gap.
 - docs/setup.md is the OpenClaw adapter guide; docs/acp-setup.md is the native ACP guide. ECS is only an optional server deployment example.
 - Dated validation/review files are historical evidence, never current configuration. Superseded V1/direct-call plans were deleted; Git history retains them. Never restore cloud-to-inner-runtime calls or comment-only task aliases.
