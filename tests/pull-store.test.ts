@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -8,7 +9,7 @@ import type { NewTask } from "../src/contracts.js";
 const input: NewTask = {
   deliveryId: "d1",
   source: { event: "issue_comment", action: "created", commentId: 1 },
-  bindingId: "b1",
+  bindingId: "1:2:worker:1",
   installationId: 1,
   repositoryId: 2,
   owner: "org",
@@ -28,6 +29,7 @@ function fixture(t: test.TestContext) {
   });
   const open = () => {
     const s = new TaskStore(path);
+    seedBinding(s, input, "worker");
     stores.push(s);
     return s;
   };
@@ -38,11 +40,13 @@ test("assignment is atomic across connections and blocks one worker across bindi
   const s = open(),
     peer = open();
   const a = s.accept(input).task;
+  seedBinding(s, { ...input, repositoryId: 3 }, "worker");
   s.accept({
     ...input,
     deliveryId: "d2",
     source: { ...input.source, commentId: 2 },
-    bindingId: "b2",
+    repositoryId: 3,
+    bindingId: "1:3:worker:1",
   });
   const lease = s.claimAssignment("worker", "hash", 2000, 1000);
   assert.equal(lease?.id, a.id);

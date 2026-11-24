@@ -4,7 +4,7 @@
 
 目标是让 GitHub 任务进入用户的 Agent 执行环境并产生可验证的工作成果。当前优先闭环为 **Issue → 修改代码 → 测试 → 创建 PR**。评论是交互与反馈方式之一，分析回帖成功不代表这个目标已经实现。
 
-本表适用当前 v2 实现（2026-11-24 更新真实编码/事件证据）。配置、协议、状态库均不兼容旧版。代码路径在本地测试；真实环境列明确区分实际验收、故障注入测试与未实现范围。
+本表适用当前 v2 实现（2026-11-24 更新设备绑定与离线恢复证据）。配置、协议、状态库均不兼容旧版。代码路径在本地测试；真实环境列明确区分实际验收、故障注入测试与未实现范围。
 
 ## 状态和证据口径
 
@@ -34,7 +34,7 @@
 | E12 | 防止机器人回复触发自身               | 已实现；忽略 Bot、自己的消息和不匹配的提及                                    | webhook.test.ts                                                              | v2两条机器人事件200 ignored        |
 | E13 | 重复投递只对应一个任务               | 已实现；delivery 和 scoped comment 去重                                       | [store.test.ts](../tests/store.test.ts)                                      | v2 GitHub Redeliver 同任务、单回帖 |
 
-GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时默认只处理符合条件的 `issue_comment.created`；可显式启用已实现的 `issues.opened/labeled`、`pull_request.opened/synchronize` 和 `push`，并满足对应触发规则。未启用或未实现的事件会被忽略，通常返回 `200 {ignored:true}`；这个 HTTP 200 不代表任务执行成功。
+GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明非空 `events`；仅接收提及评论时选 `[issue_comment.created]` 并保持 `requireMention: true`。可显式启用已实现的 `issues.opened/labeled`、`pull_request.opened/synchronize` 和 `push`，并满足对应触发规则。未启用或未实现的事件会被忽略，通常返回 `200 {ignored:true}`；这个 HTTP 200 不代表任务执行成功。
 
 ## 2. 上下文、模型和执行环境
 
@@ -75,19 +75,22 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 | S02 | 每次工具和外部回写重新授权       | 已实现；读取、评论及每次 Git Data/PR 写入前均重新授权                                       | github.test.ts、github-publication.test.ts、worker.test.ts                                   | 本次本地失权用例通过                                 |
 | S03 | 模型不能覆盖目标仓库/Issue/身份  | 已实现；可信上下文来自已保存任务，工具参数严格检查                                          | webhook.test.ts、pull.test.ts                                                                | 本次本地通过                                         |
 | S04 | Webhook 持久化后 ACK             | 已实现                                                                                      | server.test.ts、store.test.ts                                                                | 本次本地通过                                         |
-| S05 | 云端 assignment、lease、结果幂等 | 已实现；单可信 worker，未知任务阻塞继续执行                                                 | [pull-store.test.ts](../tests/pull-store.test.ts)、pull.test.ts                              | 本次本地通过                                         |
+| S05 | 云端 assignment、lease、结果幂等 | 已实现；按设备与绑定修订领取，未知任务阻塞继续执行                                                 | [pull-store.test.ts](../tests/pull-store.test.ts)、pull.test.ts                              | 本次本地通过                                         |
 | S06 | 内网 journal、重启和重复结果处理 | 已实现；运行中断转 unknown，结果重传不重跑模型                                              | [agent-store.test.ts](../tests/agent-store.test.ts)、[agent.test.ts](../tests/agent.test.ts) | 本次本地通过                                         |
 | S07 | 写仓副作用与对账                 | 部分实现；publication 状态和 receipt 持久化，未知不重放；中间 blob/commit/branch 不自动恢复 | github-publication/worker 测试                                                               | 丢响应、失权、冲突本地通过                           |
 | S08 | 写路径、基线与分支策略           | 已实现固定 baseBranch、base SHA 校验、任务分支、路径/模式/数量/大小限制                     | github-publication.test.ts                                                                   | 本地通过；写权限需显式配置                           |
-| S09 | 多租户、多 worker 路由           | 未实现；实例共享的一个 connector 身份不构成租户隔离                                         | contracts.ts、pull-store.test.ts                                                             | 不纳入本次闭环                                       |
+| S09 | 多设备领取与隔离 | 已实现按设备和有效绑定修订领取；不提供企业多租户隔离 | [双仓回归](../tests/self-service-e2e.test.ts) | 两个设备身份、两个 bridge 均运行于同一台内网主机；见下表 |
 | S10 | 部署与配置                       | OpenClaw 原生/Docker、external/Caddy；ACP 仅原生连接器；旧库拒绝无迁移                      | deploy/agent-deploy/schema 测试                                                              | v2 OpenClaw Docker 与 OpenCode 原生 ACP 均完成真实验收 |
 
-## 仓库接入实施进度
+## 仓库自助接入验收
 
-| 能力 | 当前证据 | 尚缺 |
+2026-11-24 在部署版本 `f54b8e8` 验收，以 [#14 现场记录](https://github.com/xallor-ai/github-agent-channel/issues/14#issuecomment-7130728427) 为准。升级服务端使用新云任务库；下列日常仓库操作没有改 ECS 配置或重启服务。
+
+| 场景 | 实际结果 | 证据范围 |
 | --- | --- | --- |
-| 动态登记 | [登记库测试](../tests/binding-registry.test.ts)：重启保留、修订冲突、设备隔离 | 授权配对/API、本地声明同步、切换受理与领取 |
-| 离线等待 | [任务库测试](../tests/pull-store.test.ts)：排队 24 小时边界与重投不续期 | 真实双设备双仓验收 |
+| 登记与停用 | `xallor-agent` 配对后从内网启用目标仓库（修订 1），停用（2）后真实投递被忽略，再启用（3）后回帖 | 真实 GitHub、CLI 与服务端回执 |
+| 离线与隔离 | 目标设备离线时提及进入队列；另一设备未抢领。上线后原任务成功回帖，原仓库亦能独立反馈 | 同机双设备身份、双仓、只读 OpenClaw；不代表跨物理机或代码写入 |
+| 故障边界 | 排队满 24 小时、错误租约、旧修订和重复结果 | [自动化测试](../tests/self-service-e2e.test.ts)，未在线注入这些故障 |
 
 ## 本次验证与限制
 

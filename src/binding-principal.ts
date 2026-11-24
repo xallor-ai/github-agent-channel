@@ -29,6 +29,14 @@ const tokenResponse = z.object({
   repositories: z.tuple([repository]),
 });
 
+export class AdministratorLost extends AccessDenied {
+  constructor(
+    readonly installationId: number,
+    readonly repositoryId: number,
+  ) {
+    super("Paired user is not a verified repository administrator");
+  }
+}
 /** Trusted integration point. The pairing service must authenticate the credential and check revocation. */
 type AuthenticateDevice = (
   credential: string,
@@ -58,7 +66,14 @@ export class BindingPrincipalVerifier {
     const target = selectionSchema.parse(input);
     const device = pairedDevice.safeParse(await this.authenticate(credential));
     if (!device.success) throw new AccessDenied("Device is not paired");
-    const { deviceId, githubUserId } = device.data;
+    return this.verifyPaired(device.data, target);
+  }
+  async verifyPaired(
+    principal: z.infer<typeof pairedDevice>,
+    input: unknown,
+  ): Promise<Parameters<BindingRegistry["apply"]>[0]> {
+    const { deviceId, githubUserId } = pairedDevice.parse(principal);
+    const target = selectionSchema.parse(input);
     const app = this.#app.octokit;
     const { data: installed } = await app.request(
       "GET /repos/{owner}/{repo}/installation",
@@ -98,11 +113,7 @@ export class BindingPrincipalVerifier {
         username: user.login,
       },
     );
-    if (
-      access.permission !== "admin" ||
-      access.user?.id !== githubUserId ||
-      access.user.login !== user.login
-    )
+    if (access.user?.id !== githubUserId || access.user.login !== user.login)
       throw new AccessDenied(
         "Paired user is not a verified repository administrator",
       );
@@ -113,8 +124,19 @@ export class BindingPrincipalVerifier {
     );
     if (current.id !== selected.id || !matches(current))
       throw new AccessDenied("Repository identity changed");
+    if (access.permission !== "admin") {
+      if (
+        ["write", "maintain", "triage", "read", "none"].includes(
+          access.permission,
+        )
+      )
+        throw new AdministratorLost(installationId.data, selected.id);
+      throw new AccessDenied("Could not confirm administrator permission");
+    }
     return {
       deviceId,
+      owner: current.owner.login,
+      repo: current.name,
       administratorId: githubUserId,
       installationId: installationId.data,
       repositoryId: selected.id,

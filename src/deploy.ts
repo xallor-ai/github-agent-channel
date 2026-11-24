@@ -67,7 +67,6 @@ export function renderDeployment(
     [runtime.server, "adminToken", "channel_admin_token"],
     [runtime.github, "privateKey", "github_private_key"],
     [runtime.github, "webhookSecret", "github_webhook_secret"],
-    [runtime.connector, "token", "connector_token"],
   ] as const;
   for (const [section, key, secretName] of references) {
     const entry = section as unknown as Record<string, unknown>;
@@ -154,7 +153,7 @@ export function renderDeployment(
   const caddy = `${origin} {
   @webhook {
     method POST
-    path /webhooks/github /connector/v2/claim /connector/v2/tasks/*
+    path /webhooks/github /connector/v2/*
   }
   handle @webhook {
     reverse_proxy ${project}-channel:3000
@@ -179,7 +178,7 @@ location = /webhooks/github {
     proxy_set_header X-Forwarded-Proto https;
     proxy_read_timeout 15s;
 }
-# Connector uses a dedicated bearer token; task tools/results require an active assignment.
+# Pairing uses GitHub user proof; other connector routes authenticate a paired device.
 location ^~ /connector/v2/ {
     if ($request_method != POST) { return 405; }
     client_max_body_size 2m;

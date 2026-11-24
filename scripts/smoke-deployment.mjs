@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import https from "node:https";
 import { parse, stringify } from "yaml";
+import { loadConfig } from "../dist/config.js";
 import { renderDeployment } from "../dist/deploy.js";
 import { renderAgentDeployment } from "../dist/agent-deploy.js";
 
@@ -91,11 +92,8 @@ function config(mode, localPort) {
       webhookSecretFile: "hook",
     },
     connector: {
-      workerId: "smoke-worker",
-      tokenFile: "connector",
       timeoutMs: 30000,
     },
-    bindings: [],
     deployment: {
       mode,
       publicUrl: "https://smoke.example.com",
@@ -167,7 +165,6 @@ try {
         [fixture.server, "adminToken", "admin"],
         [fixture.github, "privateKey", "app.pem"],
         [fixture.github, "webhookSecret", "hook"],
-        [fixture.connector, "token", "connector"],
       ];
       for (const [section, key, file] of refs) {
         const env = "CHANNEL_SMOKE_" + key.toUpperCase();
@@ -176,9 +173,11 @@ try {
         section[key + "Env"] = env;
       }
     }
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, stringify(fixture));
     const files = renderDeployment(
-      fixture,
-      join(root, "config.yaml"),
+      loadConfig(configPath),
+      configPath,
       join(root, mode),
     );
     compose(files.composePath, ["config", "-q"]);
@@ -364,6 +363,12 @@ try {
       }
       // Second phase uses production cloud HTTP/coordinator/store and delivery
       // worker, with synthetic GitHub only. Runtime executes on outbound client.
+      parsed.services.channel.volumes.push({
+        type: "bind",
+        source: join(root, "connector"),
+        target: "/run/secrets/fixture_connector",
+        read_only: true,
+      });
       parsed.services.channel.command = [
         "node",
         "/app/scripts/smoke-fixture-server.mjs",

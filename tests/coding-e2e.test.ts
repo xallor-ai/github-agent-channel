@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
@@ -67,27 +68,8 @@ async function fixture(
       webhookSecretEnv: "HOOK",
     },
     connector: {
-      workerId: "coding-worker",
-      tokenEnv: "CONNECTOR",
       timeoutMs: 60000,
     },
-    bindings: [
-      {
-        id: "coding",
-        installationId: 1,
-        repositoryId: 2,
-        owner: "org",
-        repo: "repo",
-        enabled: true,
-        events: ["issue_comment.created"],
-        writePolicy: {
-          baseBranch: "main",
-          allowedPaths: ["file.txt"],
-          maxFiles: 1,
-          maxBytes: 1024,
-        },
-      },
-    ],
   };
   const apiCalls: { path: string; method: string; body: any }[] = [];
   const githubTransport = (async (input: any, init: any) => {
@@ -158,14 +140,34 @@ async function fixture(
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
-  const github = new OctokitGitHubClient(config, key, githubTransport);
   const store = new TaskStore(config.dataFile);
+  const binding = seedBinding(
+    store,
+    { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
+    "coding-worker",
+  );
+  const github = new OctokitGitHubClient(
+    config,
+    key,
+    () => ({
+      ...binding,
+      writePolicy: {
+        baseBranch: "main",
+        allowedPaths: ["file.txt"],
+        maxBytes: 1024,
+        maxFiles: 1,
+      },
+    }),
+    async () => {},
+    githubTransport,
+  );
   const journal = new AgentStore(join(dir, "agent.db"));
   const coordinator = new PullCoordinator(
     store,
     github,
     config.connector,
-    connectorToken,
+    (value) =>
+      value === connectorToken ? { deviceId: "coding-worker" } : undefined,
   );
   const server = createChannelServer(
     config,

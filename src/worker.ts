@@ -22,6 +22,14 @@ export class DeliveryWorker {
           this.store.markDelivery(delivery.id, "failed");
           return true;
         }
+        // Authorization may have awaited GitHub while this binding was disabled.
+        if (
+          this.store.activeBinding(
+            delivery.installationId,
+            delivery.repositoryId,
+          )?.id !== delivery.bindingId
+        )
+          throw new AccessDenied("Binding changed before publication");
         if (!delivery.outcome) throw Error("Missing publication outcome");
         const publication = delivery.outcome.publication;
         if (publication.kind === "none")

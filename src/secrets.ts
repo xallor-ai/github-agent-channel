@@ -62,12 +62,5 @@ export function resolveSecrets(
       configPath,
       env,
     ).trim(),
-    connectorToken: readReference(
-      "connector.token",
-      config.connector.tokenEnv,
-      config.connector.tokenFile,
-      configPath,
-      env,
-    ).trim(),
   };
 }

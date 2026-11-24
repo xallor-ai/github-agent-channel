@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
@@ -14,7 +15,7 @@ import type {
 } from "../src/contracts.js";
 const input = {
   deliveryId: "d",
-  bindingId: "b",
+  bindingId: "1:2:worker:1",
   installationId: 1,
   repositoryId: 2,
   owner: "org",
@@ -27,6 +28,11 @@ const input = {
 };
 async function fixture(t: any, runtime: RuntimeConnector) {
   const cloud = new TaskStore(":memory:");
+  seedBinding(cloud, input, "worker", [
+    "issues.opened",
+    "push",
+    "issue_comment.created",
+  ]);
   const local = new AgentStore(":memory:");
   let comments = 0,
     prs = 0;
@@ -51,8 +57,9 @@ async function fixture(t: any, runtime: RuntimeConnector) {
   const coordinator = new PullCoordinator(
     cloud,
     github,
-    { workerId: "worker", timeoutMs: 60000 },
-    "connector",
+    { timeoutMs: 60000 },
+    (credential) =>
+      credential === "connector" ? { deviceId: "worker" } : undefined,
   );
   const server = createChannelServer(
     {} as ChannelConfig,
@@ -125,6 +132,7 @@ test("repository-target artifacts traverse real outbound HTTP without creating a
   });
   const task = f.cloud.accept({
     ...input,
+    source: { event: "push" },
     target: { kind: "repository", sha: "a".repeat(40) },
   }).task;
   assert.equal(await f.agent.once(), true);
@@ -240,7 +248,9 @@ test("PR reconciliation requires the exact repository including dots", async (t)
       publication: { kind: "none" },
     }),
   });
-  const task = f.cloud.accept({ ...input, repo: "foo.bar" }).task;
+  const target = { ...input, repositoryId: 3, repo: "foo.bar" };
+  const binding = seedBinding(f.cloud, target, "worker", ["issues.opened"]);
+  const task = f.cloud.accept({ ...target, bindingId: binding.id }).task;
   f.cloud.claimAssignment("worker", "hash", Date.now() + 60000);
   f.cloud.finishAssignment(
     task.id,

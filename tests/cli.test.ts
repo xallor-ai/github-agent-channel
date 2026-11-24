@@ -68,13 +68,13 @@ test("doctor reports valid configuration without printing secret values", (t) =>
     "pem-secret",
   );
   writeFileSync(join(dir, "secrets", "github-webhook-secret"), "hook-secret");
-  writeFileSync(join(dir, "secrets", "connector-token"), "runtime-secret");
   const report = buildDoctorReport(configPath, (_command, args) => ({
     status: 0,
     stdout: `Docker Compose version v2.40.0 (${args.join(" ")})`,
   }));
   assert.equal(report.mode, "offline");
   assert.equal(report.config, "valid");
+  assert.equal(report.bindings, "online device registry (not checked offline)");
   assert.equal(report.secrets, "references-resolved");
   assert.doesNotMatch(
     JSON.stringify(report),

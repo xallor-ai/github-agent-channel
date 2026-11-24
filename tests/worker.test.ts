@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TaskStore } from "../src/store.js";
@@ -11,7 +12,7 @@ import {
 const input: NewTask = {
   deliveryId: "d1",
   source: { event: "issue_comment", action: "created", commentId: 1 },
-  bindingId: "b",
+  bindingId: "1:2:worker:1",
   installationId: 1,
   repositoryId: 2,
   owner: "org",
@@ -39,6 +40,7 @@ function github(overrides: Partial<GitHubClient> = {}): GitHubClient {
 function ready(t: test.TestContext) {
   const store = new TaskStore(":memory:");
   t.after(() => store.close());
+  seedBinding(store, input, "worker");
   const task = store.accept(input).task;
   store.claimAssignment("worker", "hash", Date.now() + 60000);
   store.finishAssignment(
@@ -123,6 +125,7 @@ test("permission revoked before publication blocks writes", async (t) => {
 test("delivery worker leaves queued execution untouched", async (t) => {
   const store = new TaskStore(":memory:");
   t.after(() => store.close());
+  seedBinding(store, input, "worker");
   const task = store.accept(input).task;
   const worker = new DeliveryWorker(store, github());
   assert.equal(await worker.tick(), false);
@@ -177,4 +180,23 @@ test("unavailable preflight does not freeze the next queued task", async (t) => 
     store.claimAssignment("worker", "next", Date.now() + 60000)?.id,
     next.id,
   );
+});
+
+test("disabling a binding during authorization prevents the reserved publication from being sent", async (t) => {
+  const { store, task } = ready(t);
+  let attempts = 0;
+  await new DeliveryWorker(
+    store,
+    github({
+      authorize: async () => {
+        store.registry.revokeDevice("worker");
+      },
+      publishComment: async () => {
+        attempts++;
+        return { id: 1, url: "unexpected" };
+      },
+    }),
+  ).tick();
+  assert.equal(attempts, 0);
+  assert.equal(store.get(task.id)?.deliveryStatus, "failed");
 });

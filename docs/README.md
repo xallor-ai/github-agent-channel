@@ -5,6 +5,7 @@ GitHub Agent Channel 是通用 GitHub 通道。当前实现严格 v2 契约、Op
 | 目的                                  | 当前入口                                                                                                 |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | 成熟版范围与验收条件 | [产品契约](product-contract.md) |
+| 设备配对与仓库自助登记 | [命令与示例](agent-self-service.md) |
 | 仓库动态接入设计与交付边界 | [绑定生命周期](binding-lifecycle.md) |
 | Agent 如何委派、请求评审和核验回执 | [GitHub Agent Channel skill](../.agents/skills/github-agent-channel/SKILL.md) |
 | 全部模块与调用链                      | [实现地图](implementation-map.md)                                                                        |
@@ -16,13 +17,13 @@ GitHub Agent Channel 是通用 GitHub 通道。当前实现严格 v2 契约、Op
 | 自建公网服务端（可选）                | [ECS 部署](ecs-setup.md)                                                                                 |
 | 日志、更新和未知状态对账              | [运维](operations.md)                                                                                    |
 | 本次实现依据与步骤                    | [设计与复用边界](runtime-neutral-design.md)、[实施计划](superpowers/plans/2026-11-22-runtime-neutral.md) |
-| 本次实际验证                          | [v2 验证记录](runtime-neutral-validation-20261122.md)                                                    |
+| 本地协议与 SDK 验证（2026-11-22）                          | [v2 验证记录](runtime-neutral-validation-20261122.md)                                                    |
 
 GitHub App 平台教程引用 modern-github-book 附录 B/C，链接在适配器/服务端教程内。平台可订阅的事件不等于 Channel 已实现的事件。
 
 后续复核与逐项治理状态见 [v2 代码与文档复核](code-document-review.md)。其中区分修正前证据与当前关闭状态，不以历史测试通过覆盖新发现。
 
-最新真实 OpenClaw 评审、重投去重及连续复核证据见 [Channel v2 真实评审闭环](channel-review-validation-20261123.md)。ACP 编码→PR→Channel 评审及逐项事件检查另见[真实编码验收](acp-live-validation-20261124.md)。
+仓库登记、离线恢复与停用见[真实双仓验收](https://github.com/xallor-ai/github-agent-channel/issues/14#issuecomment-7130728427)。真实 OpenClaw 评审、重投去重及连续复核证据见 [Channel v2 真实评审闭环](channel-review-validation-20261123.md)。ACP 编码→PR→Channel 评审及逐项事件检查另见[真实编码验收](acp-live-validation-20261124.md)。
 
 ## 保留的历史证据
 

@@ -1,10 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { AccessDenied, type GitHubClient, type Task } from "./contracts.js";
 import {
   TaskStore,
   AssignmentConflict,
+  InvalidAssignmentOutcome,
   type AssignmentResult,
 } from "./store.js";
 
@@ -32,7 +33,6 @@ const resultSchema = z.discriminatedUnion("status", [
 ]);
 import {
   outcomeSchema,
-  validateTaskOutcome,
   runtimeEventSchema,
   MAX_RESULT_BYTES,
 } from "./outcomes.js";
@@ -53,12 +53,12 @@ export class PullCoordinator {
   constructor(
     private readonly store: TaskStore,
     private readonly github: GitHubClient,
-    private readonly config: { workerId: string; timeoutMs: number },
-    private readonly token: string,
+    private readonly config: { timeoutMs: number },
+    private readonly authenticate: (
+      credential: string,
+    ) => { deviceId: string } | undefined,
   ) {
     if (
-      !token.trim() ||
-      !config.workerId.trim() ||
       !Number.isSafeInteger(config.timeoutMs) ||
       config.timeoutMs < 1 ||
       config.timeoutMs > 3600000
@@ -68,8 +68,8 @@ export class PullCoordinator {
   expire(): void {
     this.store.expireTasks();
   }
-  private assignment(id: string, lease: string): Task {
-    const task = this.store.assignedTask(id, this.config.workerId, hash(lease));
+  private assignment(id: string, lease: string, workerId: string): Task {
+    const task = this.store.assignedTask(id, workerId, hash(lease));
     if (!task) throw new StaleAssignment();
     return task;
   }
@@ -84,12 +84,11 @@ export class PullCoordinator {
       });
       res.end(value === undefined ? undefined : JSON.stringify(value));
     };
-    const actual = Buffer.from(req.headers.authorization ?? ""),
-      expected = Buffer.from("Bearer " + this.token);
-    if (
-      actual.length !== expected.length ||
-      !timingSafeEqual(actual, expected)
-    ) {
+    const credential = /^Bearer ([^\s]+)$/.exec(
+      req.headers.authorization ?? "",
+    )?.[1];
+    const workerId = credential && this.authenticate(credential)?.deviceId;
+    if (!workerId) {
       send(401, { error: "Unauthorized" });
       return true;
     }
@@ -104,7 +103,7 @@ export class PullCoordinator {
         const leaseToken = randomBytes(32).toString("hex"),
           expiresAt = Date.now() + this.config.timeoutMs;
         const task = this.store.claimAssignment(
-          this.config.workerId,
+          workerId,
           hash(leaseToken),
           expiresAt,
         );
@@ -114,23 +113,24 @@ export class PullCoordinator {
         }
         try {
           await this.github.authorize(task);
+          this.assignment(task.id, leaseToken, workerId);
         } catch (error) {
           // No request has reached the remote runtime; keep details out of the response.
-          if (this.store.get(task.id)?.status === "running")
-            this.store.rejectAssignment(
-              task.id,
-              error instanceof AccessDenied ? "rejected" : "failed",
-              error instanceof AccessDenied
-                ? "Task authorization denied"
-                : "Task authorization unavailable",
-            );
+          this.store.rejectUndeliveredClaim(
+            task.id,
+            workerId,
+            hash(leaseToken),
+            error instanceof AccessDenied ? "rejected" : "failed",
+            error instanceof AccessDenied
+              ? "Task authorization denied"
+              : "Task authorization unavailable",
+          );
           // This is a denied GitHub actor, not a rejected connector identity.
           // Keep the healthy poller alive and disclose no rejected task content.
           if (error instanceof AccessDenied) send(204);
           else send(503, { error: "Task authorization unavailable" });
           return true;
         }
-        this.assignment(task.id, leaseToken);
         send(200, { task, leaseToken, expiresAt });
         return true;
       }
@@ -146,7 +146,7 @@ export class PullCoordinator {
         const data = z
           .strictObject({ leaseToken: leaseSchema, event: runtimeEventSchema })
           .parse(await jsonBody(req, 4096));
-        const task = this.assignment(id, data.leaseToken);
+        const task = this.assignment(id, data.leaseToken, workerId);
         try {
           this.store.recordRuntime(task.id, data.event);
         } catch (error) {
@@ -164,29 +164,18 @@ export class PullCoordinator {
             : z
                 .strictObject({ path: z.string().min(1).max(1024) })
                 .parse(data.args);
-        const task = this.assignment(id, data.leaseToken);
+        const task = this.assignment(id, data.leaseToken, workerId);
         await this.github.authorize(task);
-        this.assignment(id, data.leaseToken);
+        this.assignment(id, data.leaseToken, workerId);
         const output =
           data.name === "read_issue"
             ? await this.github.readIssue(task)
             : await this.github.readFile(task, (args as { path: string }).path);
-        this.assignment(id, data.leaseToken);
+        this.assignment(id, data.leaseToken, workerId);
         send(200, output);
         return true;
       }
       const data = resultSchema.parse(await jsonBody(req, MAX_RESULT_BYTES));
-      if (data.status === "succeeded") {
-        const task = this.store.get(id);
-        if (task) {
-          try {
-            validateTaskOutcome(task, data.outcome);
-          } catch {
-            send(400, { error: "Invalid publication target" });
-            return true;
-          }
-        }
-      }
       const result: AssignmentResult =
         data.status === "succeeded"
           ? { status: data.status, outcome: data.outcome }
@@ -197,7 +186,7 @@ export class PullCoordinator {
       try {
         duplicate = this.store.finishAssignment(
           id,
-          this.config.workerId,
+          workerId,
           hash(data.leaseToken),
           result,
           digest,
@@ -213,6 +202,8 @@ export class PullCoordinator {
         send(413, { error: "Request too large" });
       else if (error instanceof z.ZodError || error instanceof SyntaxError)
         send(400, { error: "Invalid connector request" });
+      else if (error instanceof InvalidAssignmentOutcome)
+        send(400, { error: "Invalid assignment outcome" });
       else if (error instanceof AccessDenied)
         send(403, { error: "Task authorization denied" });
       else if (error instanceof StaleAssignment)

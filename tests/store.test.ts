@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -7,11 +8,11 @@ import { tmpdir } from "node:os";
 import { StorageSchemaError } from "../src/store-schema.js";
 import { TaskStore } from "../src/store.js";
 import type { NewTask, RuntimeResult } from "../src/contracts.js";
-const input = (n = 1, bindingId = "one"): NewTask => ({
+const input = (n = 1, repositoryId = 2): NewTask => ({
   deliveryId: `d${n}`,
-  bindingId,
+  bindingId: `1:${repositoryId}:${repositoryId === 3 ? "w2" : "w"}:1`,
   installationId: 1,
-  repositoryId: 2,
+  repositoryId,
   owner: "org",
   repo: "repo",
   actorId: 3,
@@ -30,6 +31,11 @@ function fixture(t: test.TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "channel-store-"));
   const path = join(dir, "tasks.db");
   const store = new TaskStore(path);
+  for (const n of [2, 3, 9])
+    seedBinding(store, input(1, n), n === 3 ? "w2" : "w", [
+      "issue_comment.created",
+      "push",
+    ]);
   const stores = [store];
   t.after(() => {
     for (const s of stores) s.close();
@@ -78,8 +84,7 @@ test("deduplicates scoped comment and retains alternate delivery IDs", (t) => {
     first.id,
   );
   assert.equal(
-    store.accept({ ...input(), deliveryId: "other", repositoryId: 9 })
-      .duplicate,
+    store.accept({ ...input(1, 9), deliveryId: "other" }).duplicate,
     false,
   );
   assert.equal(store.get(first.id)?.prompt, "hello");
@@ -104,21 +109,25 @@ test("non-comment events use delivery identity and canonical null fields", (t) =
   assert.equal(a.publicationReceipt, null);
   assert.equal(a.error, null);
 });
-test("rejectAssignment only terminates a running assignment", (t) => {
+test("pre-dispatch rejection requires the matching reservation", (t) => {
   const { store } = fixture(t);
   const a = store.accept(input()).task;
-  assert.throws(() => store.rejectAssignment(a.id, "rejected", "denied"));
+  assert.throws(() =>
+    store.rejectUndeliveredClaim(a.id, "w", "h", "rejected", "denied"),
+  );
   store.claimAssignment("w", "h", 2000, 1000);
-  store.rejectAssignment(a.id, "rejected", "denied");
+  store.rejectUndeliveredClaim(a.id, "w", "h", "rejected", "denied");
   assert.equal(store.get(a.id)?.status, "rejected");
   assert.equal(store.get(a.id)?.error, "denied");
-  assert.throws(() => store.rejectAssignment(a.id, "failed", "again"));
+  assert.throws(() =>
+    store.rejectUndeliveredClaim(a.id, "w", "h", "failed", "again"),
+  );
 });
 test("restart preserves queued work and blocks unknown execution and delivery", (t) => {
   const { store, path, stores } = fixture(t);
   const a = store.accept(input()).task;
   const b = store.accept(input(2)).task;
-  const c = store.accept(input(3, "two")).task;
+  const c = store.accept(input(3, 3)).task;
   store.claimAssignment("w", "h", 2000, 1000);
   store.claimAssignment("w2", "h2", 2000, 1000);
   store.finishAssignment(
@@ -144,11 +153,11 @@ test("restart preserves queued work and blocks unknown execution and delivery", 
   reopened.resolveUnknownDelivery(c.id, "failed");
   assert.equal(reopened.pendingDelivery(), undefined);
 });
-test("fresh schema is version 2 and contains no legacy columns", (t) => {
+test("fresh schema is version 3 and contains no legacy columns", (t) => {
   const { path } = fixture(t);
   const db = new DatabaseSync(path);
   try {
-    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 2);
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 3);
     const columns = db
       .prepare("PRAGMA table_info(tasks)")
       .all()
@@ -270,4 +279,145 @@ test("unknown execution cannot be promoted to success even with a retained outco
   assert.equal(store.pendingDelivery(), undefined);
   store.resolveUnknown(task.id, "failed");
   assert.equal(store.get(task.id)?.status, "failed");
+});
+
+test("a concurrent declaration change fences old work in the same durable queue and denies stale acceptance", (t) => {
+  const { store, path, stores } = fixture(t);
+  const peer = new TaskStore(path);
+  stores.push(peer);
+  const current = input();
+  assert.equal(store.claimAssignment("alien", "h", 2000, 1000), undefined);
+  const running = store.accept(current).task;
+  const queued = store.accept(input(2)).task;
+  assert.equal(store.claimAssignment("alien", "h", 2000, 1000), undefined);
+  assert.equal(store.claimAssignment("w", "h", 2000, 1000)?.id, running.id);
+  const { owner, repo, installationId, repositoryId } = current;
+  const proof = {
+    owner,
+    repo,
+    installationId,
+    repositoryId,
+    deviceId: "w",
+    administratorId: 44,
+  };
+  peer.registry.apply(proof, 1, { enabled: false, events: [] });
+  assert.equal(store.activeBinding(installationId, repositoryId), undefined);
+  assert.equal(store.get(queued.id)?.status, "rejected");
+  assert.equal(store.get(running.id)?.status, "unknown");
+  assert.equal(store.assignedTask(running.id, "w", "h", 1001), undefined);
+  assert.throws(() =>
+    store.finishAssignment(
+      running.id,
+      "w",
+      "h",
+      { status: "succeeded", outcome },
+      "late",
+      1001,
+    ),
+  );
+  peer.registry.apply(proof, 2, { enabled: true, events: ["push"] });
+  const binding = store.activeBinding(installationId, repositoryId)!;
+  assert.notEqual(binding.id, current.bindingId);
+  assert.throws(
+    () => store.accept({ ...input(4), bindingId: binding.id }),
+    /Binding/,
+  );
+  assert.throws(() => store.accept(input(3)), /Binding/);
+  const newTask = store.accept({
+    ...input(3),
+    bindingId: binding.id,
+    source: { event: "push" },
+    target: { kind: "repository" },
+  }).task;
+  assert.equal(store.claimAssignment("w", "h2", 2000, 1001), undefined);
+  store.resolveUnknown(running.id, "failed");
+  assert.equal(store.claimAssignment("w", "h2", 2000, 1001)?.id, newTask.id);
+});
+
+test("device revocation stops pending publication and denies previously verified registrations after restart", (t) => {
+  const { store, path, stores } = fixture(t);
+  const a = store.accept(input()).task;
+  store.claimAssignment("w", "h", 2000, 1000);
+  store.finishAssignment(
+    a.id,
+    "w",
+    "h",
+    { status: "succeeded", outcome },
+    "done",
+    1001,
+  );
+  store.registry.revokeDevice("w");
+  store.close();
+  const peer = new TaskStore(path);
+  stores.push(peer);
+  assert.equal(peer.get(a.id)?.deliveryStatus, "skipped");
+  assert.equal(peer.pendingDelivery(), undefined);
+  assert.throws(() =>
+    peer.finishAssignment(
+      a.id,
+      "w",
+      "h",
+      { status: "succeeded", outcome },
+      "done",
+      1001,
+    ),
+  );
+  assert.throws(
+    () =>
+      peer.registry.apply(
+        {
+          installationId: 2,
+          repositoryId: 200,
+          owner: "org",
+          repo: "new",
+          administratorId: 3,
+          deviceId: "w",
+        },
+        0,
+        { enabled: true, events: ["push"] },
+      ),
+    /revoked/,
+  );
+  assert.equal(peer.activeBinding(1, 3)?.deviceId, "w2");
+});
+
+test("a binding change cannot cancel an issued publication or admit the next revision until its receipt is reconciled", (t) => {
+  const { store } = fixture(t);
+  const first = store.accept(input()).task;
+  store.claimAssignment("w", "lease", 2000, 1000);
+  store.finishAssignment(
+    first.id,
+    "w",
+    "lease",
+    { status: "succeeded", outcome },
+    "done",
+    1001,
+  );
+  assert.equal(store.pendingDelivery()?.id, first.id);
+  const proof = {
+    deviceId: "w",
+    administratorId: 44,
+    installationId: 1,
+    repositoryId: 2,
+    owner: "org",
+    repo: "repo",
+  };
+  store.registry.apply(proof, 1, {
+    enabled: true,
+    events: ["issue_comment.created"],
+  });
+  const binding = store.activeBinding(1, 2)!;
+  const next = store.accept({ ...input(2), bindingId: binding.id }).task;
+  assert.equal(store.get(first.id)?.deliveryStatus, "sending");
+  assert.equal(store.claimAssignment("w", "next", 2000, 1001), undefined);
+  store.markDelivery(first.id, "unknown");
+  assert.equal(store.claimAssignment("w", "next", 2000, 1001), undefined);
+  const receipt = {
+    kind: "comment" as const,
+    id: 812,
+    url: "https://github.com/org/repo/issues/4#issuecomment-812",
+  };
+  store.resolveUnknownDelivery(first.id, "sent", receipt);
+  assert.deepEqual(store.get(first.id)?.publicationReceipt, receipt);
+  assert.equal(store.claimAssignment("w", "next", 2000, 1001)?.id, next.id);
 });

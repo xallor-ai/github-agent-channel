@@ -1,10 +1,10 @@
 import { Webhooks } from "@octokit/webhooks";
-import type { ChannelConfig, NewTask } from "./contracts.js";
+import type { BindingLookup, NewTask } from "./contracts.js";
 
 const positive = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 export async function normalizeWebhook(
-  config: ChannelConfig,
+  config: { github: { botLogin: string }; lookup: BindingLookup },
   raw: Buffer,
   headers: { signature: string; delivery: string; event: string },
   secret: string,
@@ -42,18 +42,16 @@ export async function normalizeWebhook(
     ![installation?.id, repository?.id, sender.id].every(positive)
   )
     return null;
-  const binding = config.bindings.find(
-    (b) =>
-      b.enabled &&
-      b.installationId === installation.id &&
-      b.repositoryId === repository.id &&
-      b.owner === repository.owner?.login &&
-      b.repo === repository.name,
-  );
-  if (!binding) return null;
+  const binding = config.lookup(installation.id, repository.id);
+  if (
+    !binding?.enabled ||
+    binding.owner !== repository.owner?.login ||
+    binding.repo !== repository.name
+  )
+    return null;
   const key =
     headers.event === "push" ? "push" : headers.event + "." + event.action;
-  if (!(binding.events ?? ["issue_comment.created"]).includes(key)) return null;
+  if (!binding.events.includes(key)) return null;
   const mentions = [config.github.botLogin];
   if (/\[bot\]$/i.test(config.github.botLogin))
     mentions.push(config.github.botLogin.replace(/\[bot\]$/i, ""));

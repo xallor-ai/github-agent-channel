@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Webhooks } from "@octokit/webhooks";
@@ -6,7 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { normalizeWebhook } from "../src/webhook.js";
 import { TaskStore } from "../src/store.js";
-import type { ChannelConfig } from "../src/contracts.js";
+import type { Binding } from "../src/contracts.js";
 
 const scope = {
   bindingId: "b",
@@ -33,7 +34,7 @@ const config = {
       triggerLabel: "agent",
     },
   ],
-} as unknown as ChannelConfig;
+} as { github: { botLogin: string }; bindings: Binding[] };
 const envelope = {
   installation: { id: 1 },
   repository: { id: 2, name: "repo", owner: { login: "org" } },
@@ -42,7 +43,13 @@ const envelope = {
 async function receive(event: string, payload: unknown, settings = config) {
   const raw = Buffer.from(JSON.stringify(payload));
   return normalizeWebhook(
-    settings,
+    {
+      github: settings.github,
+      lookup: (i, r) =>
+        settings.bindings.find(
+          (b) => b.installationId === i && b.repositoryId === r,
+        ),
+    },
     raw,
     {
       event,
@@ -77,6 +84,7 @@ test("opted-in Issue and repository events produce scoped targets without invent
   assert.equal("issueNumber" in push, false);
   const store = new TaskStore(":memory:");
   try {
+    push.bindingId = seedBinding(store, push, "worker", ["push"]).id;
     const first = store.accept(push);
     assert.equal(first.task.target?.kind, "repository");
     assert.equal(store.accept(push).task.id, first.task.id);
@@ -119,7 +127,10 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
   assert.deepEqual(pr?.target, { kind: "pull_request", number: 9 });
   const defaults = {
     ...config,
-    bindings: config.bindings.map((b) => ({ ...b, events: undefined })),
+    bindings: config.bindings.map((b) => ({
+      ...b,
+      events: ["issue_comment.created"],
+    })),
   };
   assert.equal(
     await receive("issues", { ...payload, label: { name: "agent" } }, defaults),
@@ -131,8 +142,10 @@ test("structured outcomes persist across restart and validate untrusted paths be
   const path = join(dir, "tasks.db");
   let store = new TaskStore(path);
   try {
+    const bindingId = seedBinding(store, scope, "worker").id;
     const task = store.accept({
       ...scope,
+      bindingId,
       deliveryId: "d",
       source: { event: "issue_comment", action: "created", commentId: 4 },
       target: { kind: "issue", number: 5 },
@@ -164,6 +177,7 @@ test("structured outcomes persist across restart and validate untrusted paths be
     assert.equal(store.get(task.id)?.deliveryStatus, "skipped");
     const next = store.accept({
       ...scope,
+      bindingId,
       deliveryId: "e",
       source: { event: "issue_comment", action: "created", commentId: 6 },
       target: { kind: "issue", number: 5 },

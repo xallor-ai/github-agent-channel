@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
@@ -14,7 +15,7 @@ import {
 const input: NewTask = {
   deliveryId: "d1",
   source: { event: "issue_comment", action: "created", commentId: 1 },
-  bindingId: "b",
+  bindingId: "1:2:only-worker:1",
   installationId: 1,
   repositoryId: 2,
   owner: "org",
@@ -26,6 +27,7 @@ const input: NewTask = {
 };
 async function fixture(t: test.TestContext, timeoutMs = 60000) {
   const store = new TaskStore(":memory:");
+  seedBinding(store, input, "only-worker");
   let authorized = true,
     authorizations = 0,
     reads = 0,
@@ -54,8 +56,13 @@ async function fixture(t: test.TestContext, timeoutMs = 60000) {
   const coordinator = new PullCoordinator(
     store,
     github,
-    { workerId: "only-worker", timeoutMs },
-    "connector-token",
+    { timeoutMs },
+    (credential) =>
+      credential === "connector-token"
+        ? { deviceId: "only-worker" }
+        : credential === "other-token"
+          ? { deviceId: "other" }
+          : undefined,
   );
   const config: ChannelConfig = {
     server: { host: "127.0.0.1", port: 0, adminTokenEnv: "ADMIN" },
@@ -66,8 +73,7 @@ async function fixture(t: test.TestContext, timeoutMs = 60000) {
       privateKeyEnv: "KEY",
       webhookSecretEnv: "HOOK",
     },
-    connector: { workerId: "only-worker", tokenEnv: "CONNECTOR", timeoutMs },
-    bindings: [],
+    connector: { timeoutMs },
   };
   const server = createChannelServer(
     config,
@@ -394,4 +400,105 @@ test("storage failure returns retryable 503 and same result is persisted once on
   assert.deepEqual(await third.json(), { accepted: true, duplicate: true });
   await new DeliveryWorker(f.store, f.github).tick();
   assert.equal(f.counts().publications, 1);
+});
+
+test("another authenticated device cannot claim, read, or submit a result with the actual owner's lease", async (t) => {
+  const f = await fixture(t);
+  const task = f.store.accept(input).task;
+  assert.equal((await f.post("claim", {}, "other-token")).status, 204);
+  const r = await f.post("claim", {});
+  assert.equal(r.status, 200);
+  const { leaseToken } = (await r.json()) as { leaseToken: string };
+  for (const [action, data] of [
+    ["tool", { leaseToken, name: "read_issue", args: {} }],
+    ["result", { leaseToken, status: "failed" }],
+    [
+      "execution",
+      { leaseToken, event: { kind: "started", provider: "acp", runId: "run" } },
+    ],
+  ] as const) {
+    assert.equal(
+      (await f.post("tasks/" + task.id + "/" + action, data, "other-token"))
+        .status,
+      409,
+    );
+  }
+  assert.equal(f.counts().reads, 0);
+  assert.equal(f.store.get(task.id)?.status, "running");
+});
+
+test("only a verified lease holder receives target-specific outcome validation", async (t) => {
+  const f = await fixture(t);
+  const repo = { ...input, repositoryId: 55 };
+  const binding = seedBinding(f.store, repo, "only-worker", ["push"]);
+  const task = f.store.accept({
+    ...repo,
+    bindingId: binding.id,
+    target: { kind: "repository" },
+    source: { event: "push" },
+  }).task;
+  const lease = (await (await f.post("claim", {})).json()) as {
+    leaseToken: string;
+  };
+  const body = {
+    leaseToken: lease.leaseToken,
+    status: "succeeded",
+    outcome: {
+      text: "nonempty",
+      artifacts: [],
+      publication: { kind: "comment" },
+    },
+  };
+  const path = "tasks/" + task.id + "/result";
+  assert.equal((await f.post(path, body, "other-token")).status, 409);
+  assert.equal(
+    (await f.post(path, { ...body, leaseToken: "x".repeat(32) })).status,
+    409,
+  );
+  assert.equal((await f.post(path, body)).status, 400);
+  assert.equal(f.store.get(task.id)?.status, "running");
+});
+
+test("denial fencing a reserved but undisclosed claim never freezes healthy work on the same device", async (t) => {
+  const f = await fixture(t);
+  const { store } = f;
+  const denied = store.accept(input).task;
+  const other = {
+    ...input,
+    repositoryId: 6,
+    repo: "second",
+    deliveryId: "follow",
+    source: { ...input.source, commentId: 7 },
+  };
+  other.bindingId = seedBinding(store, other, "only-worker").id;
+  const healthy = store.accept(other).task;
+  f.github.authorize = async (task) => {
+    if (task.id === denied.id) {
+      const b = store.activeBinding(1, 2)!;
+      const {
+        installationId,
+        repositoryId,
+        owner,
+        repo,
+        deviceId,
+        administratorId,
+      } = b;
+      store.registry.apply(
+        {
+          installationId,
+          repositoryId,
+          owner,
+          repo,
+          deviceId,
+          administratorId,
+        },
+        b.revision,
+        { enabled: false, events: [] },
+      );
+      throw new AccessDenied();
+    }
+  };
+  assert.equal((await f.post("claim", {})).status, 204);
+  assert.equal(store.get(denied.id)?.status, "rejected");
+  assert.equal((await (await f.post("claim", {})).json()).task.id, healthy.id);
 });

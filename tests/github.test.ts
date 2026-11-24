@@ -24,7 +24,9 @@ const config = {
       enabled: true,
     },
   ],
-} as ChannelConfig;
+} as unknown as ChannelConfig & {
+  bindings: import("../src/contracts.js").Binding[];
+};
 const task = {
   id: "task-1",
   bindingId: "b",
@@ -45,6 +47,7 @@ function fixture(
     writeStatus?: number;
     failRead?: boolean;
     revokeOnSecondCheck?: boolean;
+    bindingEnabled?: () => boolean;
     pull?: () => { state: string; merged?: boolean } | null;
     comments?: unknown[];
     directory?: boolean;
@@ -112,7 +115,18 @@ function fixture(
     });
   }) as typeof fetch;
   return {
-    client: new OctokitGitHubClient(config, privateKey, fetchImpl),
+    client: new OctokitGitHubClient(
+      config,
+      privateKey,
+      (i, r) =>
+        options.bindingEnabled?.() === false
+          ? undefined
+          : config.bindings.find(
+              (b) => b.installationId === i && b.repositoryId === r,
+            ),
+      async () => {},
+      fetchImpl,
+    ),
     calls,
   };
 }
@@ -279,4 +293,27 @@ test("PR may close between claim and publication; an unverifiable PR also blocks
       !calls.some((c) => c.method === "POST" && c.path.endsWith("/comments")),
     );
   }
+});
+
+test("local disable during final PR state read prevents a new comment POST", async () => {
+  let enabled = true;
+  const { client, calls } = fixture({
+    bindingEnabled: () => enabled,
+    pull: () => {
+      enabled = false;
+      return { state: "open", merged: false };
+    },
+  });
+  await assert.rejects(
+    client.publishComment(
+      { ...task, target: { kind: "pull_request", number: 5 } },
+      "review",
+    ),
+    AccessDenied,
+  );
+  assert.equal(
+    calls.filter((c) => c.method === "POST" && c.path.endsWith("/comments"))
+      .length,
+    0,
+  );
 });

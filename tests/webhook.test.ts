@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Webhooks } from "@octokit/webhooks";
 import { normalizeWebhook } from "../src/webhook.js";
-import type { ChannelConfig } from "../src/contracts.js";
+import type { Binding } from "../src/contracts.js";
 
 const config = {
   github: { botLogin: "helper[bot]" },
@@ -14,9 +14,10 @@ const config = {
       owner: "org",
       repo: "repo",
       enabled: true,
+      events: ["issue_comment.created"],
     },
   ],
-} as ChannelConfig;
+} as { github: { botLogin: string }; bindings: Binding[] };
 const event = () => ({
   action: "created",
   installation: { id: 1 },
@@ -36,7 +37,13 @@ async function run(
 ) {
   const raw = Buffer.from(JSON.stringify(payload));
   return normalizeWebhook(
-    settings,
+    {
+      github: settings.github,
+      lookup: (i, r) =>
+        settings.bindings.find(
+          (b) => b.installationId === i && b.repositoryId === r,
+        ),
+    },
     raw,
     {
       signature: await new Webhooks({ secret: "test" }).sign(raw.toString()),
@@ -95,7 +102,7 @@ test("a signed mention on a closed PR does not start a task", async () => {
 test("invalid signature rejected before malformed JSON parse", async () => {
   await assert.rejects(
     normalizeWebhook(
-      config,
+      { github: config.github, lookup: () => config.bindings[0] },
       Buffer.from("{"),
       {
         signature: "sha256=" + "0".repeat(64),
@@ -150,7 +157,7 @@ test("delivery id must be UUID", async () => {
   const raw = Buffer.from(JSON.stringify(event()));
   await assert.rejects(
     normalizeWebhook(
-      config,
+      { github: config.github, lookup: () => config.bindings[0] },
       raw,
       {
         signature: await new Webhooks({ secret: "test" }).sign(raw.toString()),

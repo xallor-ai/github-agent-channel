@@ -19,7 +19,7 @@ export interface Binding {
   owner: string;
   repo: string;
   enabled: boolean;
-  events?: string[];
+  events: string[];
   requireMention?: boolean;
   triggerLabel?: string;
   writePolicy?: {
@@ -46,12 +46,13 @@ export interface ChannelConfig {
     botLogin: string;
   };
   connector: {
-    workerId: string;
-    tokenEnv?: string;
-    tokenFile?: string;
     timeoutMs: number;
   };
-  bindings: Binding[];
+  writeProfiles?: Array<{
+    installationId: number;
+    repositoryId: number;
+    policy: NonNullable<Binding["writePolicy"]>;
+  }>;
   deployment?: {
     mode: "external" | "caddy";
     publicUrl?: string;
@@ -65,7 +66,6 @@ export interface ResolvedSecrets {
   adminToken: string;
   privateKey: string;
   webhookSecret: string;
-  connectorToken: string;
 }
 export interface NewTask {
   deliveryId: string;
@@ -152,3 +152,8 @@ export interface GitHubClient {
 }
 export class AccessDenied extends Error {}
 export class AmbiguousExecution extends Error {}
+
+export type BindingLookup = (
+  installationId: number,
+  repositoryId: number,
+) => Binding | undefined;

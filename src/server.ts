@@ -5,7 +5,7 @@ import {
 } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { ChannelConfig } from "./contracts.js";
-import { TaskStore } from "./store.js";
+import { StaleBinding, TaskStore } from "./store.js";
 import { normalizeWebhook } from "./webhook.js";
 function authorized(header: string | undefined, token: string) {
   const a = Buffer.from(header ?? "");
@@ -31,6 +31,7 @@ export function createChannelServer(
   coordinator?: {
     handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   },
+  lookup = store.activeBinding.bind(store),
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -51,7 +52,7 @@ export function createChannelServer(
         let task;
         try {
           task = await normalizeWebhook(
-            config,
+            { github: config.github, lookup },
             await body(req),
             {
               signature: String(req.headers["x-hub-signature-256"] ?? ""),
@@ -68,7 +69,14 @@ export function createChannelServer(
           send(200, { ignored: true });
           return;
         }
-        const accepted = store.accept(task);
+        let accepted;
+        try {
+          accepted = store.accept(task);
+        } catch (e) {
+          if (!(e instanceof StaleBinding)) throw e;
+          send(200, { ignored: true });
+          return;
+        }
         send(202, { taskId: accepted.task.id, duplicate: accepted.duplicate });
         return;
       }

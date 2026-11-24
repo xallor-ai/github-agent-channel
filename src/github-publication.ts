@@ -104,6 +104,7 @@ export async function publishDraftPullRequest(
   proposal: Proposal,
   client: Octokit,
   authorize: () => Promise<void>,
+  checkBinding: () => void,
 ): Promise<{ id: number; url: string }> {
   const scope = { owner: task.owner, repo: task.repo };
   const body =
@@ -171,6 +172,7 @@ export async function publishDraftPullRequest(
   // by a fresh authorization read; uncertain writes are never replayed here.
   const mutate = async <T>(operation: () => Promise<T>): Promise<T> => {
     await authorize();
+    checkBinding();
     try {
       return await operation();
     } catch (error) {

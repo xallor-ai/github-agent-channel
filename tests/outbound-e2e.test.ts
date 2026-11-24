@@ -1,3 +1,4 @@
+import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
@@ -36,20 +37,8 @@ const cloudConfig: ChannelConfig = {
     botLogin: "fixture[bot]",
   },
   connector: {
-    workerId: "fixture-worker",
-    tokenEnv: "CONNECTOR",
     timeoutMs: 30000,
   },
-  bindings: [
-    {
-      id: "fixture-binding",
-      installationId: 1,
-      repositoryId: 2,
-      owner: "fixture-org",
-      repo: "fixture-repo",
-      enabled: true,
-    },
-  ],
 };
 async function listen(server: Server) {
   server.listen(0, "127.0.0.1");
@@ -63,6 +52,16 @@ async function close(server: Server) {
 async function fixture(t: test.TestContext) {
   const dir = mkdtempSync(join(tmpdir(), "outbound-e2e-"));
   const store = new TaskStore(join(dir, "cloud.db"));
+  seedBinding(
+    store,
+    {
+      installationId: 1,
+      repositoryId: 2,
+      owner: "fixture-org",
+      repo: "fixture-repo",
+    },
+    "fixture-worker",
+  );
   const publications: { task: Task; text: string }[] = [];
   const reads: Task[] = [];
   const modelRequests: Record<string, unknown>[] = [];
@@ -96,7 +95,8 @@ async function fixture(t: test.TestContext) {
     store,
     github,
     cloudConfig.connector,
-    cloudToken,
+    (value) =>
+      value === cloudToken ? { deviceId: "fixture-worker" } : undefined,
   );
   const cloud = createChannelServer(
     cloudConfig,

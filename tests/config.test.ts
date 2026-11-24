@@ -11,7 +11,6 @@ const env = {
   ADMIN: "secret-admin",
   KEY: "secret-key",
   HOOK: "secret-hook",
-  TOKEN: "secret-token",
 };
 function config() {
   return {
@@ -24,20 +23,8 @@ function config() {
       botLogin: "agent[bot]",
     },
     connector: {
-      tokenEnv: "TOKEN",
-      workerId: "local-worker",
       timeoutMs: 60000,
     },
-    bindings: [
-      {
-        id: "one",
-        installationId: 1,
-        repositoryId: 2,
-        owner: "org",
-        repo: "repo",
-        enabled: true,
-      },
-    ],
   };
 }
 function fixture(t: any, yaml = false) {
@@ -54,10 +41,13 @@ test("loads JSON and YAML without exposing resolved secrets", (t) => {
     assert.equal(JSON.stringify(value).includes("secret-"), false);
   }
 });
-test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and invalid bounds", (t) => {
+test("rejects unknown fields, missing env, obsolete credentials and duplicate write profiles, unsafe URLs and invalid bounds", (t) => {
   const path = fixture(t);
   const invalid: any[] = [];
   for (const patch of [
+    { workerId: "retired" },
+    { tokenEnv: "TOKEN" },
+    { tokenFile: "legacy" },
     { token: "plain-secret" },
     { timeoutMs: 0 },
     { timeoutMs: 3_600_001 },
@@ -69,12 +59,13 @@ test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and i
     Object.assign(c.connector, patch);
     invalid.push(c);
   }
-  const duplicate = config();
-  duplicate.bindings.push({ ...duplicate.bindings[0] });
-  invalid.push(duplicate);
-  const conflict = config();
-  conflict.bindings.push({ ...conflict.bindings[0], id: "two" });
-  invalid.push(conflict);
+  invalid.push({ ...config(), bindings: [] });
+  const profile = {
+    installationId: 1,
+    repositoryId: 2,
+    policy: { baseBranch: "main", allowedPaths: ["src/"] },
+  };
+  invalid.push({ ...config(), writeProfiles: [profile, profile] });
   const extra = { ...config(), privateKey: "plain-secret" };
   invalid.push(extra);
   for (const c of invalid) {
@@ -82,7 +73,7 @@ test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and i
     assert.throws(() => loadConfig(path, env));
   }
   writeFileSync(path, JSON.stringify(config()));
-  assert.throws(() => loadConfig(path, { ...env, TOKEN: "" }));
+  assert.throws(() => loadConfig(path, { ...env, HOOK: "" }));
 });
 
 test("accepts deployment mode and rejects public URLs that are not HTTPS origins", (t) => {
@@ -120,7 +111,7 @@ test("startup reports incompatible storage without exposing config secrets", (t)
     },
   );
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Storage schema version 2 required/);
+  assert.match(result.stderr, /Storage schema version 3 required/);
   assert.doesNotMatch(
     result.stdout + result.stderr,
     /secret-admin|secret-key|secret-hook|secret-token/,
