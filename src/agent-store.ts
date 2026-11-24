@@ -1,7 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Task, RuntimeResult, RuntimeEvent } from "./contracts.js";
+import type {
+  Task,
+  RuntimeResult,
+  RuntimeEvent,
+  RuntimeFailureCode,
+} from "./contracts.js";
 
 import { validateOutcome } from "./outcomes.js";
 import { requireSchemaVersion } from "./store-schema.js";
@@ -13,7 +18,11 @@ export interface Assignment {
 }
 export type AgentResult = { leaseToken: string } & (
   | { status: "succeeded"; outcome: RuntimeResult }
-  | { status: "failed" | "unknown" }
+  | {
+      status: "failed" | "unknown";
+      failure?: RuntimeFailureCode;
+      detail?: string;
+    }
 );
 export interface JournalEntry {
   id: string;
@@ -107,6 +116,8 @@ export class AgentStore {
       Object.keys(result).some(
         (key) =>
           key !== "status" &&
+          key !== "failure" &&
+          key !== "detail" &&
           key !== "leaseToken" &&
           !(result.status === "succeeded" && key === "outcome"),
       )

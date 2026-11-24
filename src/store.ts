@@ -19,7 +19,7 @@ const QUEUE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type AssignmentResult =
   | { status: "succeeded"; outcome: RuntimeResult }
-  | { status: "failed" | "unknown" };
+  | { status: "failed" | "unknown"; failure?: string; detail?: string };
 
 /** Domain rejection only; infrastructure errors must remain retryable. */
 export class AssignmentConflict extends Error {}
@@ -289,10 +289,10 @@ export class TaskStore {
         .run(
           result.status,
           outcome ? JSON.stringify(outcome) : null,
-          result.status === "unknown"
-            ? "Connector execution requires reconciliation"
+            result.status === "unknown"
+              ? `Connector execution requires reconciliation${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
             : result.status === "failed"
-              ? "Connector execution failed"
+              ? `Connector execution failed${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
               : null,
           outcome?.publication.kind === "none" ? "skipped" : "pending",
           taskId,

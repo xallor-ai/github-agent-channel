@@ -399,5 +399,7 @@ test("text-only runtime results are rejected without fabricating publication or 
     "dedicated-cloud-token",
   );
   await agent.once();
-  assert.deepEqual(reported, { leaseToken: "lease-value", status: "failed" });
+  assert.equal(reported.leaseToken, "lease-value");
+  assert.equal(reported.status, "failed");
+  assert.equal(reported.failure, "runtime_response_invalid");
 });
