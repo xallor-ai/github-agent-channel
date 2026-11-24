@@ -88,3 +88,27 @@ test("invalid declarations and obsolete revisions cannot change the stored decis
     db.close();
   }
 });
+
+test("registry refuses an unrelated sqliteBackup table without changing its contents or header", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(
+      "CREATE TABLE sqliteBackup(value TEXT); INSERT INTO sqliteBackup VALUES ('keep')",
+    );
+    assert.throws(() => new BindingRegistry(db), /left intact/);
+    assert.equal(
+      db.prepare("SELECT value FROM sqliteBackup").get()?.value,
+      "keep",
+    );
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 0);
+    assert.equal(db.prepare("PRAGMA application_id").get()?.application_id, 0);
+    assert.equal(
+      db
+        .prepare("SELECT count(*) n FROM sqlite_master WHERE name='bindings'")
+        .get()?.n,
+      0,
+    );
+  } finally {
+    db.close();
+  }
+});

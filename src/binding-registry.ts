@@ -38,7 +38,7 @@ export class BindingRegistry {
     try {
       const tables = db
         .prepare(
-          "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+          "SELECT name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
         )
         .all();
       const app = db.prepare("PRAGMA application_id").get()?.application_id;
