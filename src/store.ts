@@ -14,6 +14,8 @@ import type {
 import { initializeTaskSchema } from "./store-schema.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 
+const QUEUE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export type AssignmentResult =
   | { status: "succeeded"; outcome: RuntimeResult }
   | { status: "failed" | "unknown" };
@@ -128,7 +130,13 @@ export class TaskStore {
       .prepare("UPDATE tasks SET runtime=? WHERE id=? AND status='running'")
       .run(JSON.stringify(event), id);
   }
-  expireAssignments(now = Date.now()): void {
+  expireTasks(now = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE tasks SET status='rejected', deliveryStatus='skipped', error='Queue deadline expired before execution'
+      WHERE status='queued' AND createdAt<=?`,
+      )
+      .run(now - QUEUE_MAX_AGE_MS);
     this.db
       .prepare(
         `UPDATE tasks SET status='unknown', error='Connector lease expired; reconcile execution'
@@ -150,7 +158,7 @@ export class TaskStore {
     )
       throw new Error("Invalid assignment");
     return this.transaction(() => {
-      this.expireAssignments(now);
+      this.expireTasks(now);
       const busy = this.db
         .prepare(
           `SELECT 1 FROM assignments a JOIN tasks t ON t.id=a.taskId
@@ -186,7 +194,7 @@ export class TaskStore {
     leaseHash: string,
     now = Date.now(),
   ): Task | undefined {
-    this.expireAssignments(now);
+    this.expireTasks(now);
     const row = this.db
       .prepare(
         `SELECT t.* FROM tasks t JOIN assignments a ON a.taskId=t.id
@@ -204,7 +212,7 @@ export class TaskStore {
     now = Date.now(),
   ): boolean {
     // Commit expiry independently: a rejected late result must not roll it back.
-    this.expireAssignments(now);
+    this.expireTasks(now);
     return this.transaction(() => {
       const row = this.db
         .prepare(

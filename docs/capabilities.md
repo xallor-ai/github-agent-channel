@@ -82,6 +82,13 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 | S09 | 多租户、多 worker 路由           | 未实现；实例共享的一个 connector 身份不构成租户隔离                                         | contracts.ts、pull-store.test.ts                                                             | 不纳入本次闭环                                       |
 | S10 | 部署与配置                       | OpenClaw 原生/Docker、external/Caddy；ACP 仅原生连接器；旧库拒绝无迁移                      | deploy/agent-deploy/schema 测试                                                              | v2 OpenClaw Docker 与 OpenCode 原生 ACP 均完成真实验收 |
 
+## 仓库接入实施进度
+
+| 能力 | 当前证据 | 尚缺 |
+| --- | --- | --- |
+| 动态登记 | [登记库测试](../tests/binding-registry.test.ts)：重启保留、修订冲突、设备隔离 | 授权配对/API、本地声明同步、切换受理与领取 |
+| 离线等待 | [任务库测试](../tests/pull-store.test.ts)：排队 24 小时边界与重投不续期 | 真实双设备双仓验收 |
+
 ## 本次验证与限制
 
 - 自动化结果见 [v2 验证记录](runtime-neutral-validation-20261122.md)。包括真实本地 HTTP/SQLite、官方 ACP SDK 子进程、实际 Git 文件变化、验证命令和 Octokit transport 测试。

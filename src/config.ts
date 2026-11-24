@@ -1,3 +1,4 @@
+import { bindingEvent } from "./binding-events.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -56,20 +57,7 @@ const schema = z.strictObject({
       owner: name,
       repo: name,
       enabled: z.boolean(),
-      events: z
-        .array(
-          z.enum([
-            "issue_comment.created",
-            "issues.opened",
-            "issues.labeled",
-            "pull_request.opened",
-            "pull_request.synchronize",
-            "push",
-          ]),
-        )
-        .min(1)
-        .max(6)
-        .optional(),
+      events: z.array(bindingEvent).min(1).max(6).optional(),
       triggerLabel: name.max(100).optional(),
       writePolicy: z
         .strictObject({

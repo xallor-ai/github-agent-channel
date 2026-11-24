@@ -66,7 +66,7 @@ export class PullCoordinator {
       throw new Error("Invalid pull coordinator configuration");
   }
   expire(): void {
-    this.store.expireAssignments();
+    this.store.expireTasks();
   }
   private assignment(id: string, lease: string): Task {
     const task = this.store.assignedTask(id, this.config.workerId, hash(lease));

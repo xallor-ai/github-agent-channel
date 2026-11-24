@@ -13,6 +13,8 @@
 
 规范模型没有 task 根级 commentId/issueNumber/result/commentUrl。commentId 只作为原始评论事件的 source.commentId；目标号在 target.number；文本在 outcome.text；外部地址在 publicationReceipt.url。产物必须明确包含 artifacts 和 publication，不做兼容推断。
 
+新增内部 [BindingRegistry](../src/binding-registry.ts) 是 #10 的持久化切片，未装配到云端或客户端。任务库已按首次受理时间拒绝排队满 24 小时的任务，独立于执行租约。
+
 ## 全部生产模块
 
 | 文件                                                  | 实际职责与边界                                                                                            |

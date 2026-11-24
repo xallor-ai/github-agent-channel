@@ -6,6 +6,8 @@
 
 Bridge 的 `runtime.type` 必须是 `openclaw` 或 `acp`。分别按 [OpenClaw](setup.md) 或 [ACP](acp-setup.md) 配置；未知类型、缺少类型或混用配置字段都会失败。
 
+动态登记的目标语义见[绑定生命周期](binding-lifecycle.md)，尚未对外开放。以下为当前配置。
+
 服务端仍配置 GitHub App、bindings 和 connector 身份。下面的 binding 示例显式启用 Issue 场景及 PR 发布；ID、仓库、路径需替换为自己的值：
 
 ```yaml

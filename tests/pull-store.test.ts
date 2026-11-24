@@ -59,7 +59,7 @@ test("expiry and restart never replay execution or allow late success", (t) => {
   const s = open();
   const a = s.accept(input).task;
   s.claimAssignment("worker", "hash", 2000, 1000);
-  s.expireAssignments(2000);
+  s.expireTasks(2000);
   assert.equal(s.get(a.id)?.status, "unknown");
   assert.equal(s.claimAssignment("worker", "new", 4000, 2000), undefined);
   assert.throws(() =>
@@ -137,4 +137,28 @@ test("result and digest commit together, identical retry persists across restart
   assert.equal(peer.get(a.id)?.status, "succeeded");
   assert.equal(peer.pendingDelivery()?.id, a.id);
   assert.equal(peer.pendingDelivery(), undefined);
+});
+test("offline queue expires at 24h from first acceptance; redelivery does not reset its age", (t) => {
+  const s = fixture(t).open();
+  const original = s.accept(input).task;
+  const cutoff = original.createdAt + 86_400_000;
+  assert.equal(s.accept(input).task.createdAt, original.createdAt);
+  assert.equal(
+    s.claimAssignment("worker", "lease", cutoff + 1000, cutoff),
+    undefined,
+  );
+  assert.equal(s.get(original.id)?.status, "rejected");
+  assert.equal(s.get(original.id)?.deliveryStatus, "skipped");
+  assert.equal(s.accept(input).task.status, "rejected");
+});
+test("offline work can still be claimed just before expiry; queue timeout never cancels running work", (t) => {
+  const s = fixture(t).open();
+  const a = s.accept(input).task;
+  const cutoff = a.createdAt + 86_400_000;
+  assert.equal(
+    s.claimAssignment("worker", "lease", cutoff + 500, cutoff - 1)?.id,
+    a.id,
+  );
+  s.expireTasks(cutoff);
+  assert.equal(s.get(a.id)?.status, "running");
 });
