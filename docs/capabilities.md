@@ -97,3 +97,5 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 - workspace 原生进程不是 sandbox；不支持自动恢复未知执行、并发多租户或全部 GitHub events。
 
 当前接口与职责见 [实现地图](implementation-map.md)，使用方式见 [OpenClaw](setup.md) 和 [ACP](acp-setup.md)。每项能力独立维护源码、本地证据与真实验收，禁止用单一“完成”标志代替。
+
+2026-11-24 免提及测试：只读 OpenClaw、仅 github-agent-channel 绑定启用 issues.opened、issue_comment.created、pull_request.opened/synchronize；[Issue 创建](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127861955)、[普通评论](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127878845)、[PR 会话评论](https://github.com/xallor-ai/github-agent-channel/pull/16#issuecomment-7127972710) 已回帖。PR #16 的第一次 opened 已受理，但第三次工具请求 503，执行失败，无发布回执；其后普通评论成功是独立任务，不覆盖该失败。

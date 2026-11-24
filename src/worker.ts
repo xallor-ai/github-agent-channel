@@ -15,7 +15,13 @@ export class DeliveryWorker {
       const delivery = this.store.pendingDelivery();
       if (!delivery) return false;
       try {
-        await this.github.authorize(delivery);
+        try {
+          await this.github.authorize(delivery);
+        } catch {
+          // No publication call has been made. Do not block the queue as an unknown write.
+          this.store.markDelivery(delivery.id, "failed");
+          return true;
+        }
         if (!delivery.outcome) throw Error("Missing publication outcome");
         const publication = delivery.outcome.publication;
         if (publication.kind === "none")

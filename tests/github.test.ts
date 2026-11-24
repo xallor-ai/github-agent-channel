@@ -270,7 +270,7 @@ test("PR may close between claim and publication; an unverifiable PR also blocks
     });
     await client.authorize(pr);
     open = false;
-    await assert.rejects(client.publishComment(pr, "review"));
+    await assert.rejects(client.publishComment(pr, "review"), AccessDenied);
     assert.ok(
       calls.some((c) => c.method === "GET" && c.path.includes("/comments?")),
     );

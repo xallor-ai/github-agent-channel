@@ -162,12 +162,19 @@ export class OctokitGitHubClient implements GitHubClient {
     if (bytes.length > MAX_FILE) throw new Error("File exceeds 128 KiB");
     return { untrusted: true, path, content: bytes.toString("utf8") };
   }
+  private async authorizeWrite(task: Task): Promise<void> {
+    try {
+      await this.authorize(task);
+    } catch {
+      throw new AccessDenied("Cannot confirm authorization for GitHub write");
+    }
+  }
   async publishPullRequest(
     task: Task,
     proposal: Extract<PublicationRequest, { kind: "pull_request" }>,
   ): Promise<{ id: number; url: string }> {
     validateProposal(task, this.#binding(task).writePolicy, proposal);
-    await this.authorize(task);
+    await this.authorizeWrite(task);
     const client = await this.#client(task, true);
     return publishDraftPullRequest(task, proposal, client, () =>
       this.authorize(task),
@@ -225,7 +232,7 @@ export class OctokitGitHubClient implements GitHubClient {
         );
     }
     // Re-check after the paginated read, immediately before the outbound effect.
-    await this.authorize(task);
+    await this.authorizeWrite(task);
     try {
       const { data } = await client.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
