@@ -70,6 +70,24 @@ test("accepts bot slug mentions while rejecting lookalike names", async () => {
     assert.equal(await run(payload), null);
   }
 });
+test("a signed mention on a closed PR does not start a task", async () => {
+  assert.deepEqual(
+    (
+      await run({
+        ...event(),
+        issue: { number: 5, state: "open", pull_request: {} },
+      })
+    )?.target,
+    { kind: "pull_request", number: 5 },
+  );
+  assert.equal(
+    await run({
+      ...event(),
+      issue: { number: 5, state: "closed", pull_request: {} },
+    }),
+    null,
+  );
+});
 test("invalid signature rejected before malformed JSON parse", async () => {
   await assert.rejects(
     normalizeWebhook(

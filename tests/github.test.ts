@@ -45,6 +45,7 @@ function fixture(
     writeStatus?: number;
     failRead?: boolean;
     revokeOnSecondCheck?: boolean;
+    pull?: () => { state: string; merged?: boolean } | null;
     comments?: unknown[];
     directory?: boolean;
     size?: number;
@@ -78,6 +79,12 @@ function fixture(
             : (options.permission ?? "write"),
         user: { id: 3, login: "reader" },
       };
+    } else if (url.pathname === "/repos/org/repo/pulls/5") {
+      const pull = options.pull
+        ? options.pull()
+        : { state: "open", merged: false };
+      if (pull === null) return new Response("{}", { status: 404 });
+      data = pull;
     } else if (url.pathname.endsWith("/comments") && method === "POST") {
       if (options.failWrite || options.writeStatus)
         return new Response("{}", { status: options.writeStatus ?? 502 });
@@ -247,4 +254,29 @@ test("pull request targets use their canonical number for discussion reads and c
         call.path === "/repos/org/repo/issues/5/comments",
     ),
   );
+});
+
+test("PR may close between claim and publication; an unverifiable PR also blocks writes", async () => {
+  const pr: Task = { ...task, target: { kind: "pull_request", number: 5 } };
+  for (const pull of [
+    { state: "closed", merged: true },
+    { state: "closed", merged: false },
+    { state: "open" },
+    null,
+  ]) {
+    let open = true;
+    const { client, calls } = fixture({
+      pull: () => (open ? { state: "open", merged: false } : pull),
+    });
+    await client.authorize(pr);
+    open = false;
+    await assert.rejects(client.publishComment(pr, "review"));
+    assert.ok(
+      calls.some((c) => c.method === "GET" && c.path.includes("/comments?")),
+    );
+    await assert.rejects(client.authorize(pr));
+    assert.ok(
+      !calls.some((c) => c.method === "POST" && c.path.endsWith("/comments")),
+    );
+  }
 });
