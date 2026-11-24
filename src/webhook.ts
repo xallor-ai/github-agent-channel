@@ -51,7 +51,7 @@ export async function normalizeWebhook(
     return null;
   const key =
     headers.event === "push" ? "push" : headers.event + "." + event.action;
-  if (!(binding.events ?? ["issue_comment.created"]).includes(key)) return null;
+  if (!binding.events.includes(key)) return null;
   const mentions = [config.github.botLogin];
   if (/\[bot\]$/i.test(config.github.botLogin))
     mentions.push(config.github.botLogin.replace(/\[bot\]$/i, ""));

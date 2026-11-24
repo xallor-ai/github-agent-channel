@@ -177,8 +177,12 @@ export class OctokitGitHubClient implements GitHubClient {
     validateProposal(task, this.#binding(task).writePolicy, proposal);
     await this.authorizeWrite(task);
     const client = await this.#client(task, true);
-    return publishDraftPullRequest(task, proposal, client, () =>
-      this.authorize(task),
+    return publishDraftPullRequest(
+      task,
+      proposal,
+      client,
+      () => this.authorize(task),
+      () => this.#binding(task),
     );
   }
   async publishComment(
@@ -234,6 +238,7 @@ export class OctokitGitHubClient implements GitHubClient {
     }
     // Re-check after the paginated read, immediately before the outbound effect.
     await this.authorizeWrite(task);
+    this.#binding(task);
     try {
       const { data } = await client.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",

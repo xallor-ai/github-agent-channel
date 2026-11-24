@@ -127,7 +127,10 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
   assert.deepEqual(pr?.target, { kind: "pull_request", number: 9 });
   const defaults = {
     ...config,
-    bindings: config.bindings.map((b) => ({ ...b, events: undefined })),
+    bindings: config.bindings.map((b) => ({
+      ...b,
+      events: ["issue_comment.created"],
+    })),
   };
   assert.equal(
     await receive("issues", { ...payload, label: { name: "agent" } }, defaults),

@@ -51,15 +51,38 @@ try {
         device.githubUserId !== b.administratorId
       )
         throw new AccessDenied("Binding is no longer active");
-      const verified = await verifier.verifyPaired(device, {
-        owner: task.owner,
-        repo: task.repo,
-      });
-      if (
-        verified.installationId !== task.installationId ||
-        verified.repositoryId !== task.repositoryId
-      )
-        throw new AccessDenied("Binding scope changed");
+      try {
+        const verified = await verifier.verifyPaired(device, {
+          owner: task.owner,
+          repo: task.repo,
+        });
+        if (
+          verified.installationId !== task.installationId ||
+          verified.repositoryId !== task.repositoryId
+        )
+          throw new AccessDenied("Binding scope changed");
+      } catch (error) {
+        // Explicitly denied proof for this revision fences the binding. Transport
+        // failures fail the check but do not record a guessed permanent revocation.
+        if (
+          error instanceof AccessDenied &&
+          lookup(task.installationId, task.repositoryId)?.id === b.id
+        ) {
+          store.registry.apply(
+            {
+              installationId: b.installationId,
+              repositoryId: b.repositoryId,
+              owner: b.owner,
+              repo: b.repo,
+              deviceId: b.deviceId,
+              administratorId: b.administratorId,
+            },
+            b.revision,
+            { enabled: false, events: [] },
+          );
+        }
+        throw error;
+      }
     },
   );
   const coordinator = new PullCoordinator(

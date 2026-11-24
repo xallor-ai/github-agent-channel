@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import https from "node:https";
 import { parse, stringify } from "yaml";
+import { loadConfig } from "../dist/config.js";
 import { renderDeployment } from "../dist/deploy.js";
 import { renderAgentDeployment } from "../dist/agent-deploy.js";
 
@@ -164,7 +165,6 @@ try {
         [fixture.server, "adminToken", "admin"],
         [fixture.github, "privateKey", "app.pem"],
         [fixture.github, "webhookSecret", "hook"],
-        [fixture.connector, "token", "connector"],
       ];
       for (const [section, key, file] of refs) {
         const env = "CHANNEL_SMOKE_" + key.toUpperCase();
@@ -173,9 +173,11 @@ try {
         section[key + "Env"] = env;
       }
     }
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, stringify(fixture));
     const files = renderDeployment(
-      fixture,
-      join(root, "config.yaml"),
+      loadConfig(configPath),
+      configPath,
       join(root, mode),
     );
     compose(files.composePath, ["config", "-q"]);

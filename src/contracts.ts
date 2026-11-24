@@ -19,7 +19,7 @@ export interface Binding {
   owner: string;
   repo: string;
   enabled: boolean;
-  events?: string[];
+  events: string[];
   requireMention?: boolean;
   triggerLabel?: string;
   writePolicy?: {

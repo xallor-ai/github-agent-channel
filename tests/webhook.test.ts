@@ -14,6 +14,7 @@ const config = {
       owner: "org",
       repo: "repo",
       enabled: true,
+      events: ["issue_comment.created"],
     },
   ],
 } as { github: { botLogin: string }; bindings: Binding[] };
