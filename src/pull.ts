@@ -25,10 +25,14 @@ const resultSchema = z.discriminatedUnion("status", [
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("failed"),
+    failure: z.string().min(1).max(100).optional(),
+    detail: z.string().max(240).optional(),
   }),
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("unknown"),
+    failure: z.string().min(1).max(100).optional(),
+    detail: z.string().max(240).optional(),
   }),
 ]);
 import {

@@ -10,7 +10,11 @@ import {
   outcomeSchema,
   publicationReceiptSchema,
 } from "./outcomes.js";
-import { AmbiguousExecution, type RuntimeConnector } from "./contracts.js";
+import {
+  AmbiguousExecution,
+  type RuntimeConnector,
+  type RuntimeFailureCode,
+} from "./contracts.js";
 import { loadAgentConfig, type AgentConfig } from "./agent-config.js";
 import {
   AgentStore,
@@ -213,12 +217,27 @@ export class Agent {
           outcome: validated,
         };
       } catch (e) {
+        const message =
+          e instanceof Error ? e.message : "Runtime execution failed";
+        const failure: RuntimeFailureCode = /round limit/i.test(message)
+          ? "tool_round_limit"
+          : /no final answer/i.test(message)
+            ? "no_final_answer"
+            : combined.aborted
+              ? "runtime_timeout"
+              : e instanceof AmbiguousExecution
+                ? "runtime_transport"
+                : /tool/i.test(message)
+                  ? "tool_call_failed"
+                  : "runtime_response_invalid";
         result = {
           leaseToken: assignment.leaseToken,
           status:
             e instanceof AmbiguousExecution || combined.aborted
               ? "unknown"
               : "failed",
+          failure,
+          detail: message.slice(0, 240),
         };
       }
     }
