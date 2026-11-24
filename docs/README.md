@@ -5,12 +5,8 @@ GitHub Agent Channel 是通用 GitHub 通道。当前实现严格 v2 契约、Op
 | 目的                                  | 当前入口                                                                                                 |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | 成熟版范围与验收条件 | [产品契约](product-contract.md) |
-<<<<<<< HEAD
 | 仓库动态接入设计与交付边界 | [绑定生命周期](binding-lifecycle.md) |
-=======
 | Agent 如何委派、请求评审和核验回执 | [GitHub Agent Channel skill](../.agents/skills/github-agent-channel/SKILL.md) |
-| 契约落地（目标设计，待实现） | [目标架构图](target-architecture.md) · [W2 续改设计](w2-continuation.md) · [交付与验收计划](contract-delivery.md) |
->>>>>>> deb661d (Guard PR work against closed or merged targets)
 | 全部模块与调用链                      | [实现地图](implementation-map.md)                                                                        |
 | 每项能力与证据                        | [能力台账](capabilities.md)                                                                              |
 | 架构职责与未覆盖范围                  | [架构](architecture.md)                                                                                  |
