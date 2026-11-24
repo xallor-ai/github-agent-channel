@@ -29,6 +29,14 @@ const tokenResponse = z.object({
   repositories: z.tuple([repository]),
 });
 
+export class AdministratorLost extends AccessDenied {
+  constructor(
+    readonly installationId: number,
+    readonly repositoryId: number,
+  ) {
+    super("Paired user is not a verified repository administrator");
+  }
+}
 /** Trusted integration point. The pairing service must authenticate the credential and check revocation. */
 type AuthenticateDevice = (
   credential: string,
@@ -105,11 +113,7 @@ export class BindingPrincipalVerifier {
         username: user.login,
       },
     );
-    if (
-      access.permission !== "admin" ||
-      access.user?.id !== githubUserId ||
-      access.user.login !== user.login
-    )
+    if (access.user?.id !== githubUserId || access.user.login !== user.login)
       throw new AccessDenied(
         "Paired user is not a verified repository administrator",
       );
@@ -120,6 +124,15 @@ export class BindingPrincipalVerifier {
     );
     if (current.id !== selected.id || !matches(current))
       throw new AccessDenied("Repository identity changed");
+    if (access.permission !== "admin") {
+      if (
+        ["write", "maintain", "triage", "read", "none"].includes(
+          access.permission,
+        )
+      )
+        throw new AdministratorLost(installationId.data, selected.id);
+      throw new AccessDenied("Could not confirm administrator permission");
+    }
     return {
       deviceId,
       owner: current.owner.login,

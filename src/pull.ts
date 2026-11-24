@@ -113,23 +113,24 @@ export class PullCoordinator {
         }
         try {
           await this.github.authorize(task);
+          this.assignment(task.id, leaseToken, workerId);
         } catch (error) {
           // No request has reached the remote runtime; keep details out of the response.
-          if (this.store.get(task.id)?.status === "running")
-            this.store.rejectAssignment(
-              task.id,
-              error instanceof AccessDenied ? "rejected" : "failed",
-              error instanceof AccessDenied
-                ? "Task authorization denied"
-                : "Task authorization unavailable",
-            );
+          this.store.rejectUndeliveredClaim(
+            task.id,
+            workerId,
+            hash(leaseToken),
+            error instanceof AccessDenied ? "rejected" : "failed",
+            error instanceof AccessDenied
+              ? "Task authorization denied"
+              : "Task authorization unavailable",
+          );
           // This is a denied GitHub actor, not a rejected connector identity.
           // Keep the healthy poller alive and disclose no rejected task content.
           if (error instanceof AccessDenied) send(204);
           else send(503, { error: "Task authorization unavailable" });
           return true;
         }
-        this.assignment(task.id, leaseToken, workerId);
         send(200, { task, leaseToken, expiresAt });
         return true;
       }

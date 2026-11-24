@@ -99,6 +99,44 @@ export class BindingRegistry {
     }
   }
 
+  ownedSelection(deviceId: string, owner: string, repo: string) {
+    const row = this.db
+      .prepare(
+        "SELECT installationId,repositoryId FROM bindings WHERE deviceId=? AND owner=? COLLATE NOCASE AND repo=? COLLATE NOCASE",
+      )
+      .get(deviceId, owner, repo);
+    return row ? this.get(scopeSchema.parse(row)) : undefined;
+  }
+  disableIfCurrent(previous: BindingRecord) {
+    const {
+      installationId,
+      repositoryId,
+      deviceId,
+      administratorId,
+      owner,
+      repo,
+      revision,
+    } = previous;
+    const c = this.get({ installationId, repositoryId });
+    if (
+      c?.enabled &&
+      c.deviceId === deviceId &&
+      c.administratorId === administratorId &&
+      c.revision === revision
+    )
+      this.apply(
+        {
+          installationId,
+          repositoryId,
+          deviceId,
+          administratorId,
+          owner,
+          repo,
+        },
+        revision,
+        { enabled: false, events: [] },
+      );
+  }
   get(scope: Scope): BindingRecord | undefined {
     const { installationId, repositoryId } = scopeSchema.parse(scope);
     const row = this.db

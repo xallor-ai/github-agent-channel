@@ -1,5 +1,8 @@
 import { DeviceService } from "./device-service.js";
-import { BindingPrincipalVerifier } from "./binding-principal.js";
+import {
+  AdministratorLost,
+  BindingPrincipalVerifier,
+} from "./binding-principal.js";
 import { AccessDenied } from "./contracts.js";
 import { loadConfig } from "./config.js";
 import { TaskStore } from "./store.js";
@@ -65,22 +68,11 @@ try {
         // Explicitly denied proof for this revision fences the binding. Transport
         // failures fail the check but do not record a guessed permanent revocation.
         if (
-          error instanceof AccessDenied &&
-          lookup(task.installationId, task.repositoryId)?.id === b.id
-        ) {
-          store.registry.apply(
-            {
-              installationId: b.installationId,
-              repositoryId: b.repositoryId,
-              owner: b.owner,
-              repo: b.repo,
-              deviceId: b.deviceId,
-              administratorId: b.administratorId,
-            },
-            b.revision,
-            { enabled: false, events: [] },
-          );
-        }
+          error instanceof AdministratorLost &&
+          error.installationId === b.installationId &&
+          error.repositoryId === b.repositoryId
+        )
+          store.registry.disableIfCurrent(b);
         throw error;
       }
     },

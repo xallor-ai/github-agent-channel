@@ -458,3 +458,47 @@ test("only a verified lease holder receives target-specific outcome validation",
   assert.equal((await f.post(path, body)).status, 400);
   assert.equal(f.store.get(task.id)?.status, "running");
 });
+
+test("denial fencing a reserved but undisclosed claim never freezes healthy work on the same device", async (t) => {
+  const f = await fixture(t);
+  const { store } = f;
+  const denied = store.accept(input).task;
+  const other = {
+    ...input,
+    repositoryId: 6,
+    repo: "second",
+    deliveryId: "follow",
+    source: { ...input.source, commentId: 7 },
+  };
+  other.bindingId = seedBinding(store, other, "only-worker").id;
+  const healthy = store.accept(other).task;
+  f.github.authorize = async (task) => {
+    if (task.id === denied.id) {
+      const b = store.activeBinding(1, 2)!;
+      const {
+        installationId,
+        repositoryId,
+        owner,
+        repo,
+        deviceId,
+        administratorId,
+      } = b;
+      store.registry.apply(
+        {
+          installationId,
+          repositoryId,
+          owner,
+          repo,
+          deviceId,
+          administratorId,
+        },
+        b.revision,
+        { enabled: false, events: [] },
+      );
+      throw new AccessDenied();
+    }
+  };
+  assert.equal((await f.post("claim", {})).status, 204);
+  assert.equal(store.get(denied.id)?.status, "rejected");
+  assert.equal((await (await f.post("claim", {})).json()).task.id, healthy.id);
+});

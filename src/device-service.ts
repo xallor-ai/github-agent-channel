@@ -9,7 +9,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
-import { BindingPrincipalVerifier } from "./binding-principal.js";
+import {
+  AdministratorLost,
+  BindingPrincipalVerifier,
+} from "./binding-principal.js";
 import {
   bindingDeclarationSchema,
   type BindingRegistry,
@@ -258,9 +261,20 @@ export class DeviceService {
     return { deviceId, githubUserId };
   }
   async #verify(credential: string, input: z.infer<typeof target>) {
+    const device = this.authenticate(credential);
+    const before =
+      device &&
+      this.#registry.ownedSelection(device.deviceId, input.owner, input.repo);
     try {
       return await this.#verifier.verify(credential, input);
     } catch (e) {
+      if (
+        e instanceof AdministratorLost &&
+        before &&
+        e.repositoryId === before.repositoryId &&
+        e.installationId === before.installationId
+      )
+        this.#registry.disableIfCurrent(before);
       if (e instanceof AccessDenied) {
         if (e.message === "Device is not paired")
           throw new Rejection(401, "device_unauthorized");

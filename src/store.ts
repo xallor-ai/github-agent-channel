@@ -303,8 +303,10 @@ export class TaskStore {
       return false;
     });
   }
-  rejectAssignment(
+  rejectUndeliveredClaim(
     id: string,
+    workerId: string,
+    leaseHash: string,
     status: "rejected" | "failed",
     error: string,
   ): void {
@@ -312,9 +314,9 @@ export class TaskStore {
       throw Error("Invalid assignment rejection");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET status=?,error=? WHERE id=? AND status='running'",
+        "UPDATE tasks SET status=?,deliveryStatus='skipped',error=? WHERE id=? AND runtime IS NULL AND status IN ('running','unknown') AND EXISTS (SELECT 1 FROM assignments WHERE taskId=tasks.id AND workerId=? AND leaseHash=?)",
       )
-      .run(status, error, id);
+      .run(status, error, id, workerId, leaseHash);
     if (!changed.changes) throw new AssignmentConflict("Task is not running");
   }
   pendingDelivery(): Task | undefined {

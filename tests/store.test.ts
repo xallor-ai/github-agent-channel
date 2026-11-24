@@ -109,15 +109,19 @@ test("non-comment events use delivery identity and canonical null fields", (t) =
   assert.equal(a.publicationReceipt, null);
   assert.equal(a.error, null);
 });
-test("rejectAssignment only terminates a running assignment", (t) => {
+test("pre-dispatch rejection requires the matching reservation", (t) => {
   const { store } = fixture(t);
   const a = store.accept(input()).task;
-  assert.throws(() => store.rejectAssignment(a.id, "rejected", "denied"));
+  assert.throws(() =>
+    store.rejectUndeliveredClaim(a.id, "w", "h", "rejected", "denied"),
+  );
   store.claimAssignment("w", "h", 2000, 1000);
-  store.rejectAssignment(a.id, "rejected", "denied");
+  store.rejectUndeliveredClaim(a.id, "w", "h", "rejected", "denied");
   assert.equal(store.get(a.id)?.status, "rejected");
   assert.equal(store.get(a.id)?.error, "denied");
-  assert.throws(() => store.rejectAssignment(a.id, "failed", "again"));
+  assert.throws(() =>
+    store.rejectUndeliveredClaim(a.id, "w", "h", "failed", "again"),
+  );
 });
 test("restart preserves queued work and blocks unknown execution and delivery", (t) => {
   const { store, path, stores } = fixture(t);
