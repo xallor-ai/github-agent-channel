@@ -1,45 +1,71 @@
 # GitHub Agent Channel
 
-把 GitHub Issue / PR 普通评论中的明确 `@mention` 交给用户已有的 Agent Runtime 分析，再由 Channel 受控回帖。OpenClaw 是第一个 Connector；GitHub 接入、授权和任务状态由 Channel 管理。
+面向不同 Agent Runtime 的通用 GitHub 协作通道：负责 GitHub 事件接入、授权、任务传递与结果发布，执行由用户选择的 Runtime 承担。OpenClaw 是第一个适配器。
 
-当前版本是**读取、分析、回帖的基础实现**。模型只能调用 `read_issue` 和 `read_file`，最终评论由 Channel 发布。它尚不能修改文件、创建分支或 PR、运行 Git/Shell、合并代码，也不提供管理控制台或远端任务恢复。
-
-## 工作方式
+当前实现通过 Channel 服务端接收并保存 Webhook，内网连接器主动 HTTPS 领取任务，再调用显式选择的 OpenClaw 或 ACP Runtime。GitHub App 私钥保留在服务端。服务端可以自建于 ECS，也可以由已有部署提供；内网无需开放入站端口。
 
 ```text
-GitHub 签名事件 → binding 与 mention 校验 → SQLite 持久任务 → 快速返回 202
-  → 调用者仓库权限校验 → OpenClaw Responses → 受限读取 → 持久结果 → GitHub 回帖
+GitHub ──签名Webhook──▶ Channel服务 ──评论/PR──▶ GitHub
+                             ▲
+                             │ 内网主动HTTPS：领取 / 工具请求 / 结果
+                             │
+                      本仓库连接器 ──适配器──▶ Runtime（OpenClaw / ACP）
 ```
 
-- 仅处理 `issue_comment.created`，包括 PR 会话区普通评论；编辑、Bot、自身评论和 PR 行内 review comment 不触发。
-- Binding 同时固定 installation ID、repository ID、owner 和 repo；调用者必须是评论作者，且当前拥有 `admin`、`maintain` 或 `write` 权限。
-- 每次工具调用和回帖都会重新授权；模型参数不能覆盖仓库、调用者或目标 Issue。
-- 按 delivery 与原评论去重。一个 binding 有运行中或结果不明的任务时，后续任务等待；当前单 worker 实际逐个处理全局任务。
-- 仓库正文作为不可信数据返回。GitHub token 留在 Channel 内，Runtime 不接收它。
-- 超时或进程中断可能留下 `unknown`，需要人工核对；没有“恰好一次”外部执行保证。
+当前提供独立出站 bridge。OpenClaw 适配器用于读取分析；ACP 适配器复用现有编码 harness，收集实际文件变更和验证结果，服务端按显式策略创建 draft PR。配置、任务和结果使用严格 v2 契约，不兼容旧版。真实编码建 PR 已验收；同一 PR 续改仍是[产品契约](docs/product-contract.md)中的目标。
 
-## 启动
+## 配置文档
 
-需要 Node.js 24、GitHub App 安装，以及可用的 OpenClaw Responses 服务。
+完整入口见 **[文档索引与维护规则](docs/README.md)**；阅读代码前先看 [实现地图](docs/implementation-map.md)，架构偏差及修正状态见 [治理记录](docs/governance-review-20261122.md)。
 
-1. 按[运行与恢复说明](docs/operations.md)配置 GitHub App、密钥环境变量和私网 Runtime。
-2. 将 [deploy/channel.example.yaml](deploy/channel.example.yaml) 复制为仓库外或 Git 忽略的 `config.local.yaml`，填写真实的 App、binding 和 Runtime 信息。示例使用容器路径和服务名；直接运行 Node 时，把 `dataFile` 改为本机可写路径（如 `./data/channel.db`），`runtime.baseUrl` 改为本机可达的 Gateway 地址，`server.host` 优先改为 `127.0.0.1`。
-3. 在仓库根目录执行：
+功能范围、缺口和逐项验证结果见 **[Channel 能力与验收台账](docs/capabilities.md)**。当前已实现对应的协议、ACP 接入和受控 PR 发布代码；本地测试不能替代真实编码项目验收。
+
+| 文档                                     | 什么时候读                                        |
+| ---------------------------------------- | ------------------------------------------------- |
+| **[OpenClaw 适配器接入](docs/setup.md)** | 当前已实现适配器：从配置到真实 GitHub 回帖验收    |
+| [ECS自建部署（可选）](docs/ecs-setup.md) | 没有现成Channel服务，或需要自己维护公网入口时     |
+| [运行与恢复](docs/operations.md)         | 日志排错、secret权限、更新回滚、备份与unknown对账 |
+| [架构与边界](docs/architecture.md)       | 理解云端/内网职责、身份和幂等保证                 |
+
+GitHub App的注册、权限、安装与事件订阅引用配套书稿[附录 B](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20B%20GitHub%20CLI%E3%80%81API%20%E5%92%8C%20GitHub%20App.md)，Webhook验签与事件接收引用[附录 C](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20C%20Webhook%20%E4%B8%8E%E4%BA%8B%E4%BB%B6%E6%8E%A5%E6%94%B6.md)。配置主线保留本服务所需的交接参数，不重复维护注册教程。
+
+[v2 契约与新状态库要求](docs/protocol-v2.md) · [ACP 编码接入](docs/acp-setup.md) · [本轮验证记录](docs/runtime-neutral-validation-20261122.md)
+
+## 从哪里开始
+
+需要Node.js 24；容器方式需要Compose插件2.20+。OpenClaw已验证版本为2026.11.3。当前主动连接实现位于 `codex/outbound-connector` 分支，尚未自动合并到默认分支：
 
 ```sh
-npm ci
+git clone --branch codex/outbound-connector --single-branch https://github.com/xallor-ai/github-agent-channel.git
+cd github-agent-channel
+npm ci --ignore-scripts
+```
+
+**已有Channel服务**：取得服务origin和connector token，从[主线](docs/setup.md)准备OpenClaw，然后：
+
+```sh
+npm run channel -- agent init ./agent-data
+# 按主线编辑YAML、放置secret并完成模型探针后：
+npm run channel -- agent check ./agent-data/agent.local.yaml
+npm run channel -- agent run ./agent-data/agent.local.yaml
+```
+
+**需要自建**：先按[可选ECS文档](docs/ecs-setup.md)启动 Channel 与 HTTPS 入口，再回到适配器教程。内网不持有 GitHub PEM，Channel 服务端不需要访问内网 Runtime。
+
+配置示例：[云端 YAML](deploy/channel.example.yaml)、[内网 YAML](deploy/agent.example.yaml)、[OpenClaw完整实例模板](deploy/openclaw.example.json)、[已有专用实例的合并片段](deploy/openclaw.channel.patch.json)。占位符必须替换，不能把示例当作已安装环境。
+
+## 开发与验证
+
+修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。OpenClaw 读取差异并回帖、OpenCode ACP 实际编码→验证→PR→Channel 评审均已有[真实验收记录](docs/acp-live-validation-20261124.md)。
+
+```sh
 npm test
 npm run typecheck
 npm run build
-npm start
+npm run format:check
+npm run smoke:deployment
 ```
 
-默认读取当前目录的 `config.local.yaml`；可通过 `CHANNEL_CONFIG` 指定其他配置文件。配置里的 `*Env` 字段是环境变量名称，不是密钥值。容器入口见 [deploy/compose.yaml](deploy/compose.yaml)：默认仅启动 OpenClaw，Channel 需要显式启用 `channel` profile；部署前先阅读私网与持久卷要求。
+模型探针 `npm run smoke:openclaw` 会实际调用Provider，应先按主线配置本地Gateway token；它使用合成工具数据，不访问真实GitHub。容器冒烟和单元测试同样不能替代公网验收。
 
-GitHub App Webhook 指向 `https://<your-domain>/webhooks/github`。公网反向代理只转发该路径；`/tasks/*` 管理接口仅供回环或私网访问。`GET /healthz` 只证明进程存活。
-
-## 验证与边界
-
-本地 41 项测试及 Linux CI 已通过，覆盖真实 SDK、SQLite、签名 HTTP、权限、去重、恢复与回帖歧义；GitHub API 使用 fake transport。另已在隔离 OpenClaw 2026.11.3 上通过真实模型文本与 client tool 续调用验证，详情见[部署与联调记录](docs/deployment-validation.md)。尚未创建 GitHub App，因此真实 GitHub 到回帖的完整闭环仍未验收。测试结果与待完成项见[进度记录](docs/progress.md)。
-
-[长期架构](docs/architecture.md)描述未来的 Connector、Policy、Git Executor 和管理面；当前交付范围以本 README、[实施计划](docs/implementation-plan.md)及实际代码为准。[社区源码复用说明](docs/community-reuse.md)记录基础库选择与未直接采用的产品机制。
+已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖和重投去重验收，见[记录](docs/outbound-validation-20261122.md)。默认只启用评论提及；其他支持事件须逐项配置。PR 发布默认关闭，须显式设置 writePolicy。当前仍为单可信连接器身份，不宣称多租户隔离或外部执行恰好一次。

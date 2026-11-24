@@ -46,7 +46,29 @@ test("valid signed mention constructs only server scope", async () => {
   const result = await run(event());
   assert.equal(result?.repositoryId, 2);
   assert.equal(result?.actorId, 3);
-  assert.equal(result?.issueNumber, 5);
+  assert.deepEqual(result?.target, { kind: "issue", number: 5 });
+  assert.equal(result?.source.commentId, 4);
+});
+
+test("accepts bot slug mentions while rejecting lookalike names", async () => {
+  for (const body of [
+    "@helper please analyze",
+    "@HELPER[bot] please analyze",
+  ]) {
+    const payload = event();
+    payload.comment.body = body;
+    assert.equal((await run(payload))?.actorId, 3);
+  }
+  for (const body of [
+    "@helper-other",
+    "@helper[bot]-other",
+    "mail@helper",
+    "@helper_name",
+  ]) {
+    const payload = event();
+    payload.comment.body = body;
+    assert.equal(await run(payload), null);
+  }
 });
 test("invalid signature rejected before malformed JSON parse", async () => {
   await assert.rejects(

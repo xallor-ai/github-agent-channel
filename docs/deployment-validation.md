@@ -1,5 +1,7 @@
 # OpenClaw 部署与联调记录
 
+> 状态：历史验证证据。保留 2026-11-16 当时的成功、失败和待办；配置以[当前适配器教程](setup.md)为准，后续 GitHub 实测见[主动连接验证](outbound-validation-20261122.md)。
+
 验证日期：2026-11-16。本记录区分实际运行证据、模板与尚未完成的 GitHub 联调。
 
 ## 实际运行环境
@@ -18,7 +20,7 @@
 sha512-FBq/q0TCaoA2b7qfdV0q81fHhI6RBB1zAQfJQREc1u2TlK5khVgCUsAlXskLWthyVqRz5PWEj+oOmfYgK58dHg==
 ```
 
-仓库中的 [compose.yaml](../deploy/compose.yaml) 使用官方 `slim` 镜像，供正常网络环境部署；它与这次 npm 备用部署不是同一个镜像构建路径。本轮只完成 Compose/Dockerfile 静态复核，尚未证明官方镜像构建及 Channel 容器联调通过。
+当时的 `deploy/compose.yaml`（现已删除）使用官方 `slim` 镜像；它与这次 npm 备用部署不是同一个镜像构建路径。本轮只完成 Compose/Dockerfile 静态复核，尚未证明官方镜像构建及 Channel 容器联调通过。
 
 ## 已验证
 

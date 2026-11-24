@@ -1,10 +1,12 @@
+import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import { ConfigManager, loadConfig, getPublicConfig } from "../src/config.js";
+import { loadConfig } from "../src/config.js";
 const env = {
   ADMIN: "secret-admin",
   KEY: "secret-key",
@@ -21,12 +23,10 @@ function config() {
       webhookSecretEnv: "HOOK",
       botLogin: "agent[bot]",
     },
-    runtime: {
-      baseUrl: "http://localhost:18789",
+    connector: {
       tokenEnv: "TOKEN",
-      agentId: "main",
+      workerId: "local-worker",
       timeoutMs: 60000,
-      maxToolRounds: 8,
     },
     bindings: [
       {
@@ -51,10 +51,7 @@ test("loads JSON and YAML without exposing resolved secrets", (t) => {
   for (const yaml of [false, true]) {
     const value = loadConfig(fixture(t, yaml), env);
     assert.deepEqual(value, config());
-    assert.equal(
-      JSON.stringify(getPublicConfig(value)).includes("secret-"),
-      false,
-    );
+    assert.equal(JSON.stringify(value).includes("secret-"), false);
   }
 });
 test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and invalid bounds", (t) => {
@@ -69,7 +66,7 @@ test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and i
     { baseUrl: "https://user:pass@example.org" },
   ]) {
     const c = config();
-    Object.assign(c.runtime, patch);
+    Object.assign(c.connector, patch);
     invalid.push(c);
   }
   const duplicate = config();
@@ -87,21 +84,45 @@ test("rejects unknown fields, missing env, duplicate bindings, unsafe URLs and i
   writeFileSync(path, JSON.stringify(config()));
   assert.throws(() => loadConfig(path, { ...env, TOKEN: "" }));
 });
-test("updates atomically with revision guard and defensive snapshots", (t) => {
-  const path = fixture(t, true);
-  const manager = new ConfigManager(path, env);
-  assert.equal(manager.snapshot().revision, 1);
-  const before = readFileSync(path, "utf8");
-  assert.throws(() => manager.update({ ...config(), secret: "bad" }, 1));
-  assert.equal(readFileSync(path, "utf8"), before);
-  assert.throws(() => manager.update(config(), 0));
-  assert.equal(manager.snapshot().revision, 1);
-  const next = config();
-  next.runtime.agentId = "other";
-  assert.equal(manager.update(next, 1).revision, 2);
-  assert.equal(loadConfig(path, env).runtime.agentId, "other");
-  next.runtime.agentId = "mutated";
-  const snapshot = manager.snapshot();
-  snapshot.config.runtime.agentId = "mutated";
-  assert.equal(manager.snapshot().config.runtime.agentId, "other");
+
+test("accepts deployment mode and rejects public URLs that are not HTTPS origins", (t) => {
+  const path = fixture(t);
+  const c = config() as any;
+  c.deployment = { mode: "caddy", publicUrl: "https://channel.example.com" };
+  writeFileSync(path, JSON.stringify(c));
+  assert.equal(loadConfig(path, env).deployment?.mode, "caddy");
+  for (const url of [
+    "http://channel.example.com",
+    "https://user:pass@example.com",
+    "https://example.com/path",
+    "https://example.com?x=1",
+  ]) {
+    c.deployment.publicUrl = url;
+    writeFileSync(path, JSON.stringify(c));
+    assert.throws(() => loadConfig(path, env));
+  }
+});
+
+test("startup reports incompatible storage without exposing config secrets", (t) => {
+  const path = fixture(t);
+  const database = path + ".db";
+  const db = new DatabaseSync(database);
+  db.exec("CREATE TABLE tasks(id TEXT PRIMARY KEY)");
+  db.close();
+  writeFileSync(path, JSON.stringify({ ...config(), dataFile: database }));
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "tsx", "src/main.ts"],
+    {
+      encoding: "utf8",
+      timeout: 10000,
+      env: { ...process.env, ...env, CHANNEL_CONFIG: path },
+    },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Storage schema version 2 required/);
+  assert.doesNotMatch(
+    result.stdout + result.stderr,
+    /secret-admin|secret-key|secret-hook|secret-token/,
+  );
 });

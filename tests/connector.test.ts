@@ -2,20 +2,124 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenClawConnector } from "../src/connector.js";
 import { AmbiguousExecution, type Task } from "../src/contracts.js";
-const task = {
+const task: Task = {
   id: "task-1",
   bindingId: "binding",
   prompt: "review",
   actorLogin: "alice",
-} as Task;
+  deliveryId: "delivery",
+  installationId: 1,
+  repositoryId: 2,
+  owner: "org",
+  repo: "repo",
+  actorId: 3,
+  target: { kind: "issue", number: 1 },
+  source: { event: "issue_comment", action: "created", commentId: 1 },
+  status: "running",
+  deliveryStatus: "pending",
+  error: null,
+  createdAt: 1,
+  outcome: null,
+  runtime: null,
+  publicationReceipt: null,
+};
 const settings = {
+  type: "openclaw" as const,
   baseUrl: "http://localhost:18789",
   agentId: "github",
   tokenEnv: "RUNTIME_TOKEN",
   timeoutMs: 100,
   maxToolRounds: 3,
 };
-test("returns text only from completed assistant output and scopes session to task", async () => {
+test("repository tasks expose only file reads and retain analysis without a comment", async () => {
+  const requests: Array<{
+    tools: Array<{ name: string }>;
+    previous_response_id?: string;
+  }> = [];
+  const connector = new OpenClawConnector(settings, "secret", (async (
+    _url,
+    init,
+  ) => {
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    if (requests.length === 1)
+      return Response.json({
+        id: "file-read",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "read_file",
+            call_id: "file",
+            arguments: '{"path":"README.md"}',
+          },
+        ],
+      });
+    return Response.json({
+      id: "analysis",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Repository analysis" }],
+        },
+      ],
+    });
+  }) as typeof fetch);
+  const invocations: string[] = [];
+  const result = await connector.run(
+    {
+      ...task,
+      target: {
+        kind: "repository",
+        ref: "refs/heads/main",
+        sha: "a".repeat(40),
+      },
+      source: { event: "push" },
+    },
+    async (name) => {
+      invocations.push(name);
+      return { content: "readme" };
+    },
+  );
+  assert.deepEqual(invocations, ["read_file"]);
+  assert.deepEqual(
+    requests.map((request) => request.tools.map((tool) => tool.name)),
+    [["read_file"], ["read_file"]],
+  );
+  assert.equal(requests[1].previous_response_id, "file-read");
+  assert.equal(result.text, "Repository analysis");
+  assert.deepEqual(result.publication, { kind: "none" });
+});
+test("repository tasks reject unsolicited issue reads before invoking cloud tools", async () => {
+  const connector = new OpenClawConnector(settings, "secret", (async () =>
+    Response.json({
+      id: "invalid",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          name: "read_issue",
+          call_id: "issue",
+          arguments: "{}",
+        },
+      ],
+    })) as typeof fetch);
+  let calls = 0;
+  await assert.rejects(
+    connector.run(
+      { ...task, target: { kind: "repository" }, source: { event: "push" } },
+      async () => {
+        calls++;
+        return {};
+      },
+    ),
+    /Invalid runtime tool call/,
+  );
+  assert.equal(calls, 0);
+});
+test("returns an explicit outcome from completed assistant output and scopes session to task", async () => {
   const calls: any[] = [];
   const fetcher = async (url: any, opts: any) => {
     calls.push({ url, opts });
@@ -39,6 +143,8 @@ test("returns text only from completed assistant output and scopes session to ta
   assert.deepEqual(await connector.run(task, async () => null), {
     text: "done",
     responseId: "resp1",
+    artifacts: [],
+    publication: { kind: "comment" },
   });
   const body = JSON.parse(calls[0].opts.body);
   assert.equal(
@@ -185,6 +291,52 @@ test("timeout and nonterminal runtime responses remain ambiguous", async () => {
     await assert.rejects(
       () => c.run(task, async () => null),
       AmbiguousExecution,
+    );
+  }
+});
+
+test("tool arguments must be a JSON string, not a coerced primitive", async () => {
+  let invoked = false;
+  const c = new OpenClawConnector(settings, "secret", (async () =>
+    Response.json({
+      status: "completed",
+      id: "r",
+      output: [
+        {
+          type: "function_call",
+          name: "read_issue",
+          call_id: "c",
+          arguments: 42,
+        },
+      ],
+    })) as typeof fetch);
+  await assert.rejects(
+    c.run(task, async () => {
+      invoked = true;
+      return {};
+    }),
+  );
+  assert.equal(invoked, false);
+});
+
+test("malformed completed output is rejected before any tool call", async () => {
+  for (const output of [
+    [null],
+    [
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: 42 }],
+      },
+    ],
+  ]) {
+    const c = new OpenClawConnector(settings, "secret", (async () =>
+      Response.json({ status: "completed", output })) as typeof fetch);
+    await assert.rejects(
+      c.run(task, async () => {
+        throw Error("must not invoke");
+      }),
+      /Runtime output is invalid/,
     );
   }
 });

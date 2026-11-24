@@ -1,4 +1,8 @@
-import { createServer, type IncomingMessage } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { ChannelConfig } from "./contracts.js";
 import { TaskStore } from "./store.js";
@@ -24,6 +28,9 @@ export function createChannelServer(
   store: TaskStore,
   webhookSecret: string,
   adminToken: string,
+  coordinator?: {
+    handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
+  },
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -35,6 +42,7 @@ export function createChannelServer(
     };
     const path = req.url?.split("?")[0] ?? "";
     try {
+      if (coordinator && (await coordinator.handle(req, res))) return;
       if (req.method === "GET" && path === "/healthz") {
         send(200, { status: "ok", scope: "process-liveness" });
         return;
@@ -87,7 +95,11 @@ export function createChannelServer(
             status: task.status,
             deliveryStatus: task.deliveryStatus,
             error: task.error,
-            commentUrl: task.commentUrl,
+            publicationReceipt: task.publicationReceipt,
+            target: task.target,
+            source: task.source,
+            runtime: task.runtime,
+            outcome: task.outcome,
           });
           return;
         }
@@ -123,9 +135,13 @@ export function createChannelServer(
           if (typeof fields.url === "string") {
             try {
               const url = new URL(fields.url);
+              const issueNumber =
+                task.target.kind !== "repository"
+                  ? task.target.number
+                  : undefined;
               const paths = [
-                `/${task.owner}/${task.repo}/issues/${task.issueNumber}`,
-                `/${task.owner}/${task.repo}/pull/${task.issueNumber}`,
+                `/${task.owner}/${task.repo}/issues/${issueNumber}`,
+                `/${task.owner}/${task.repo}/pull/${issueNumber}`,
               ];
               validUrl =
                 url.protocol === "https:" &&
@@ -134,15 +150,26 @@ export function createChannelServer(
                 !url.username &&
                 !url.password &&
                 !url.search &&
-                paths.includes(url.pathname) &&
-                /^#issuecomment-[1-9][0-9]*$/.test(url.hash);
+                (task.outcome?.publication?.kind === "pull_request"
+                  ? url.pathname.startsWith(
+                      `/${task.owner}/${task.repo}/pull/`,
+                    ) &&
+                    /^[1-9][0-9]*$/.test(
+                      url.pathname.slice(
+                        `/${task.owner}/${task.repo}/pull/`.length,
+                      ),
+                    ) &&
+                    !url.hash
+                  : paths.includes(url.pathname) &&
+                    /^#issuecomment-[1-9][0-9]*$/.test(url.hash));
             } catch {
               validUrl = false;
             }
           }
           if (!validUrl) {
             send(400, {
-              error: "Provide a reconciled comment URL for this task issue",
+              error:
+                "Provide a reconciled publication URL within this task scope",
             });
             return;
           }
@@ -150,7 +177,15 @@ export function createChannelServer(
             store.resolveUnknownDelivery(
               task.id,
               fields.resolution as "sent" | "failed",
-              fields.url as string | undefined,
+              fields.url
+                ? {
+                    kind:
+                      task.outcome?.publication.kind === "pull_request"
+                        ? "pull_request"
+                        : "comment",
+                    url: fields.url as string,
+                  }
+                : undefined,
             );
             send(200, { resolved: true });
           } catch {

@@ -1,0 +1,18 @@
+# Internal network: makes outbound HTTPS connections only.
+channel:
+  baseUrl: https://channel.example.com
+  tokenFile: secrets/connector-token
+runtime:
+  type: openclaw
+  baseUrl: http://127.0.0.1:18789
+  tokenFile: secrets/openclaw-gateway-token
+  agentId: github
+  timeoutMs: 180000
+  maxToolRounds: 8
+stateFile: ./data/agent.db
+pollIntervalMs: 2000
+requestTimeoutMs: 15000
+# Container deployments can join the existing OpenClaw Docker network:
+# deployment:
+#   network: openclaw_default
+# Then set runtime.baseUrl to http://<OpenClaw container alias>:18789

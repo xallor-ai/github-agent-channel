@@ -1,31 +1,32 @@
-import { ConfigManager } from "./config.js";
+import { loadConfig } from "./config.js";
 import { TaskStore } from "./store.js";
 import { OctokitGitHubClient } from "./github.js";
-import { OpenClawConnector } from "./connector.js";
-import { Worker } from "./worker.js";
+import { PullCoordinator } from "./pull.js";
+import { DeliveryWorker } from "./worker.js";
 import { createChannelServer } from "./server.js";
+import { resolveSecrets } from "./secrets.js";
+import { StorageSchemaError } from "./store-schema.js";
 
 try {
-  const manager = new ConfigManager(
-    process.env.CHANNEL_CONFIG ?? "config.local.yaml",
-  );
-  const config = manager.snapshot().config;
+  const configPath = process.env.CHANNEL_CONFIG ?? "config.local.yaml";
+  const config = loadConfig(configPath);
+  const secrets = resolveSecrets(config, configPath);
   const store = new TaskStore(config.dataFile);
   store.recover();
-  const github = new OctokitGitHubClient(
-    config,
-    process.env[config.github.privateKeyEnv]!,
+  const github = new OctokitGitHubClient(config, secrets.privateKey);
+  const coordinator = new PullCoordinator(
+    store,
+    github,
+    config.connector,
+    secrets.connectorToken,
   );
-  const runtime = new OpenClawConnector(
-    config.runtime,
-    process.env[config.runtime.tokenEnv]!,
-  );
-  const worker = new Worker(store, github, runtime);
+  const worker = new DeliveryWorker(store, github);
   const server = createChannelServer(
     config,
     store,
-    process.env[config.github.webhookSecretEnv]!,
-    process.env[config.server.adminTokenEnv]!,
+    secrets.webhookSecret,
+    secrets.adminToken,
+    coordinator,
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(
@@ -37,6 +38,7 @@ try {
     ),
   );
   const timer = setInterval(() => {
+    coordinator.expire();
     void worker
       .tick()
       .catch(() => console.error(JSON.stringify({ event: "worker_failure" })));
@@ -48,9 +50,11 @@ try {
       // Persisted running/sending states recover as unknown after shutdown; no automatic rerun.
       setTimeout(() => process.exit(0), 1000).unref();
     });
-} catch {
+} catch (error) {
   console.error(
-    "Channel startup failed: check configuration and required environment references",
+    error instanceof StorageSchemaError
+      ? error.message
+      : "Channel startup failed: check configuration and required environment references",
   );
   process.exitCode = 1;
 }
