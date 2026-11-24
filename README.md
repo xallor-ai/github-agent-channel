@@ -12,7 +12,7 @@ GitHub ──签名Webhook──▶ Channel服务 ──评论/PR──▶ GitHu
                       本仓库连接器 ──适配器──▶ Runtime（OpenClaw / ACP）
 ```
 
-当前提供独立出站 bridge。OpenClaw 适配器用于读取分析；ACP 适配器复用现有编码 harness，收集实际文件变更和验证结果，服务端按显式策略创建 draft PR。配置、任务和结果使用严格 v2 契约，不兼容旧版。真实模型→代码→GitHub PR 尚需独立验收。
+当前提供独立出站 bridge。OpenClaw 适配器用于读取分析；ACP 适配器复用现有编码 harness，收集实际文件变更和验证结果，服务端按显式策略创建 draft PR。配置、任务和结果使用严格 v2 契约，不兼容旧版。真实编码建 PR 已验收；同一 PR 续改仍是[产品契约](docs/product-contract.md)中的目标。
 
 ## 配置文档
 
@@ -56,7 +56,7 @@ npm run channel -- agent run ./agent-data/agent.local.yaml
 
 ## 开发与验证
 
-修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。当前已验收 OpenClaw 读取差异并回帖，ACP 真实编码→PR 仍待单独验收。
+修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。OpenClaw 读取差异并回帖、OpenCode ACP 实际编码→验证→PR→Channel 评审均已有[真实验收记录](docs/acp-live-validation-20261124.md)。
 
 ```sh
 npm test

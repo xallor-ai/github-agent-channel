@@ -9,6 +9,8 @@
 
 ## Read first
 
+- [Product contract](docs/product-contract.md) defines the approved scope. Map feature changes to C/W acceptance criteria; current implementation evidence belongs in the capability ledger.
+
 - Read docs/README.md, docs/implementation-map.md, docs/architecture.md and relevant source/tests before feature work or external research. Requirements describe intended scope; source shows what exists. Record any gap.
 - docs/setup.md is the OpenClaw adapter guide; docs/acp-setup.md is the native ACP guide. ECS is only an optional server deployment example.
 - Dated validation/review files are historical evidence, never current configuration. Superseded V1/direct-call plans were deleted; Git history retains them. Never restore cloud-to-inner-runtime calls or comment-only task aliases.
@@ -16,6 +18,7 @@
 ## Actual call graph and common traps
 
 - src/main.ts loads the cloud config once and wires HTTP, PullCoordinator and publication-only DeliveryWorker. No live configuration-update API exists.
+- OpenClaw tool exposure and invocation validation must share the target-scoped allowlist. Repository tasks allow only read_file and publish none; never offer read_issue without an Issue/PR scope. read_file still reads the default branch, not the push SHA.
 - src/agent.ts is the outbound bridge, not a coding engine. src/runtime-factory.ts selects adapters; src/connector.ts contains OpenClaw Responses specifics only.
 - Cloud has connector identity/config; bridge has runtime config. Only bridge initiates cross-network requests. No public runtime address or reverse tunnel is required.
 - workerId, runtime agentId and GitHub botLogin are different identities. Admin, connector and runtime/model credentials are not interchangeable.
