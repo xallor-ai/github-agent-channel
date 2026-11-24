@@ -57,6 +57,8 @@
 | 旧数据/旧配置/旧协议         | 直接拒绝；无迁移、无别名、无 fallback。新版本使用新状态目录和卷                           |
 | 工作区安全                   | 原生 ACP 不是 OS sandbox，独立 clone 与专用账户由管理员准备；不支持多个 bridge 共享工作区 |
 
+Webhook 的 `requireMention` 只改变评论/Issue 创建事件的提及条件；签名、actor、事件和 PR 状态检查仍生效。
+
 ## 配置与验证入口
 
 - [OpenClaw](setup.md) 与 [ACP](acp-setup.md) 是不同适配器教程；[ECS](ecs-setup.md) 只是可选服务端部署。

@@ -58,6 +58,7 @@ const schema = z.strictObject({
       repo: name,
       enabled: z.boolean(),
       events: z.array(bindingEvent).min(1).max(6).optional(),
+      requireMention: z.boolean().optional(),
       triggerLabel: name.max(100).optional(),
       writePolicy: z
         .strictObject({

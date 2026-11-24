@@ -37,6 +37,10 @@
 - Reject skip-worktree/assume-unchanged index flags at workspace admission and every change collection; they hide actual edits from Git. A repository target SHA must match workspace HEAD before ACP starts. Never silently clear flags, reset or switch branches.
 - ACP native bridge is supported; ACP Docker render explicitly fails. Do not imply the provided Channel image bundles a coding harness or a workspace sandbox.
 
+## Pull request review
+
+- Every PR requires two independently identified models reviewing the same verified base/head diff. Record shared findings, single-model findings, disposition and evidence on the open PR. CI is not a model review; changed heads need a new review. Keep the real Channel review and publication receipt.
+
 ## Reuse and maintenance
 
 - Compare pinned SDK/runtime implementations before adding workspace, session or GitHub tooling. Prefer maintained protocol/SDK implementations; keep task policy and auth in Channel.

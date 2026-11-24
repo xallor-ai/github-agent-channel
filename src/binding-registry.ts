@@ -11,6 +11,7 @@ const principalSchema = scopeSchema.extend({
 const declarationSchema = z
   .strictObject({
     enabled: z.boolean(),
+    requireMention: z.boolean().default(true),
     events: z
       .array(bindingEvent)
       .max(bindingEvent.options.length)
@@ -110,6 +111,7 @@ export class BindingRegistry {
         current &&
         current.administratorId === administratorId &&
         current.enabled === next.enabled &&
+        current.requireMention === next.requireMention &&
         current.triggerLabel === next.triggerLabel &&
         JSON.stringify(current.events) === JSON.stringify(next.events);
       if (expectedRevision !== rev && !(same && expectedRevision === rev - 1))

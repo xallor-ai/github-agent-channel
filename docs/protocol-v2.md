@@ -27,7 +27,7 @@ bindings:
       maxBytes: 262144
 ```
 
-省略 events 时只接收明确 @App 的 issue_comment.created。issues.opened 也要求提及；issues.labeled 只接受配置的 triggerLabel。还可显式启用 pull_request.opened、pull_request.synchronize 和非删除分支 push。其他事件不会自动创建任务。
+省略 events 时只接收明确 @App 的 issue_comment.created。默认 issues.opened 也要求提及。在指定 binding 中设置 `requireMention: false` 后，已启用的 issue_comment.created 接受开放线程的人类非空评论，issues.opened 无需提及；不会自动添加 events 或授予写权限。issues.labeled 只接受配置的 triggerLabel。还可显式启用 pull_request.opened、pull_request.synchronize 和非删除分支 push。其他事件不会自动创建任务。
 
 评论/读取需要 Metadata/Contents Read、Issues/Pull requests Write；PR 发布还需 GitHub App **Contents Read and write**，组织安装方批准新增权限。没有 writePolicy 则禁止 PR 发布；App 的写权限不会替代 binding 策略。普通只读调用仍申请只读 contents token。
 
