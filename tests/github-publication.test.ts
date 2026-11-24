@@ -89,6 +89,8 @@ function fixture(
       };
     else if (path === "/repos/org/repo")
       data = { id: 2, name: "repo", owner: { login: "org" } };
+    else if (method === "GET" && path === "/repos/org/repo/pulls/5")
+      data = { state: "open", merged: false };
     else if (path.endsWith("/permission"))
       data = {
         permission: ++checks >= (opts.revokeAt ?? Infinity) ? "read" : "write",
