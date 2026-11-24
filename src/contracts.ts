@@ -20,6 +20,7 @@ export interface Binding {
   repo: string;
   enabled: boolean;
   events?: string[];
+  requireMention?: boolean;
   triggerLabel?: string;
   writePolicy?: {
     baseBranch: string;

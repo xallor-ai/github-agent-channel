@@ -21,9 +21,9 @@
 | ID  | 能力                                 | 实现状态与限制                                                                | 证据                                                                         | 真实环境状态                       |
 | --- | ------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------- |
 | E01 | 接收签名 Webhook                     | 已实现；验签原始正文后解析                                                    | [webhook.ts](../src/webhook.ts)、[webhook.test.ts](../tests/webhook.test.ts) | v2真实投递/签名通过                |
-| E02 | Issue 评论 @App 发起任务             | 已实现；只接受 created、明确提及、匹配 binding 的人类评论                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
-| E03 | PR 会话区评论 @App                   | 部分实现；沿用 issue_comment，可读取标题/正文与回帖；不产生原生 review             | [server.test.ts](../tests/server.test.ts)、[github.ts](../src/github.ts)     | v2 PR #4 真实评审回帖通过 |
-| E04 | Issue 创建/标签触发                  | 显式启用 issues.opened（需提及）、issues.labeled（指定标签）；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
+| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；默认要求提及，可按仓库关闭                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
+| E03 | PR 会话区评论 @App | 部分实现；沿用 issue_comment 读取标题/正文与回帖。仅接收 open PR，领取与发帖前向 GitHub 复核；不产生原生 Review | [webhook.test.ts](../tests/webhook.test.ts)、[github.test.ts](../tests/github.test.ts) | v2 PR #4 真实回帖通过；关闭/合并拦截至今仅有本地回归证据 |
+| E04 | Issue 创建/标签触发                  | 显式启用 issues.opened（默认需提及）、issues.labeled（指定标签）；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
 | E05 | PR 创建/更新触发                     | 显式启用 pull_request.opened/synchronize；其他 action 未实现                  | generic-tasks/webhook 测试                                                   | v2 PR #6 opened/synchronize 均通过 |
 | E06 | PR review / 行内 review comment 触发 | 未实现；两个 review 事件被忽略                                                | 同上                                                                         | 待实现                             |
 | E07 | push 触发                            | 显式启用有效非删除分支 push，产生 repository target                           | generic-tasks/webhook 测试                                                   | 修复后 v2 真实 push succeeded/skipped，无评论 |
@@ -82,6 +82,13 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 | S09 | 多租户、多 worker 路由           | 未实现；实例共享的一个 connector 身份不构成租户隔离                                         | contracts.ts、pull-store.test.ts                                                             | 不纳入本次闭环                                       |
 | S10 | 部署与配置                       | OpenClaw 原生/Docker、external/Caddy；ACP 仅原生连接器；旧库拒绝无迁移                      | deploy/agent-deploy/schema 测试                                                              | v2 OpenClaw Docker 与 OpenCode 原生 ACP 均完成真实验收 |
 
+## 仓库接入实施进度
+
+| 能力 | 当前证据 | 尚缺 |
+| --- | --- | --- |
+| 动态登记 | [登记库测试](../tests/binding-registry.test.ts)：重启保留、修订冲突、设备隔离 | 授权配对/API、本地声明同步、切换受理与领取 |
+| 离线等待 | [任务库测试](../tests/pull-store.test.ts)：排队 24 小时边界与重投不续期 | 真实双设备双仓验收 |
+
 ## 本次验证与限制
 
 - 自动化结果见 [v2 验证记录](runtime-neutral-validation-20261122.md)。包括真实本地 HTTP/SQLite、官方 ACP SDK 子进程、实际 Git 文件变化、验证命令和 Octokit transport 测试。
@@ -90,3 +97,5 @@ GitHub App 勾选事件仅表示平台会投递。未配置 binding.events 时�
 - workspace 原生进程不是 sandbox；不支持自动恢复未知执行、并发多租户或全部 GitHub events。
 
 当前接口与职责见 [实现地图](implementation-map.md)，使用方式见 [OpenClaw](setup.md) 和 [ACP](acp-setup.md)。每项能力独立维护源码、本地证据与真实验收，禁止用单一“完成”标志代替。
+
+2026-11-24 免提及测试：只读 OpenClaw、仅 github-agent-channel 绑定启用 issues.opened、issue_comment.created、pull_request.opened/synchronize；[Issue 创建](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127861955)、[普通评论](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127878845)、[PR 会话评论](https://github.com/xallor-ai/github-agent-channel/pull/16#issuecomment-7127972710) 已回帖。PR #16 的第一次 opened 已受理，但第三次工具请求 503，执行失败，无发布回执；其后普通评论成功是独立任务，不覆盖该失败。

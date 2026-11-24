@@ -85,12 +85,15 @@ export async function normalizeWebhook(
     if (
       !positive(comment?.id) ||
       !positive(issue?.number) ||
+      (issue.pull_request && issue.state !== "open") ||
+      issue.state === "closed" ||
       comment.user?.type !== "User" ||
       comment.user.id !== sender.id ||
       comment.user.login !== sender.login ||
       typeof comment.body !== "string" ||
       comment.body.length > 16000 ||
-      !mentioned(comment.body)
+      !comment.body.trim() ||
+      (binding.requireMention !== false && !mentioned(comment.body))
     )
       return null;
     return {
@@ -122,6 +125,7 @@ export async function normalizeWebhook(
   const item = headers.event === "issues" ? event.issue : event.pull_request;
   if (
     !positive(item?.number) ||
+    (headers.event === "pull_request" && item.state !== "open") ||
     typeof item.title !== "string" ||
     item.title.length > 500 ||
     (item.body !== null &&
@@ -131,7 +135,11 @@ export async function normalizeWebhook(
     return null;
   const body = item.body ?? "";
   if (body.length > 15000) return null;
-  if (key === "issues.opened" && !mentioned(body + "\n" + item.title))
+  if (
+    key === "issues.opened" &&
+    binding.requireMention !== false &&
+    !mentioned(body + "\n" + item.title)
+  )
     return null;
   if (
     key === "issues.labeled" &&

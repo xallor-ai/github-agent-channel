@@ -109,7 +109,12 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
   const pr = await receive("pull_request", {
     ...envelope,
     action: "opened",
-    pull_request: { number: 9, title: "Review", body: "changes" },
+    pull_request: {
+      number: 9,
+      state: "open",
+      title: "Review",
+      body: "changes",
+    },
   });
   assert.deepEqual(pr?.target, { kind: "pull_request", number: 9 });
   const defaults = {

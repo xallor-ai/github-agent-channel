@@ -333,3 +333,7 @@ JS
 | 任务unknown或启动提示journal锁 | 不删除数据库重跑；先确认旧执行/旧进程停止，按[运维对账](operations.md#租约和未知状态)处理 |
 
 本教程不把版本升级、schema校验或一次health探测当作完整验收；主线终点是上一步的真实投递、模型执行和回帖证据。
+
+## 无需提及的只读接入
+
+在要启用的仓库 binding 中设置 `requireMention: false` 和 `events: [issue_comment.created, issues.opened, pull_request.opened, pull_request.synchronize]`。当前静态部署需重新渲染并加载服务端配置。匹配的人类流量可能消耗模型资源；先用只读 Runtime、关闭 writePolicy，检查普通评论、重复投递和机器人自身回帖。

@@ -1,5 +1,11 @@
 # GitHub Agent Channel
 
+## Check the remote before continuing work
+
+- Before editing or committing, fetch the current remote base and head. For PR work, query the exact repository and PR number on GitHub; verify it is open and its base and head still match the task. A surviving branch is not evidence of an open PR.
+- Repeat the check immediately before pushing, requesting a review or posting a comment. If the target changed or cannot be verified, stop that write. Preserve local work; for follow-up after a merge, start from the current authorized base on a fresh branch and carry only changes still missing.
+- For Channel delegation, review evidence and publication receipts, use the [GitHub Agent Channel skill](.agents/skills/github-agent-channel/SKILL.md).
+
 ## Product and implementation boundaries
 
 - This is a general GitHub collaboration channel, not an OpenClaw-only plugin or comment bot. Core owns GitHub ingress, authorization, routing, durable tasks and publication; runtimes own model execution and coding tools.
@@ -30,6 +36,10 @@
 - ACP process permissions are not an OS sandbox. Dedicated normal clean clones only; no shared workspaces, symlinks/submodules/alternate Git metadata. The harness and verification subprocesses must not inherit bridge credentials; verification does not receive harness auth envRefs.
 - Reject skip-worktree/assume-unchanged index flags at workspace admission and every change collection; they hide actual edits from Git. A repository target SHA must match workspace HEAD before ACP starts. Never silently clear flags, reset or switch branches.
 - ACP native bridge is supported; ACP Docker render explicitly fails. Do not imply the provided Channel image bundles a coding harness or a workspace sandbox.
+
+## Pull request review
+
+- Every PR requires two independently identified models reviewing the same verified base/head diff. Record shared findings, single-model findings, disposition and evidence on the open PR. CI is not a model review; changed heads need a new review. Keep the real Channel review and publication receipt.
 
 ## Reuse and maintenance
 

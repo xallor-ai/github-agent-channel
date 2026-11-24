@@ -13,13 +13,15 @@
 
 规范模型没有 task 根级 commentId/issueNumber/result/commentUrl。commentId 只作为原始评论事件的 source.commentId；目标号在 target.number；文本在 outcome.text；外部地址在 publicationReceipt.url。产物必须明确包含 artifacts 和 publication，不做兼容推断。
 
+新增内部 [BindingRegistry](../src/binding-registry.ts) 是 #10 的持久化切片，未装配到云端或客户端。任务库已按首次受理时间拒绝排队满 24 小时的任务，独立于执行租约。
+
 ## 全部生产模块
 
 | 文件                                                  | 实际职责与边界                                                                                            |
 | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | [main.ts](../src/main.ts)                             | 一次性加载服务端配置，装配 HTTP/队列/发布 worker；只显示安全 schema 拒绝诊断                              |
 | [server.ts](../src/server.ts)                         | Webhook、健康、管理员状态与人工对账；严格按 target 校验发布 receipt URL                                   |
-| [webhook.ts](../src/webhook.ts)                       | 验签、事件/action/binding/人类身份/触发规则；构造 source 与 target                                        |
+| [webhook.ts](../src/webhook.ts)                       | 验签并核对事件、绑定、发起人和触发条件；PR 事件与 PR 评论只接收 open 快照，构造 source 与 target |
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
 | [config.ts](../src/config.ts)                         | 云端 schema；事件与 PR writePolicy；仅 loadConfig，无运行中设置 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
@@ -54,6 +56,8 @@
 | 重启/超时/网络结果不明       | unknown，不自动 replay；执行对账只可确认为 failed，不能强行变成功                         |
 | 旧数据/旧配置/旧协议         | 直接拒绝；无迁移、无别名、无 fallback。新版本使用新状态目录和卷                           |
 | 工作区安全                   | 原生 ACP 不是 OS sandbox，独立 clone 与专用账户由管理员准备；不支持多个 bridge 共享工作区 |
+
+Webhook 的 `requireMention` 只改变评论/Issue 创建事件的提及条件；签名、actor、事件和 PR 状态检查仍生效。
 
 ## 配置与验证入口
 
