@@ -69,4 +69,4 @@ npm run smoke:deployment
 
 模型探针 `npm run smoke:openclaw` 会实际调用Provider，应先按主线配置本地Gateway token；它使用合成工具数据，不访问真实GitHub。容器冒烟和单元测试同样不能替代公网验收。
 
-已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖和重投去重验收，见[记录](docs/outbound-validation-20261122.md)。这是早期版本的验收。当前版本由设备显式登记仓库和事件，只有已配对设备才能领取其绑定任务；PR 发布另需管理员配置 writeProfiles。多设备的真实验收以能力台账为准。
+已完成一个绑定仓库的真实GitHub → ECS → 内网OpenClaw → 回帖和重投去重验收，见[记录](docs/outbound-validation-20261122.md)。这是早期版本的验收。当前版本由设备显式登记仓库和事件，只有已配对设备才能领取其绑定任务；PR 发布另需管理员配置 writeProfiles。同机双设备、双仓的[真实验收记录](https://github.com/xallor-ai/github-agent-channel/issues/14#issuecomment-7130728427)已列入[能力台账](docs/capabilities.md)。

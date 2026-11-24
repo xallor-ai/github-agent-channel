@@ -23,7 +23,7 @@
 | [server.ts](../src/server.ts)                         | Webhook、健康、管理员状态与人工对账；严格按 target 校验发布 receipt URL                                   |
 | [webhook.ts](../src/webhook.ts)                       | 验签并核对事件、绑定、发起人和触发条件；PR 事件与 PR 评论只接收 open 快照，构造 source 与 target |
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
-| [config.ts](../src/config.ts)                         | 云端 schema；事件与 PR writePolicy；服务级配置及独立写策略，仓库绑定走设备 API                                       |
+| [config.ts](../src/config.ts)                         | 云端服务级配置与可选 writeProfiles；仓库和事件走设备登记 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
 | [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 3、bridge journal schema 2；旧格式拒绝，绝不转换或删除旧数据                                                        |
 | [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
@@ -51,7 +51,7 @@
 | ---------------------------- | ----------------------------------------------------------------------------------------- |
 | 未启用事件或不满足触发条件   | 忽略；HTTP 200 不是任务成功                                                               |
 | 签名合法但发起人无仓库写权限 | claim 时拒绝，不透露任务给执行器；写前再次复核                                            |
-| 代码/PR 发布                 | binding.writePolicy 默认不存在；显式启用后只写派生任务分支，不合并、不写默认分支          |
+| 代码/PR 发布                 | 设备登记不授予写仓权；服务端匹配安装与仓库 ID 的 writeProfiles 后只写派生任务分支，不合并、不写默认分支          |
 | 执行成功/发布成功            | 两套状态；模型文本不是测试证据；outcome 与 receipt 分离                                   |
 | 重启/超时/网络结果不明       | unknown，不自动 replay；执行对账只可确认为 failed，不能强行变成功                         |
 | 旧数据/旧配置/旧协议         | 直接拒绝；无迁移、无别名、无 fallback。新版本使用新状态目录和卷                           |
