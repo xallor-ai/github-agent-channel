@@ -289,8 +289,8 @@ export class TaskStore {
         .run(
           result.status,
           outcome ? JSON.stringify(outcome) : null,
-            result.status === "unknown"
-              ? `Connector execution requires reconciliation${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
+          result.status === "unknown"
+            ? `Connector execution requires reconciliation${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
             : result.status === "failed"
               ? `Connector execution failed${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
               : null,
