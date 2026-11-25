@@ -31,6 +31,8 @@ flowchart LR
 
 四态受理、配置修订及撤权/换绑顺序见[绑定生命周期](binding-lifecycle.md)。
 
+PR 评审目标架构（尚未实现）：服务端固定被审版本，执行设施准备只读源码，Runtime 按任务读取。方案图、现状差距和验收见[实施方案](superpowers/plans/2026-11-25-pr-review-context.md)。
+
 ## 当前实现调用链
 
 ```mermaid
