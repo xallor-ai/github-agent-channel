@@ -3,7 +3,7 @@ import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Task, RuntimeResult, RuntimeEvent } from "./contracts.js";
 
-import { failureCode, type RuntimeFailureCode } from "./runtime-failure.js";
+import { failureCodes, type RuntimeFailureCode } from "./runtime-failure.js";
 import { validateOutcome } from "./outcomes.js";
 import { requireSchemaVersion } from "./store-schema.js";
 
@@ -114,7 +114,7 @@ export class AgentStore {
           !(
             result.status !== "succeeded" &&
             key === "failure" &&
-            failureCode.safeParse(result.failure).success
+            failureCodes[result.status].safeParse(result.failure).success
           ) &&
           key !== "leaseToken" &&
           !(result.status === "succeeded" && key === "outcome"),

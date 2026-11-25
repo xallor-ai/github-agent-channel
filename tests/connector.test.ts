@@ -403,3 +403,22 @@ test("malformed completed output is rejected before any tool call", async () => 
     );
   }
 });
+
+test("completed oversized answer is a confirmed invalid response", async () => {
+  const c = new OpenClawConnector(settings, "secret", async () =>
+    Response.json({
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "x".repeat(18001) }],
+        },
+      ],
+    }),
+  );
+  await assert.rejects(
+    c.run(task, async () => ({})),
+    { code: "runtime_response_invalid" },
+  );
+});

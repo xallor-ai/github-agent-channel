@@ -227,7 +227,10 @@ export class OpenClawConnector implements RuntimeConnector {
           "Runtime provided no final answer",
         );
       if (text.length > 18000)
-        throw new Error("Runtime final answer exceeds comment limit");
+        throw new RuntimeFailure(
+          "runtime_response_invalid",
+          "Runtime final answer exceeds comment limit",
+        );
       return {
         text,
         artifacts: [],

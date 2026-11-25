@@ -517,6 +517,14 @@ test("failure codes survive result acknowledgement and never admit arbitrary dia
     (await f.post(url, { ...result, failure: "private-value" })).status,
     400,
   );
+  assert.equal(
+    (await f.post(url, { ...result, failure: "runtime_transport" })).status,
+    400,
+  );
+  assert.equal(
+    (await f.post(url, { ...result, status: "unknown" })).status,
+    400,
+  );
   assert.equal((await f.post(url, result)).status, 200);
   assert.match(f.store.get(task.id)!.error!, /tool_call_failed/);
   assert.equal(

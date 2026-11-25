@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { failureCode } from "./runtime-failure.js";
+import { failureCodes } from "./runtime-failure.js";
 import { z } from "zod";
 import { AccessDenied, type GitHubClient, type Task } from "./contracts.js";
 import {
@@ -26,12 +26,12 @@ const resultSchema = z.discriminatedUnion("status", [
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("failed"),
-    failure: failureCode.optional(),
+    failure: failureCodes.failed.optional(),
   }),
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("unknown"),
-    failure: failureCode.optional(),
+    failure: failureCodes.unknown.optional(),
   }),
 ]);
 import {

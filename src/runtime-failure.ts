@@ -1,17 +1,23 @@
 import { z } from "zod";
 
-export const failureCode = z.enum([
-  "tool_call_invalid",
-  "tool_call_failed",
-  "tool_round_limit",
-  "no_final_answer",
-  "runtime_timeout",
-  "runtime_interrupted",
-  "runtime_transport",
-  "runtime_response_invalid",
-  "runtime_failed",
-]);
-export type RuntimeFailureCode = z.infer<typeof failureCode>;
+export const failureCodes = {
+  failed: z.enum([
+    "tool_call_invalid",
+    "tool_call_failed",
+    "tool_round_limit",
+    "no_final_answer",
+    "runtime_response_invalid",
+    "runtime_failed",
+  ]),
+  unknown: z.enum([
+    "runtime_interrupted",
+    "runtime_timeout",
+    "runtime_transport",
+  ]),
+};
+export type RuntimeFailureCode = z.infer<
+  (typeof failureCodes)[keyof typeof failureCodes]
+>;
 export class RuntimeFailure extends Error {
   constructor(
     readonly code: RuntimeFailureCode,

@@ -12,7 +12,7 @@ import type {
 } from "./contracts.js";
 
 import {
-  failureCode,
+  failureCodes,
   failedExecutionMessage,
   notifiableFailures,
   noticeFailureCode,
@@ -285,7 +285,7 @@ export class TaskStore {
             !(
               result.status !== "succeeded" &&
               key === "failure" &&
-              failureCode.safeParse(result.failure).success
+              failureCodes[result.status].safeParse(result.failure).success
             ) &&
             !(result.status === "succeeded" && key === "outcome"),
         )
