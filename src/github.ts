@@ -113,6 +113,17 @@ export class OctokitGitHubClient implements GitHubClient {
       );
       if (data.state !== "open" || data.merged !== false)
         throw new AccessDenied("Target pull request is not confirmed open");
+    } else if (task.status === "failed" && task.target.kind === "issue") {
+      const { data } = await client.request(
+        "GET /repos/{owner}/{repo}/issues/{issue_number}",
+        {
+          owner: task.owner,
+          repo: task.repo,
+          issue_number: task.target.number,
+        },
+      );
+      if (data.state !== "open")
+        throw new AccessDenied("Failure notice target is not confirmed open");
     }
   }
   async readIssue(task: Task): Promise<unknown> {
@@ -146,14 +157,24 @@ export class OctokitGitHubClient implements GitHubClient {
     )
       throw new Error("Invalid repository file path");
     const client = await this.#authorized(task);
-    const { data } = await client.request(
-      "GET /repos/{owner}/{repo}/contents/{path}",
-      { owner: task.owner, repo: task.repo, path },
-    );
+    const response = await client
+      .request("GET /repos/{owner}/{repo}/contents/{path}", {
+        owner: task.owner,
+        repo: task.repo,
+        path,
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error && "status" in error && error.status === 404)
+          return null;
+        throw error;
+      });
+    if (!response) return { untrusted: true, unavailable: "file_unavailable" };
+    const { data } = response;
+    if (Array.isArray(data) || data.type !== "file")
+      return { untrusted: true, unavailable: "not_a_file" };
+    if (data.size > MAX_FILE)
+      return { untrusted: true, unavailable: "file_too_large" };
     if (
-      Array.isArray(data) ||
-      data.type !== "file" ||
-      data.size > MAX_FILE ||
       !("content" in data) ||
       data.encoding !== "base64" ||
       data.content.length > Math.ceil((MAX_FILE * 4) / 3) + 4096

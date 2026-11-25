@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { RuntimeFailure } from "./runtime-failure.js";
 import { z } from "zod";
 import { createRuntime } from "./runtime-factory.js";
 import {
@@ -10,11 +11,7 @@ import {
   outcomeSchema,
   publicationReceiptSchema,
 } from "./outcomes.js";
-import {
-  AmbiguousExecution,
-  type RuntimeConnector,
-  type RuntimeFailureCode,
-} from "./contracts.js";
+import { AmbiguousExecution, type RuntimeConnector } from "./contracts.js";
 import { loadAgentConfig, type AgentConfig } from "./agent-config.js";
 import {
   AgentStore,
@@ -187,7 +184,14 @@ export class Agent {
               "/connector/v2/tasks/" + assignment.task.id + "/tool",
               { leaseToken: assignment.leaseToken, name, args },
               combined,
-            );
+            ).catch((error: unknown) => {
+              if (error instanceof CloudRejected)
+                throw new RuntimeFailure(
+                  "tool_call_failed",
+                  "Cloud rejected tool request",
+                );
+              throw error;
+            });
             if (response.status !== 200)
               throw new AmbiguousExecution("Invalid tool acknowledgement");
             return response.data;
@@ -209,27 +213,33 @@ export class Agent {
         );
         if (combined.aborted)
           throw new AmbiguousExecution("Execution interrupted");
-        const validated = validateOutcome(output);
-        validateTaskOutcome(assignment.task, validated);
+        const validated = (() => {
+          try {
+            const valid = validateOutcome(output);
+            validateTaskOutcome(assignment.task, valid);
+            return valid;
+          } catch {
+            throw new RuntimeFailure(
+              "runtime_response_invalid",
+              "Invalid runtime outcome",
+            );
+          }
+        })();
         result = {
           leaseToken: assignment.leaseToken,
           status: "succeeded",
           outcome: validated,
         };
       } catch (e) {
-        const message =
-          e instanceof Error ? e.message : "Runtime execution failed";
-        const failure: RuntimeFailureCode = /round limit/i.test(message)
-          ? "tool_round_limit"
-          : /no final answer/i.test(message)
-            ? "no_final_answer"
-            : combined.aborted
-              ? "runtime_timeout"
-              : e instanceof AmbiguousExecution
-                ? "runtime_transport"
-                : /tool/i.test(message)
-                  ? "tool_call_failed"
-                  : "runtime_response_invalid";
+        const failure = signal?.aborted
+          ? "runtime_interrupted"
+          : deadline.aborted
+            ? "runtime_timeout"
+            : e instanceof AmbiguousExecution
+              ? "runtime_transport"
+              : e instanceof RuntimeFailure
+                ? e.code
+                : "runtime_failed";
         result = {
           leaseToken: assignment.leaseToken,
           status:
@@ -237,7 +247,6 @@ export class Agent {
               ? "unknown"
               : "failed",
           failure,
-          detail: message.slice(0, 240),
         };
       }
     }

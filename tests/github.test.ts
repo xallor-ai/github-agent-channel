@@ -51,6 +51,7 @@ function fixture(
     pull?: () => { state: string; merged?: boolean } | null;
     comments?: unknown[];
     directory?: boolean;
+    contentStatus?: number;
     size?: number;
   } = {},
 ) {
@@ -97,6 +98,8 @@ function fixture(
       };
     } else if (url.pathname.endsWith("/comments"))
       data = options.comments ?? [];
+    else if (url.pathname.includes("/contents/") && options.contentStatus)
+      return new Response("{}", { status: options.contentStatus });
     else if (url.pathname.includes("/contents/"))
       data = options.directory
         ? []
@@ -172,12 +175,22 @@ test("reads are scoped, marked untrusted and bounded", async () => {
     "%2e%2e/secret",
   ])
     await assert.rejects(client.readFile(task, path));
-  await assert.rejects(
-    fixture({ directory: true }).client.readFile(task, "folder"),
+  assert.deepEqual(
+    await fixture({ directory: true }).client.readFile(task, "folder"),
+    { untrusted: true, unavailable: "not_a_file" },
   );
-  await assert.rejects(
-    fixture({ size: 131073 }).client.readFile(task, "large"),
+  assert.deepEqual(
+    await fixture({ size: 131073 }).client.readFile(task, "large"),
+    { untrusted: true, unavailable: "file_too_large" },
   );
+  assert.deepEqual(
+    await fixture({ contentStatus: 404 }).client.readFile(task, "missing"),
+    { untrusted: true, unavailable: "file_unavailable" },
+  );
+  for (const status of [401, 403, 429, 503])
+    await assert.rejects(
+      fixture({ contentStatus: status }).client.readFile(task, "README.md"),
+    );
   assert.ok(calls.some((x) => x.path === "/repos/org/repo/issues/5"));
 });
 test("publish reconciles only bot marker and posts once on ambiguous failure", async () => {

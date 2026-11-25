@@ -92,3 +92,9 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 两端配置可选 `deployment.image: registry.example.com/team/github-agent-channel:<commit>`，生成器只使用image而不要求目标主机build context。未设置时仍从当前源码目录构建。镜像需包含编译后的dist和生产依赖（仓库Dockerfile）。
 
 目标机没有Node时，可用同一镜像运行配置生成CLI。将配置目录及输出目录按相同绝对路径挂载到一次性容器，执行 `node dist/cli.js deploy render <cloud-config> <bundle>`（Agent用 `agent deploy render`），然后在宿主执行 `docker compose -f <bundle>/compose.yaml up -d --wait`。secret文件仍由宿主Docker按生成引用挂载，不复制到镜像。生成容器与长期服务的UID应正确配置；应用服务保持UID1000。
+
+### 工具读取和失败回执
+
+`read_file` 读取默认分支上的单个文件。已授权的 Contents 请求遇到目录、404 或超过 128 KiB 时，模型分别收到 `not_a_file`、`file_unavailable` 或 `file_too_large`；没有文件内容，不能据此声称已核验 PR head。授权、限流、网络及上游服务错误仍中止读取。
+
+连接器只上报固定失败原因码，不保存异常消息。确认模型没有给出可用结果（轮次耗尽、没有最终回答、工具调用或结果格式无效）时，Channel 可在仍开放、仍授权的原 Issue/PR 发布一条状态通知。通知有自己的发布回执，任务保持 failed，不产生分析成果。未知执行、授权失败和旧失败任务不自动重跑或补发。

@@ -102,3 +102,5 @@ GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明
 当前接口与职责见 [实现地图](implementation-map.md)，使用方式见 [OpenClaw](setup.md) 和 [ACP](acp-setup.md)。每项能力独立维护源码、本地证据与真实验收，禁止用单一“完成”标志代替。
 
 2026-11-24 免提及测试：只读 OpenClaw、仅 github-agent-channel 绑定启用 issues.opened、issue_comment.created、pull_request.opened/synchronize；[Issue 创建](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127861955)、[普通评论](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127878845)、[PR 会话评论](https://github.com/xallor-ai/github-agent-channel/pull/16#issuecomment-7127972710) 已回帖。PR #16 的第一次 opened 已受理，但第三次工具请求 503，执行失败，无发布回执；其后普通评论成功是独立任务，不覆盖该失败。
+
+| 工具读取降级与失败说明 | 已授权读取不能提供文件时返回有界原因；确认的模型输出失败可在开放线程给出状态通知；未知状态不重跑。 | 本地 GitHub、Pull 和发布 worker 回归；运维边界见[失败回执](operations.md#工具读取和失败回执)。 |

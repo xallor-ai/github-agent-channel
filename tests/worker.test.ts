@@ -200,3 +200,46 @@ test("disabling a binding during authorization prevents the reserved publication
   assert.equal(attempts, 0);
   assert.equal(store.get(task.id)?.deliveryStatus, "failed");
 });
+
+test("a confirmed analysis failure sends one status notice without inventing an outcome; unknown execution is silent", async (t) => {
+  for (const status of ["failed", "unknown"] as const) {
+    const store = new TaskStore(":memory:");
+    t.after(() => store.close());
+    seedBinding(store, input, "worker");
+    const task = store.accept(input).task;
+    store.claimAssignment("worker", "hash", Date.now() + 60000);
+    store.finishAssignment(
+      task.id,
+      "worker",
+      "hash",
+      {
+        status,
+        failure: status === "failed" ? "no_final_answer" : "runtime_transport",
+      },
+      "digest",
+    );
+    if (status === "unknown") store.resolveUnknown(task.id, "failed");
+    const notices: string[] = [];
+    const worker = new DeliveryWorker(
+      store,
+      github({
+        publishComment: async (_, body) => {
+          notices.push(body);
+          return {
+            id: 10,
+            url: "https://github.com/org/repo/issues/4#issuecomment-10",
+          };
+        },
+      }),
+    );
+    await worker.tick();
+    await worker.tick();
+    assert.equal(notices.length, status === "failed" ? 1 : 0);
+    if (status === "failed") {
+      assert.match(notices[0]!, /no_final_answer/);
+      assert.equal(store.get(task.id)?.deliveryStatus, "sent");
+    }
+    assert.equal(store.get(task.id)?.status, "failed");
+    assert.equal(store.get(task.id)?.outcome, null);
+  }
+});

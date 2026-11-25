@@ -502,3 +502,25 @@ test("denial fencing a reserved but undisclosed claim never freezes healthy work
   assert.equal(store.get(denied.id)?.status, "rejected");
   assert.equal((await (await f.post("claim", {})).json()).task.id, healthy.id);
 });
+
+test("failure codes survive result acknowledgement and never admit arbitrary diagnostics", async (t) => {
+  const f = await fixture(t);
+  const task = f.store.accept(input).task;
+  const { leaseToken } = await (await f.post("claim", {})).json();
+  const url = "tasks/" + task.id + "/result";
+  const result = { leaseToken, status: "failed", failure: "tool_call_failed" };
+  assert.equal(
+    (await f.post(url, { ...result, detail: "private-value" })).status,
+    400,
+  );
+  assert.equal(
+    (await f.post(url, { ...result, failure: "private-value" })).status,
+    400,
+  );
+  assert.equal((await f.post(url, result)).status, 200);
+  assert.match(f.store.get(task.id)!.error!, /tool_call_failed/);
+  assert.equal(
+    (await f.post(url, { ...result, failure: "tool_call_invalid" })).status,
+    409,
+  );
+});

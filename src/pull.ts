@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { failureCode } from "./runtime-failure.js";
 import { z } from "zod";
 import { AccessDenied, type GitHubClient, type Task } from "./contracts.js";
 import {
@@ -25,14 +26,12 @@ const resultSchema = z.discriminatedUnion("status", [
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("failed"),
-    failure: z.string().min(1).max(100).optional(),
-    detail: z.string().max(240).optional(),
+    failure: failureCode.optional(),
   }),
   z.strictObject({
     leaseToken: leaseSchema,
     status: z.literal("unknown"),
-    failure: z.string().min(1).max(100).optional(),
-    detail: z.string().max(240).optional(),
+    failure: failureCode.optional(),
   }),
 ]);
 import {
@@ -183,7 +182,10 @@ export class PullCoordinator {
       const result: AssignmentResult =
         data.status === "succeeded"
           ? { status: data.status, outcome: data.outcome }
-          : { status: data.status };
+          : {
+              status: data.status,
+              ...(data.failure && { failure: data.failure }),
+            };
       // Canonical field order ensures JSON key order does not defeat result deduplication.
       const digest = hash(JSON.stringify(result));
       let duplicate: boolean;

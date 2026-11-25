@@ -68,3 +68,5 @@ Webhook 的 `requireMention` 只改变评论/Issue 创建事件的提及条件�
 - [Docker smoke](../scripts/smoke-deployment.mjs) 使用隔离容器、Nginx、Caddy 本地 CA、真实出站协议；[fixture server](../scripts/smoke-fixture-server.mjs) 的合成发布计数存入独立 smoke.db。
 - [OpenClaw smoke](../scripts/smoke-openclaw.mjs) 使用真实模型、合成读取工具；不能证明 GitHub PR。
 - [CI](../.github/workflows/checks.yml) 执行格式、类型、单元/HTTP、构建与 Docker smoke。当前实测见[v2 验证记录](runtime-neutral-validation-20261122.md)。
+
+工具读取与失败通知（C3/C5/C8）：github.ts 区分无文件材料与上游错误；连接器上报固定原因码，pull / store 记录结果并去重。worker 只对明确的模型输出失败发布状态通知，并单独记录发布结果。详见[运维](operations.md#工具读取和失败回执)。

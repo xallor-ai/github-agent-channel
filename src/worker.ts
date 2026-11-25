@@ -1,4 +1,5 @@
 import { AccessDenied, type GitHubClient } from "./contracts.js";
+import { noticeFailureCode } from "./runtime-failure.js";
 import { TaskStore } from "./store.js";
 
 /** Cloud-side publication only. Agent execution belongs to the outbound client. */
@@ -30,6 +31,20 @@ export class DeliveryWorker {
           )?.id !== delivery.bindingId
         )
           throw new AccessDenied("Binding changed before publication");
+        if (delivery.status === "failed") {
+          const code = noticeFailureCode(delivery.error);
+          if (!code || delivery.target.kind === "repository")
+            throw new AccessDenied("No failure notice requested");
+          const result = await this.github.publishComment(
+            delivery,
+            `本次任务未生成可发布的分析。原因：\`${code}\`。维护者可按任务 ID ${delivery.id} 查看执行记录。`,
+          );
+          this.store.markDelivery(delivery.id, "sent", {
+            kind: "comment",
+            ...result,
+          });
+          return true;
+        }
         if (!delivery.outcome) throw Error("Missing publication outcome");
         const publication = delivery.outcome.publication;
         if (publication.kind === "none")

@@ -152,14 +152,6 @@ export interface GitHubClient {
 }
 export class AccessDenied extends Error {}
 export class AmbiguousExecution extends Error {}
-export type RuntimeFailureCode =
-  | "tool_round_limit"
-  | "no_final_answer"
-  | "runtime_timeout"
-  | "runtime_transport"
-  | "runtime_response_invalid"
-  | "tool_call_invalid"
-  | "tool_call_failed";
 
 export type BindingLookup = (
   installationId: number,

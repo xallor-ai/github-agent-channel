@@ -11,15 +11,28 @@ import type {
   RuntimeEvent,
 } from "./contracts.js";
 
+import {
+  failureCode,
+  failedExecutionMessage,
+  notifiableFailures,
+  noticeFailureCode,
+  type RuntimeFailureCode,
+} from "./runtime-failure.js";
 import { BindingRegistry } from "./binding-registry.js";
 import { initializeTaskSchema } from "./store-schema.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 
+// Prior failed tasks also used pending. Only explicitly diagnosed model failures may enqueue a notice.
+const publishableStatus =
+  "(busy.status='succeeded' OR (busy.status='failed' AND busy.error IN (" +
+  notifiableFailures.map(() => "?").join(",") +
+  ")))";
+const noticeMessages = notifiableFailures.map(failedExecutionMessage);
 const QUEUE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export type AssignmentResult =
   | { status: "succeeded"; outcome: RuntimeResult }
-  | { status: "failed" | "unknown"; failure?: string; detail?: string };
+  | { status: "failed" | "unknown"; failure?: RuntimeFailureCode };
 
 /** Domain rejection only; infrastructure errors must remain retryable. */
 export class AssignmentConflict extends Error {}
@@ -202,10 +215,10 @@ export class TaskStore {
         .prepare(
           `SELECT q.id FROM tasks q JOIN bindings b USING (installationId,repositoryId) WHERE q.status='queued' AND b.deviceId=? AND NOT EXISTS (
         SELECT 1 FROM tasks busy WHERE busy.installationId=q.installationId AND busy.repositoryId=q.repositoryId AND (
-          busy.status IN ('running','unknown') OR (busy.status='succeeded' AND busy.deliveryStatus IN ('pending','sending','unknown'))
+          busy.status IN ('running','unknown') OR (${publishableStatus} AND busy.deliveryStatus IN ('pending','sending','unknown'))
         )) ORDER BY q.createdAt,q.rowid LIMIT 1`,
         )
-        .get(workerId);
+        .get(workerId, ...noticeMessages);
       if (!row) return undefined;
       this.db
         .prepare(
@@ -269,6 +282,11 @@ export class TaskStore {
         Object.keys(result).some(
           (key) =>
             key !== "status" &&
+            !(
+              result.status !== "succeeded" &&
+              key === "failure" &&
+              failureCode.safeParse(result.failure).success
+            ) &&
             !(result.status === "succeeded" && key === "outcome"),
         )
       )
@@ -290,11 +308,22 @@ export class TaskStore {
           result.status,
           outcome ? JSON.stringify(outcome) : null,
           result.status === "unknown"
-            ? `Connector execution requires reconciliation${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
+            ? `Connector execution requires reconciliation${result.failure ? ` (${result.failure})` : ""}`
             : result.status === "failed"
-              ? `Connector execution failed${result.failure ? ` (${result.failure})` : ""}${result.detail ? `: ${result.detail}` : ""}`
+              ? result.failure
+                ? failedExecutionMessage(result.failure)
+                : "Connector execution failed"
               : null,
-          outcome?.publication.kind === "none" ? "skipped" : "pending",
+          result.status === "succeeded"
+            ? outcome?.publication.kind === "none"
+              ? "skipped"
+              : "pending"
+            : result.status === "failed" &&
+                task.target.kind !== "repository" &&
+                result.failure &&
+                noticeFailureCode(failedExecutionMessage(result.failure))
+              ? "pending"
+              : "skipped",
           taskId,
         );
       this.db
@@ -323,9 +352,9 @@ export class TaskStore {
     return this.transaction(() => {
       const row = this.db
         .prepare(
-          "SELECT id FROM tasks WHERE status='succeeded' AND deliveryStatus='pending' ORDER BY createdAt,rowid LIMIT 1",
+          `SELECT id FROM tasks busy WHERE ${publishableStatus} AND deliveryStatus='pending' ORDER BY createdAt,rowid LIMIT 1`,
         )
-        .get();
+        .get(...noticeMessages);
       if (!row) return undefined;
       this.db
         .prepare("UPDATE tasks SET deliveryStatus='sending' WHERE id=?")
@@ -342,7 +371,7 @@ export class TaskStore {
       throw Error("Invalid delivery transition");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status='succeeded' AND deliveryStatus='sending'",
+        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
       )
       .run(status, receipt ? JSON.stringify(receipt) : null, id);
     if (!changed.changes) throw Error("Delivery is not sending");
@@ -363,7 +392,7 @@ export class TaskStore {
       throw Error("Invalid delivery resolution");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status='succeeded' AND deliveryStatus='unknown'",
+        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='unknown'",
       )
       .run(terminal, receipt ? JSON.stringify(receipt) : null, id);
     if (!changed.changes) throw Error("Delivery is not unknown");
@@ -372,7 +401,7 @@ export class TaskStore {
     if (terminal !== "failed") throw new Error("Invalid resolution");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET status='failed' WHERE id=? AND status='unknown'",
+        "UPDATE tasks SET status='failed',deliveryStatus='skipped' WHERE id=? AND status='unknown'",
       )
       .run(id);
     if (!changed.changes) throw new Error("Task is not unknown");
