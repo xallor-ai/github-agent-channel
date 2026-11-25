@@ -70,6 +70,38 @@ const diffSchema = z.strictObject({
   limitations: z.array(z.string().max(256)).max(16),
 });
 type Snapshot = ReturnType<typeof openFetchedReviewSnapshot>;
+const maxAnswerLength = 18000;
+const searchArgs = z.strictObject({
+  query: z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((q) => !/[\x00-\x1f\x7f\u2028\u2029]/.test(q)),
+});
+const readArgs = z.strictObject({
+  path: z
+    .string()
+    .min(1)
+    .max(1024)
+    .refine(
+      (p) =>
+        !/[\\:\x00-\x1f\x7f]/.test(p) &&
+        p
+          .split("/")
+          .every(
+            (s) => s && s !== "." && s !== ".." && s.toLowerCase() !== ".git",
+          ),
+    ),
+});
+function localToolArgs<T>(schema: z.ZodType<T>, args: unknown): T {
+  const result = schema.safeParse(args);
+  if (!result.success)
+    throw new RuntimeFailure(
+      "tool_call_invalid",
+      "Invalid snapshot tool arguments",
+    );
+  return result.data;
+}
 
 const textContentSchema = z.union([
   z.object({ type: z.literal("output_text"), text: z.string() }),
@@ -334,17 +366,13 @@ export class OpenClawConnector implements RuntimeConnector {
             ) {
               await access();
               if (call.name === "search_repo") {
-                const { query } = z
-                  .strictObject({ query: z.string().min(1).max(256) })
-                  .parse(args);
+                const { query } = localToolArgs(searchArgs, args);
                 const hits = await snapshot.search(query);
                 searches++;
                 if (hits.truncated) limitedReads++;
                 result = hits;
               } else {
-                const { path } = z
-                  .strictObject({ path: z.string().min(1).max(1024) })
-                  .parse(args);
+                const { path } = localToolArgs(readArgs, args);
                 try {
                   const file = await snapshot.read(path);
                   fileReads++;
@@ -387,6 +415,11 @@ export class OpenClawConnector implements RuntimeConnector {
             "no_final_answer",
             "Runtime provided no final answer",
           );
+        if (text.length > maxAnswerLength)
+          throw new RuntimeFailure(
+            "runtime_response_invalid",
+            "Runtime final answer exceeds comment limit",
+          );
         if (evidence) {
           const limitations = evidence.limitations.length
             ? "; " + evidence.limitations.join("; ")
@@ -399,7 +432,7 @@ export class OpenClawConnector implements RuntimeConnector {
               ", limited results: " +
               limitedReads
             : "";
-          text +=
+          const footer =
             `\n\nPR evidence (base ${evidence.revision.baseSha}, head ${evidence.revision.headSha}): ` +
             evidence.files.length +
             "/" +
@@ -408,12 +441,14 @@ export class OpenClawConnector implements RuntimeConnector {
             limitations +
             reads +
             ".";
+          if (text.length + footer.length > maxAnswerLength) {
+            const notice = "\n[Model answer truncated to retain PR evidence.]";
+            const budget = maxAnswerLength - footer.length - notice.length;
+            text =
+              text.slice(0, budget).replace(/[\uD800-\uDBFF]$/, "") + notice;
+          }
+          text += footer;
         }
-        if (text.length > 18000)
-          throw new RuntimeFailure(
-            "runtime_response_invalid",
-            "Runtime final answer exceeds comment limit",
-          );
         return {
           text,
           artifacts: [],

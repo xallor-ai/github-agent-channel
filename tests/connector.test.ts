@@ -614,3 +614,63 @@ test("revocation after local search withholds results and prevents another model
   assert.equal(grants, 4);
   assert.equal(requests, 1);
 });
+
+test("invalid local snapshot calls are classified as model tool errors", async () => {
+  for (const [name, args] of [
+    ["search_repo", {}],
+    ["search_repo", { query: "one\ntwo" }],
+    ["read_file", { path: "../x" }],
+    ["read_file", { path: ".Git/config" }],
+    ["read_file", { path: "foo//x" }],
+    ["read_file", { path: "ok", ref: "HEAD" }],
+  ] as const) {
+    const c = new OpenClawConnector(
+      { ...settings, deepReview: true, timeoutMs: 5000 },
+      "secret",
+      async () => Response.json(call(name, args)),
+    );
+    await assert.rejects(
+      c.run(pr, async (name) => {
+        if (name === "read_pull_diff") return diff;
+        if (name === "read_snapshot")
+          return { sha: revision.headSha, complete: true, files: [] };
+        assert.equal(name, "review_access");
+        return { authorized: true };
+      }),
+      { code: "tool_call_invalid" },
+    );
+  }
+});
+
+test("PR output preserves scope at the presentation limit and rejects oversized model answers", async () => {
+  async function run(text: string) {
+    const c = new OpenClawConnector(
+      { ...settings, timeoutMs: 5000 },
+      "secret",
+      async () =>
+        Response.json({
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text }],
+            },
+          ],
+        }),
+    );
+    return (await c.run(pr, async () => diff)).text;
+  }
+  for (const text of ["🌲".repeat(9000), "a" + "🌲".repeat(8999) + "z"]) {
+    const result = await run(text);
+    assert.ok(result.length <= 18000);
+    assert.ok(result.isWellFormed());
+    assert.match(result, /truncated/);
+    assert.ok(result.includes("head " + revision.headSha));
+    assert.ok(result.includes("base " + revision.baseSha));
+    assert.match(result, /1\/1 changed files/);
+  }
+  await assert.rejects(run("x".repeat(18001)), {
+    code: "runtime_response_invalid",
+  });
+});
