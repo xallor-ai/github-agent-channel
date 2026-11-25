@@ -1,6 +1,6 @@
 # 当前实现地图：Channel v2
 
-状态：本次实现纠偏后的源码地图，2026-11-22。目标是通用 GitHub Channel；目前实现 OpenClaw 分析适配器和 ACP 编码适配器。真实模型/仓库验收范围单列在[能力台账](capabilities.md)。
+状态：本次实现纠偏后的源码地图，2026-11-25。目标是通用 GitHub Channel；目前实现 OpenClaw 分析适配器和 ACP 编码适配器。真实模型/仓库验收范围单列在[能力台账](capabilities.md)。
 
 ## 数据与调用链
 
@@ -9,7 +9,7 @@
 3. agent 写本地 journal，通过 runtime-factory 调用选定 Runtime；运行标识先落盘并回传 execution。
 4. Runtime 编辑与执行归已有 harness；Channel 只收集有界产物和受控验证结果，不实现模型规划循环。
 5. result 必须为 status + 嵌套 outcome。云端保存摘要和 outcome 后 ACK；重复相同结果只确认，冲突拒绝。
-6. publication=none → skipped；comment/PR → worker 重新授权，按 policy 发布并保存 publicationReceipt；不确定则 unknown。
+6. publication=none → skipped；comment/review/pull_request → worker 重新授权，按 policy 发布并保存 publicationReceipt；不确定则 unknown。
 
 规范模型没有 task 根级 commentId/issueNumber/result/commentUrl。commentId 只作为原始评论事件的 source.commentId；目标号在 target.number；文本在 outcome.text；外部地址在 publicationReceipt.url。产物必须明确包含 artifacts 和 publication，不做兼容推断。
 
@@ -25,18 +25,22 @@
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
 | [config.ts](../src/config.ts)                         | 云端服务级配置与可选 writeProfiles；仓库和事件走设备登记 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
-| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 3、bridge journal schema 2；旧格式拒绝，绝不转换或删除旧数据                                                        |
+| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 4、bridge journal schema 3；旧格式拒绝，绝不转换或删除旧数据                                                        |
 | [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
 | [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
 | [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |
+| [github-pull-context.ts](../src/github-pull-context.ts) | 同仓开放 PR 的双方身份与版本核对，按固定 base...head 读取有界变更 |
+| [github-review-snapshot.ts](../src/github-review-snapshot.ts) | 对固定 head 使用 Git Data 读取完整有界文本树，核验 blob 内容与 Git 标识 |
+| [review-snapshot.ts](../src/review-snapshot.ts) | OpenClaw 每任务的只读 head 搜索及文件读取，关闭后不可用 |
+| [github-review.ts](../src/github-review.ts) | 固定 commit 的 COMMENT、按 bot/任务/版本标记核验真实回执 |
 | [github-publication.ts](../src/github-publication.ts) | 显式 writePolicy；基线/路径/模式检查；服务端分支、Git Data commit 和 draft PR；每次写入重授权             |
-| [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment 或 pull_request；none 已在存储置 skipped                                  |
+| [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment、review 或 pull_request；none 已在存储置 skipped                                  |
 | [outcomes.ts](../src/outcomes.ts)                     | source/target/runtime/产物/发布 schema；有界 payload，拒绝额外身份字段                                    |
 | [agent-config.ts](../src/agent-config.ts)             | type 必填；类型从 schema 推导，加载一次返回分离的 config/secrets；命令与工作区由管理员配置                |
-| [agent-store.ts](../src/agent-store.ts)               | schema v2 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
+| [agent-store.ts](../src/agent-store.ts)               | schema v3 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
 | [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
 | [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，接收已解析 token，不再读取凭据或保留空能力声明                            |
-| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），返回明确评论/none outcome                          |
+| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），PR 自动装入有界 diff，可选任务快照和正文型原生 Review                          |
 | [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
 | [runtime-workspace.ts](../src/runtime-workspace.ts)   | 干净 clone 的 origin/目标 SHA/元数据检查；共用索引校验拒绝隐藏修改；收集实际变更，不 clone/reset/push     |
 | [cli.ts](../src/cli.ts)                               | 初始化、校验、渲染、生命周期、agent run；不安装 harness/App 或替用户开启 writePolicy                      |

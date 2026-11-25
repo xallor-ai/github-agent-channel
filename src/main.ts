@@ -98,6 +98,7 @@ try {
       },
     },
     lookup,
+    github.reconcileReview.bind(github),
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(

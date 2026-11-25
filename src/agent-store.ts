@@ -49,16 +49,20 @@ export class AgentStore {
     }
     try {
       this.db = new DatabaseSync(path);
-      const exists = requireSchemaVersion(this.db, {
-        journal: ["id", "assignment", "result", "phase", "runtime"],
-      });
+      const exists = requireSchemaVersion(
+        this.db,
+        {
+          journal: ["id", "assignment", "result", "phase", "runtime"],
+        },
+        3,
+      );
       if (path !== ":memory:") chmodSync(path, 0o600);
       this.db.exec(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
       );
       if (!exists)
         this.db.exec(
-          "BEGIN IMMEDIATE; CREATE TABLE journal(id TEXT PRIMARY KEY,assignment TEXT NOT NULL,result TEXT,phase TEXT NOT NULL CHECK(phase IN ('running','pending','reported')),runtime TEXT); PRAGMA user_version=2; COMMIT;",
+          "BEGIN IMMEDIATE; CREATE TABLE journal(id TEXT PRIMARY KEY,assignment TEXT NOT NULL,result TEXT,phase TEXT NOT NULL CHECK(phase IN ('running','pending','reported')),runtime TEXT); PRAGMA user_version=3; COMMIT;",
         );
       this.transaction(() => {
         const running = this.db

@@ -5,7 +5,7 @@ GitHub Agent Channel 是通用 GitHub 通道。当前实现严格 v2 契约、Op
 | 目的                                  | 当前入口                                                                                                 |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | 成熟版范围与验收条件 | [产品契约](product-contract.md) |
-| PR 评审的版本、只读源码与分期验收（方案，未实现） | [实施方案](superpowers/plans/2026-11-25-pr-review-context.md) |
+| PR 评审配置、限制与分期验收 | [使用指南](pr-review.md) · [实施方案](superpowers/plans/2026-11-25-pr-review-context.md) |
 | 设备配对与仓库自助登记 | [命令与示例](agent-self-service.md) |
 | 仓库动态接入设计与交付边界 | [绑定生命周期](binding-lifecycle.md) |
 | Agent 如何委派、请求评审和核验回执 | [GitHub Agent Channel skill](../.agents/skills/github-agent-channel/SKILL.md) |

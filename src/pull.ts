@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { failureCodes } from "./runtime-failure.js";
+import { revisionSchema } from "./outcomes.js";
 import { z } from "zod";
 import { AccessDenied, type GitHubClient, type Task } from "./contracts.js";
 import {
@@ -14,7 +15,13 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const leaseSchema = z.string().min(32).max(256);
 const toolSchema = z.strictObject({
   leaseToken: leaseSchema,
-  name: z.enum(["read_issue", "read_file"]),
+  name: z.enum([
+    "read_issue",
+    "read_file",
+    "read_pull_diff",
+    "read_snapshot",
+    "review_access",
+  ]),
   args: z.unknown(),
 });
 const resultSchema = z.discriminatedUnion("status", [
@@ -105,7 +112,7 @@ export class PullCoordinator {
         z.strictObject({}).parse(await jsonBody(req, 4096));
         const leaseToken = randomBytes(32).toString("hex"),
           expiresAt = Date.now() + this.config.timeoutMs;
-        const task = this.store.claimAssignment(
+        let task = this.store.claimAssignment(
           workerId,
           hash(leaseToken),
           expiresAt,
@@ -115,6 +122,22 @@ export class PullCoordinator {
           return true;
         }
         try {
+          if (task.target.kind === "pull_request" && !task.target.revision) {
+            if (
+              task.source.event !== "issue_comment" ||
+              !this.github.resolvePullRevision
+            )
+              throw new AccessDenied("PR revision unavailable");
+            const revision = revisionSchema.parse(
+              await this.github.resolvePullRevision(task),
+            );
+            task = this.store.pinPullRevision(
+              task.id,
+              workerId,
+              hash(leaseToken),
+              revision,
+            );
+          }
           await this.github.authorize(task);
           this.assignment(task.id, leaseToken, workerId);
         } catch (error) {
@@ -162,7 +185,7 @@ export class PullCoordinator {
       if (action === "tool") {
         const data = toolSchema.parse(await jsonBody(req, 10000));
         const args =
-          data.name === "read_issue"
+          data.name !== "read_file"
             ? z.strictObject({}).parse(data.args)
             : z
                 .strictObject({ path: z.string().min(1).max(1024) })
@@ -170,10 +193,32 @@ export class PullCoordinator {
         const task = this.assignment(id, data.leaseToken, workerId);
         await this.github.authorize(task);
         this.assignment(id, data.leaseToken, workerId);
-        const output =
-          data.name === "read_issue"
-            ? await this.github.readIssue(task)
-            : await this.github.readFile(task, (args as { path: string }).path);
+        let output: unknown;
+        if (data.name === "read_file")
+          output = await this.github.readFile(
+            task,
+            (args as { path: string }).path,
+          );
+        else if (data.name === "read_issue") {
+          if (task.target.kind === "repository")
+            throw new AccessDenied("No issue scope");
+          output = await this.github.readIssue(task);
+        } else {
+          if (task.target.kind !== "pull_request" || !task.target.revision)
+            throw new AccessDenied("No pinned PR");
+          if (data.name === "read_pull_diff" && this.github.readPullDiff)
+            output = await this.github.readPullDiff(task);
+          else if (
+            (data.name === "review_access" || data.name === "read_snapshot") &&
+            this.store.activeBinding(task.installationId, task.repositoryId)
+              ?.deepReview === true
+          ) {
+            if (data.name === "review_access") output = { authorized: true };
+            else if (this.github.readReviewSnapshot)
+              output = await this.github.readReviewSnapshot(task);
+            else throw new AccessDenied("Snapshot unavailable");
+          } else throw new AccessDenied("Review capability not enabled");
+        }
         this.assignment(id, data.leaseToken, workerId);
         send(200, output);
         return true;

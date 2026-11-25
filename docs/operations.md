@@ -44,7 +44,7 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 ## v2 内部升级与回滚
 
-以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 3、连接器 journal 2）。不兼容的旧库须保留，改用新路径/卷。
+以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 4、连接器 journal 3）。不兼容的旧库须保留，改用新路径/卷。
 
 生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
@@ -76,6 +76,8 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
   "url": "https://github.com/OWNER/REPO/issues/123#issuecomment-456"
 }
 ```
+
+原生 Review 对账使用同一 PR 的 `https://github.com/OWNER/REPO/pull/123#pullrequestreview-456`。对照任务的 head SHA：服务端读取该 Review，核验 ID/URL、提交、配置的 bot、COMMENTED 状态、正文和任务标记；成功才记录 review 回执。即使 PR 已关闭、原绑定停用或原发起人失权，管理员仍可只读对账。服务端用受限于原安装及仓库 ID 的只读凭据核对仓库身份和 Review；安装已卸载或无法读回时，不能确认成功。不能核实时保留 unknown；不要重发以获取第二个回执。
 
 若决定关闭未成功投递，用 `{"confirmedReconciled":true,"resolution":"failed"}`。PR 发布对账使用同仓库的 /pull/N URL；comment 使用当前 target 对应的评论 URL。这些操作不重跑、不重发。新的执行须来自已启用规则下的新事件。
 

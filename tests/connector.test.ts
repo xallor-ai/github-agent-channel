@@ -422,3 +422,195 @@ test("completed oversized answer is a confirmed invalid response", async () => {
     { code: "runtime_response_invalid" },
   );
 });
+
+const revision = {
+  baseRepoId: 2,
+  headRepoId: 2,
+  baseSha: "a".repeat(40),
+  headSha: "b".repeat(40),
+};
+const pr: Task = {
+  ...task,
+  target: { kind: "pull_request", number: 1, revision },
+};
+const diff = {
+  untrusted: true,
+  revision,
+  changedFiles: 1,
+  files: [
+    {
+      path: "impl.ts",
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "+newImplementation()",
+      patchStatus: "provided",
+    },
+  ],
+  limitations: [],
+};
+const summary = {
+  status: "completed",
+  id: "result",
+  output: [
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Observed at the pinned head." }],
+    },
+  ],
+};
+function call(name: string, args: unknown) {
+  return {
+    status: "completed",
+    id: "tool",
+    output: [
+      {
+        type: "function_call",
+        call_id: "call",
+        name,
+        arguments: JSON.stringify(args),
+      },
+    ],
+  };
+}
+
+test("PR first input contains the assigned diff and exposes only scoped public tools", async () => {
+  let turn = 0;
+  const calls: string[] = [];
+  const connector = new OpenClawConnector(
+    { ...settings, timeoutMs: 5000 },
+    "secret",
+    async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      if (!turn++) {
+        assert.deepEqual(calls, ["read_pull_diff"]);
+        assert.deepEqual(JSON.parse(req.input[1].content), diff);
+        assert.deepEqual(
+          req.tools.map((t: { name: string }) => t.name),
+          ["read_issue", "read_file"],
+        );
+        assert.match(req.tools[1].description, /PR head/);
+        return Response.json(call("read_file", { path: "impl.ts" }));
+      }
+      assert.match(req.input[0].output, /only-at-head/);
+      return Response.json(summary);
+    },
+  );
+  const result = await connector.run(pr, async (name, args) => {
+    calls.push(name);
+    if (name === "read_pull_diff") return diff;
+    assert.deepEqual(args, { path: "impl.ts" });
+    return { content: "only-at-head", revision };
+  });
+  assert.deepEqual(result.publication, { kind: "comment" });
+  assert.match(result.text, /1\/1 changed files/);
+  assert.ok(result.text.includes("head " + revision.headSha));
+  assert.ok(result.text.includes("base " + revision.baseSha));
+});
+
+test("missing or mixed PR revision fails before dispatch to OpenClaw", async () => {
+  let requests = 0;
+  const connector = new OpenClawConnector(settings, "secret", async () => {
+    requests++;
+    return Response.json(summary);
+  });
+  await assert.rejects(
+    connector.run(
+      { ...pr, target: { kind: "pull_request", number: 1 } },
+      async () => diff,
+    ),
+    /pinned pull request/,
+  );
+  await assert.rejects(
+    connector.run(pr, async () => ({
+      ...diff,
+      revision: { ...revision, headSha: "d".repeat(40) },
+    })),
+    /assigned revision/,
+  );
+  assert.equal(requests, 0);
+});
+
+test("deep review searches then reads an unchanged file locally under fresh authorization", async () => {
+  const calls: string[] = [];
+  let turn = 0;
+  const connector = new OpenClawConnector(
+    { ...settings, timeoutMs: 5000, deepReview: true, publishReview: true },
+    "secret",
+    async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      if (turn++ === 0) {
+        assert.deepEqual(
+          req.tools.map((t: { name: string }) => t.name),
+          ["read_issue", "read_file", "search_repo"],
+        );
+        assert.ok(!JSON.stringify(req.input).includes("unchanged.ts"));
+        return Response.json(call("search_repo", { query: "impl()" }));
+      }
+      const output = JSON.parse(req.input[0].output);
+      if (turn === 2) {
+        assert.deepEqual(output.matches, [
+          { path: "unchanged.ts", line: 2, text: "return impl();" },
+        ]);
+        return Response.json(
+          call("read_file", { path: output.matches[0].path }),
+        );
+      }
+      assert.match(output.text, /return impl/);
+      return Response.json(summary);
+    },
+  );
+  const result = await connector.run(pr, async (name) => {
+    calls.push(name);
+    if (name === "read_pull_diff") return diff;
+    if (name === "read_snapshot")
+      return {
+        sha: revision.headSha,
+        complete: true,
+        files: [{ path: "unchanged.ts", text: "// fixture\nreturn impl();\n" }],
+      };
+    assert.equal(name, "review_access");
+    return { authorized: true };
+  });
+  assert.deepEqual(calls, [
+    "read_pull_diff",
+    "review_access",
+    "read_snapshot",
+    "review_access",
+    "review_access",
+    "review_access",
+    "review_access",
+    "review_access",
+  ]);
+  assert.deepEqual(result.publication, { kind: "review" });
+  assert.match(result.text, /snapshot searches: 1, files read: 1/);
+});
+
+test("revocation after local search withholds results and prevents another model request", async () => {
+  let grants = 0,
+    requests = 0;
+  const connector = new OpenClawConnector(
+    { ...settings, timeoutMs: 5000, deepReview: true },
+    "secret",
+    async () => {
+      requests++;
+      return Response.json(call("search_repo", { query: "private" }));
+    },
+  );
+  await assert.rejects(
+    connector.run(pr, async (name) => {
+      if (name === "read_pull_diff") return diff;
+      if (name === "read_snapshot")
+        return {
+          sha: revision.headSha,
+          complete: true,
+          files: [{ path: "immutable", text: "private" }],
+        };
+      return { authorized: ++grants < 4 };
+    }),
+    /access not confirmed/,
+  );
+  assert.equal(grants, 4);
+  assert.equal(requests, 1);
+});

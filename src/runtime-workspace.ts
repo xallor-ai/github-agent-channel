@@ -161,6 +161,19 @@ export function inspectWorkspace(path: string, task: Task) {
   )
     throw Error("Workspace must be clean");
   const baseSha = git(cwd, "rev-parse", "HEAD");
+  if (task.target.kind === "pull_request") {
+    const pin = task.target.revision;
+    if (
+      !pin ||
+      pin.baseRepoId !== task.repositoryId ||
+      pin.headRepoId !== task.repositoryId ||
+      pin.headSha !== baseSha
+    )
+      throw Error(
+        "Workspace must match the pinned PR head in the bound repository",
+      );
+  }
+
   if (
     task.target.kind === "repository" &&
     task.target.sha !== undefined &&

@@ -20,6 +20,8 @@ export interface Binding {
   repo: string;
   enabled: boolean;
   events: string[];
+  nativeReview?: boolean;
+  deepReview?: boolean;
   requireMention?: boolean;
   triggerLabel?: string;
   writePolicy?: {
@@ -80,8 +82,15 @@ export interface NewTask {
   target: GitHubTarget;
   source: { event: string; action?: string; commentId?: number };
 }
+export interface PullRevision {
+  baseSha: string;
+  headSha: string;
+  baseRepoId: number;
+  headRepoId: number;
+}
 export type GitHubTarget =
-  | { kind: "issue" | "pull_request"; number: number }
+  | { kind: "issue"; number: number }
+  | { kind: "pull_request"; number: number; revision?: PullRevision }
   | { kind: "repository"; ref?: string; sha?: string };
 export type ChangedFile = { path: string; content: string | null };
 export type Artifact =
@@ -97,6 +106,7 @@ export type Artifact =
   | { kind: "change_set"; name: string; baseSha: string; files: ChangedFile[] };
 export type PublicationRequest =
   | { kind: "comment" }
+  | { kind: "review" }
   | { kind: "none" }
   | {
       kind: "pull_request";
@@ -108,7 +118,7 @@ export type PublicationRequest =
     };
 export type RuntimeEvent = { kind: "started"; runId: string; provider: string };
 export type PublicationReceipt = {
-  kind: "comment" | "pull_request";
+  kind: "comment" | "pull_request" | "review";
   id?: number;
   url: string;
 };
@@ -139,6 +149,17 @@ export interface RuntimeConnector {
 }
 export interface GitHubClient {
   authorize(task: Task): Promise<void>;
+  resolvePullRevision?(task: Task): Promise<PullRevision>;
+  readPullDiff?(task: Task): Promise<unknown>;
+  readReviewSnapshot?(task: Task): Promise<unknown>;
+  publishReview?(
+    task: Task,
+    text: string,
+  ): Promise<{ id: number; url: string }>;
+  reconcileReview?(
+    task: Task,
+    id: number,
+  ): Promise<{ id: number; url: string }>;
   readIssue(task: Task): Promise<unknown>;
   readFile(task: Task, path: string): Promise<unknown>;
   publishComment(

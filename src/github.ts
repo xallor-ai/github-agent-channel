@@ -1,7 +1,11 @@
+import { collectReviewSnapshot } from "./github-review-snapshot.js";
+import { readPinnedPullFile } from "./github-pinned-file.js";
+import { publishNativeReview, reconcileNativeReview } from "./github-review.js";
 import {
   publishDraftPullRequest,
   validateProposal,
 } from "./github-publication.js";
+import { checkPull, collectPullDiff } from "./github-pull-context.js";
 import { App } from "@octokit/app";
 import { Octokit } from "@octokit/core";
 import {
@@ -61,6 +65,20 @@ export class OctokitGitHubClient implements GitHubClient {
   }
   async #client(task: Task, write = false): Promise<Octokit> {
     this.#binding(task);
+    return this.#installationClient(
+      task,
+      write ? { ...permissions, contents: "write" } : permissions,
+    );
+  }
+  async #installationClient(
+    task: Task,
+    scope: {
+      metadata: "read";
+      pull_requests: "read" | "write";
+      contents?: "read" | "write";
+      issues?: "write";
+    },
+  ): Promise<Octokit> {
     const installation = await this.#app.getInstallationOctokit(
       task.installationId,
     );
@@ -69,7 +87,7 @@ export class OctokitGitHubClient implements GitHubClient {
     const auth = (await installation.auth({
       type: "installation",
       repositoryIds: [task.repositoryId],
-      permissions: write ? { ...permissions, contents: "write" } : permissions,
+      permissions: scope,
     })) as { token: string };
     return new Octokit({
       auth: auth.token,
@@ -104,15 +122,10 @@ export class OctokitGitHubClient implements GitHubClient {
     this.#binding(task);
     return client;
   }
-  async authorize(task: Task): Promise<void> {
+  async #checkedClient(task: Task) {
     const client = await this.#authorized(task);
     if (task.target.kind === "pull_request") {
-      const { data } = await client.request(
-        "GET /repos/{owner}/{repo}/pulls/{pull_number}",
-        { owner: task.owner, repo: task.repo, pull_number: task.target.number },
-      );
-      if (data.state !== "open" || data.merged !== false)
-        throw new AccessDenied("Target pull request is not confirmed open");
+      await checkPull(client, task);
     } else if (task.status === "failed" && task.target.kind === "issue") {
       const { data } = await client.request(
         "GET /repos/{owner}/{repo}/issues/{issue_number}",
@@ -125,6 +138,36 @@ export class OctokitGitHubClient implements GitHubClient {
       if (data.state !== "open")
         throw new AccessDenied("Failure notice target is not confirmed open");
     }
+    this.#binding(task);
+    return client;
+  }
+  async resolvePullRevision(task: Task) {
+    const client = await this.#authorized(task);
+    const { revision } = await checkPull(client, task, true);
+    this.#binding(task);
+    return revision;
+  }
+  async authorize(task: Task): Promise<void> {
+    await this.#checkedClient(task);
+  }
+  async readPullDiff(task: Task) {
+    const client = await this.#authorized(task);
+    const initial = await checkPull(client, task);
+    this.#binding(task);
+    return collectPullDiff(client, task, initial, () => this.authorize(task));
+  }
+  async readReviewSnapshot(task: Task) {
+    const client = await this.#authorized(task);
+    const { revision } = await checkPull(client, task);
+    this.#binding(task);
+    const snapshot = await collectReviewSnapshot(
+      client,
+      this.#fetch,
+      { owner: task.owner, repo: task.repo },
+      revision.headSha,
+    );
+    await this.authorize(task);
+    return snapshot;
   }
   async readIssue(task: Task): Promise<unknown> {
     if (
@@ -134,7 +177,7 @@ export class OctokitGitHubClient implements GitHubClient {
       task.target.number < 1
     )
       throw new AccessDenied("Task has no issue scope");
-    const client = await this.#authorized(task);
+    const client = await this.#checkedClient(task);
     const { data } = await client.request(
       "GET /repos/{owner}/{repo}/issues/{issue_number}",
       { owner: task.owner, repo: task.repo, issue_number: task.target.number },
@@ -156,7 +199,19 @@ export class OctokitGitHubClient implements GitHubClient {
       path.split("/").some((p) => !p || p === ".." || p === ".")
     )
       throw new Error("Invalid repository file path");
-    const client = await this.#authorized(task);
+    const client = await this.#checkedClient(task);
+    if (task.target.kind === "pull_request") {
+      const revision = task.target.revision!;
+      const result = await readPinnedPullFile(
+        client,
+        this.#fetch,
+        { owner: task.owner, repo: task.repo },
+        revision.headSha,
+        path,
+      );
+      await this.authorize(task);
+      return { untrusted: true, revision, path, ...result };
+    }
     const response = await client
       .request("GET /repos/{owner}/{repo}/contents/{path}", {
         owner: task.owner,
@@ -182,7 +237,11 @@ export class OctokitGitHubClient implements GitHubClient {
       throw new Error("Expected a file of at most 128 KiB");
     const bytes = Buffer.from(data.content, "base64");
     if (bytes.length > MAX_FILE) throw new Error("File exceeds 128 KiB");
-    return { untrusted: true, path, content: bytes.toString("utf8") };
+    return {
+      untrusted: true,
+      path,
+      content: bytes.toString("utf8"),
+    };
   }
   private async authorizeWrite(task: Task): Promise<void> {
     try {
@@ -206,6 +265,61 @@ export class OctokitGitHubClient implements GitHubClient {
       () => this.#binding(task),
     );
   }
+  async publishReview(task: Task, text: string) {
+    const client = await this.#authorized(task).catch(() => {
+      throw new AccessDenied(
+        "Review authorization unavailable before dispatch",
+      );
+    });
+    return publishNativeReview(
+      task,
+      text,
+      client,
+      this.#config.github.botLogin,
+      async () => {
+        await this.authorize(task);
+        if (this.#binding(task).nativeReview !== true)
+          throw new AccessDenied("Native review publication is not enabled");
+      },
+    );
+  }
+  async reconcileReview(task: Task, id: number) {
+    // Only the authenticated admin resolution route calls this read-only path.
+    // A retired binding/actor cannot grant another write, or prevent auditing an old one.
+    if (
+      task.deliveryStatus !== "unknown" ||
+      task.outcome?.publication.kind !== "review" ||
+      task.target.kind !== "pull_request" ||
+      task.target.revision?.baseRepoId !== task.repositoryId ||
+      task.target.revision?.headRepoId !== task.repositoryId ||
+      ![task.installationId, task.repositoryId, id].every(
+        (n) => Number.isSafeInteger(n) && n > 0,
+      )
+    )
+      throw new AccessDenied("Invalid persisted review scope");
+    const client = await this.#installationClient(task, {
+      metadata: "read",
+      pull_requests: "read",
+    });
+    const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
+      owner: task.owner,
+      repo: task.repo,
+    });
+    if (
+      repo.id !== task.repositoryId ||
+      repo.name !== task.repo ||
+      repo.owner.login !== task.owner
+    )
+      throw new AccessDenied(
+        "Original repository identity cannot be confirmed",
+      );
+    return reconcileNativeReview(
+      task,
+      id,
+      client,
+      this.#config.github.botLogin,
+    );
+  }
   async publishComment(
     task: Task,
     text: string,
@@ -220,12 +334,24 @@ export class OctokitGitHubClient implements GitHubClient {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(task.id))
       throw new Error("Invalid task marker ID");
     const marker = `<!-- github-agent-channel:${task.id} -->`;
-    const body = `${text}\n\n${marker}`;
+    const version =
+      task.target.kind === "pull_request" && task.target.revision
+        ? `\n\nPR base: ${task.target.revision.baseSha}; head: ${task.target.revision.headSha}`
+        : "";
+    const body = `${text}${version}\n\n${marker}`;
     if (!text.trim() || body.length > 20000)
       throw new Error(
         "Response must contain text and fit within 20000 characters",
       );
     const client = await this.#authorized(task);
+    if (task.target.kind === "pull_request") {
+      try {
+        await checkPull(client, task);
+      } catch {
+        throw new AccessDenied("Cannot confirm target pull request revision");
+      }
+      this.#binding(task);
+    }
     for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
       const { data } = await client.request(
         "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -243,6 +369,10 @@ export class OctokitGitHubClient implements GitHubClient {
           comment.body?.includes(marker),
       );
       if (existing) {
+        if (task.target.kind === "pull_request" && existing.body !== body)
+          throw new AmbiguousExecution(
+            "Cannot confirm version of existing PR comment",
+          );
         if (
           typeof existing.id !== "number" ||
           !Number.isSafeInteger(existing.id) ||

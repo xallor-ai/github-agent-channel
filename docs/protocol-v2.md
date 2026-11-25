@@ -25,6 +25,8 @@ writeProfiles:
 
 评论/读取需要 Metadata/Contents Read、Issues/Pull requests Write；PR 发布还需 GitHub App **Contents Read and write**，组织安装方批准新增权限。没有匹配的 writeProfiles 则禁止 PR 发布；设备无权自行扩大服务端写策略。普通只读调用仍申请只读 contents token。
 
+深评与原生 Review 由仓库绑定的 `deepReview` / `nativeReview` 和 OpenClaw 对应的运行时开关控制，均默认关闭；不会授权 Git Data 写入。配置示例见[评审指南](pr-review.md)。
+
 allowedPaths 支持精确文件和以 `/` 或 `/**` 结尾的目录前缀；不是通用 glob。拒绝 `.git`、workflow、路径越界、重复/大小写冲突、symlink/submodule 及不支持的文件模式。文件变更总上限 100 个/512 KiB；policy 可设更低限制。
 
 ## 网络协议
@@ -39,18 +41,18 @@ allowedPaths 支持精确文件和以 `/` 或 `/**` 结尾的目录前缀；不�
 | `POST /connector/v2/bindings/apply` | 设备 Bearer；提交指定仓库、expectedRevision、declaration，返回生效记录 |
 | `POST /connector/v2/claim`                | 设备 Bearer，空对象；204 或 `{task,leaseToken,expiresAt}`                         |
 | `POST /connector/v2/tasks/<id>/execution` | `{leaseToken,event:{kind:"started",provider,runId}}`；只记录当前 assignment 的运行标识 |
-| `POST /connector/v2/tasks/<id>/tool`      | `{leaseToken,name,args}`；当前受控读取工具为 read_issue/read_file                      |
+| `POST /connector/v2/tasks/<id>/tool`      | `{leaseToken,name,args}`；按 target/租约授权；PR 可用 read_pull_diff；review_access、read_snapshot 为连接器快照操作，不能指定任意仓库或 SHA                      |
 | `POST /connector/v2/tasks/<id>/result`    | `{leaseToken,status:"succeeded",outcome}` 或 `{leaseToken,status:"failed"或"unknown"}` |
 
-管理接口 `POST /admin/device-invites` 和 `POST /admin/device-revoke` 仅供受控管理入口使用，不经公网代理。所有任务的 target/source 必填。Issue/PR 的号码在 target.number，仓库目标可以携带 ref/sha；ACP 对明确的 target.sha 校验工作区 HEAD，不匹配时拒绝启动，不自动切分支；评论 ID 只在原始 source.commentId。安装、仓库和 actor 来自服务端，不允许 Runtime 提交替换字段。
+管理接口 `POST /admin/device-invites` 和 `POST /admin/device-revoke` 仅供受控管理入口使用，不经公网代理。所有任务的 target/source 必填。Issue/PR 的号码在 target.number，仓库目标可以携带 ref/sha；ACP 对明确的 target.sha 校验工作区 HEAD，不匹配时拒绝启动，不自动切分支；评论 ID 只在原始 source.commentId。PR 的 target.revision 保存 baseSha、headSha、baseRepoId 和 headRepoId；评论任务在授权领取时固定版本后再交付。安装、仓库和 actor 来自服务端，不允许 Runtime 提交替换字段。
 
-成功 outcome 必须包含 text、artifacts 数组、publication 对象。publication 为 comment、none 或带 baseBranch/baseSha/files 的 pull_request。支持 text、link、test_report、change_set 产物。结果有界并严格拒绝额外字段；相同 canonical outcome 重传仅确认，内容不同返回409。HTTPS edge 支持2MB结果正文，实际结果 schema 有更细的限制。
+成功 outcome 必须包含 text、artifacts 数组、publication 对象。publication 为 comment、review（固定版本 PR 的 COMMENT 总评）、none 或带 baseBranch/baseSha/files 的 pull_request。支持 text、link、test_report、change_set 产物。结果有界并严格拒绝额外字段；相同 canonical outcome 重传仅确认，内容不同返回409。HTTPS edge 支持2MB结果正文，实际结果 schema 有更细的限制。
 
-publication=none 保存成果并将 deliveryStatus 置 skipped；comment/PR 则进入独立发布阶段，成功记录 publicationReceipt。status=succeeded 仅证明执行结果已保存，不能代替发布成功。模型文字不能替代实际 diff 或测试退出码。
+publication=none 保存成果并将 deliveryStatus 置 skipped；comment/review/pull_request 则进入独立发布阶段，成功记录 publicationReceipt。status=succeeded 仅证明执行结果已保存，不能代替发布成功。模型文字不能替代实际 diff 或测试退出码。
 
 ## 使用新状态库
 
-云端任务与绑定共享 schema 3；设备身份另库持久化，内网 journal 为 schema 2。旧格式直接抛出 StorageSchemaError；没有迁移、修复或清空行为。
+云端任务与绑定共享 schema 4；设备身份另库持久化，内网 journal 为 schema 3。协议路径仍是 v2，须使用同一修订的服务端和 bridge。旧格式直接抛出 StorageSchemaError；没有迁移、修复或清空行为。
 
 1. 对已有旧部署，先停止接收新任务，完成现有任务与 unknown 对账，再停止旧 bridge 和服务端。
 2. 保留旧配置和数据库备份。准备新的 dataFile/stateFile；容器使用新的 projectName/数据卷。不要把旧库挂进 v2，也不要在尚有任务运行时删除旧卷。

@@ -120,11 +120,22 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
     pull_request: {
       number: 9,
       state: "open",
+      base: { sha: "a".repeat(40), repo: { id: 2 } },
+      head: { sha: "b".repeat(40), repo: { id: 2 } },
       title: "Review",
       body: "changes",
     },
   });
-  assert.deepEqual(pr?.target, { kind: "pull_request", number: 9 });
+  assert.deepEqual(pr?.target, {
+    kind: "pull_request",
+    number: 9,
+    revision: {
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      baseRepoId: 2,
+      headRepoId: 2,
+    },
+  });
   const defaults = {
     ...config,
     bindings: config.bindings.map((b) => ({

@@ -248,6 +248,35 @@ export class TaskStore {
       .get(taskId, workerId, leaseHash, now);
     return row ? this.decodeTask(row) : undefined;
   }
+  pinPullRevision(
+    id: string,
+    workerId: string,
+    leaseHash: string,
+    revision: import("./contracts.js").PullRevision,
+  ): Task {
+    return this.transaction(() => {
+      const task = this.assignedTask(id, workerId, leaseHash);
+      if (
+        !task ||
+        task.target.kind !== "pull_request" ||
+        this.activeBinding(task.installationId, task.repositoryId)?.id !==
+          task.bindingId
+      )
+        throw new AssignmentConflict("PR claim no longer active");
+      if (
+        task.target.revision ||
+        task.source.event !== "issue_comment" ||
+        revision.baseRepoId !== task.repositoryId ||
+        revision.headRepoId !== task.repositoryId
+      )
+        throw new AssignmentConflict("Cannot resolve this revision");
+      const target = { ...task.target, revision };
+      this.db
+        .prepare("UPDATE tasks SET target=? WHERE id=? AND status='running'")
+        .run(JSON.stringify(target), id);
+      return { ...task, target };
+    });
+  }
   finishAssignment(
     taskId: string,
     workerId: string,

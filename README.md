@@ -30,7 +30,7 @@ GitHub ──签名Webhook──▶ Channel服务 ──评论/PR──▶ GitHu
 
 GitHub App的注册、权限、安装与事件订阅引用配套书稿[附录 B](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20B%20GitHub%20CLI%E3%80%81API%20%E5%92%8C%20GitHub%20App.md)，Webhook验签与事件接收引用[附录 C](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20C%20Webhook%20%E4%B8%8E%E4%BA%8B%E4%BB%B6%E6%8E%A5%E6%94%B6.md)。配置主线保留本服务所需的交接参数，不重复维护注册教程。
 
-[v2 契约与新状态库要求](docs/protocol-v2.md) · [ACP 编码接入](docs/acp-setup.md) · [本轮验证记录](docs/runtime-neutral-validation-20261122.md)
+[PR 评审：版本、深度搜索与发布](docs/pr-review.md) · [v2 契约与新状态库要求](docs/protocol-v2.md) · [ACP 编码接入](docs/acp-setup.md) · [本轮验证记录](docs/runtime-neutral-validation-20261122.md)
 
 ## 从哪里开始
 
@@ -57,7 +57,7 @@ npm run channel -- agent run ./agent-data/agent.local.yaml
 
 ## 开发与验证
 
-修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。OpenClaw 读取差异并回帖、OpenCode ACP 实际编码→验证→PR→Channel 评审均已有[真实验收记录](docs/acp-live-validation-20261124.md)。
+修改通过 Channel 的真实评审流程与证据见[评审闭环](docs/channel-review-validation-20261123.md)。历史验收使用提供的差异材料回帖；自动读取固定版本与原生 Review 另待真实验收。OpenCode ACP 实际编码→验证→PR→Channel 评审均已有[真实验收记录](docs/acp-live-validation-20261124.md)。
 
 ```sh
 npm test

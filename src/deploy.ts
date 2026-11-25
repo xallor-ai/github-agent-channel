@@ -185,7 +185,7 @@ location ^~ /connector/v2/ {
     ${proxy}
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;
-    proxy_read_timeout 15s;
+    proxy_read_timeout 150s;
 }
 # No Channel catch-all route: /tasks/* stays private. Existing site routes are unchanged.
 `;

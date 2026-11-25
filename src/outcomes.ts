@@ -8,11 +8,17 @@ export const runtimeEventSchema = z.strictObject({
   runId: z.string().min(1).max(1024),
 });
 export const publicationReceiptSchema = z.strictObject({
-  kind: z.enum(["comment", "pull_request"]),
+  kind: z.enum(["comment", "pull_request", "review"]),
   id: z.number().int().positive().safe().optional(),
   url: z.string().url().max(2048),
 });
 const sha = z.string().regex(/^[0-9a-f]{40}$/i);
+export const revisionSchema = z.strictObject({
+  baseSha: sha,
+  headSha: sha,
+  baseRepoId: z.number().int().positive().safe(),
+  headRepoId: z.number().int().positive().safe(),
+});
 export const targetSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("issue"),
@@ -20,6 +26,7 @@ export const targetSchema = z.discriminatedUnion("kind", [
   }),
   z.strictObject({
     kind: z.literal("pull_request"),
+    revision: revisionSchema,
     number: z.number().int().positive().safe(),
   }),
   z.strictObject({
@@ -92,6 +99,7 @@ const artifactSchema = z.discriminatedUnion("kind", [
 ]);
 const publicationSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
+  z.strictObject({ kind: z.literal("review") }),
   z.strictObject({ kind: z.literal("comment") }),
   z.strictObject({
     kind: z.literal("pull_request"),
@@ -124,6 +132,13 @@ export function validateOutcome(value: unknown): RuntimeResult {
 }
 export function validateTaskOutcome(task: Task, outcome: RuntimeResult): void {
   const publication = outcome.publication;
+  if (
+    publication.kind === "review" &&
+    (task.target.kind !== "pull_request" ||
+      !task.target.revision ||
+      !outcome.text.trim())
+  )
+    throw Error("Review requires pinned PR and text");
   if (
     publication.kind === "comment" &&
     (task.target.kind === "repository" || !outcome.text.trim())

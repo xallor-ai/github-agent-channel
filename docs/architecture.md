@@ -31,7 +31,7 @@ flowchart LR
 
 四态受理、配置修订及撤权/换绑顺序见[绑定生命周期](binding-lifecycle.md)。
 
-PR 评审目标架构（尚未实现）：服务端固定被审版本，执行设施准备只读源码，Runtime 按任务读取。方案图、现状差距和验收见[实施方案](superpowers/plans/2026-11-25-pr-review-context.md)。
+PR 事件固定双方仓库与 base/head；PR 会话评论在领取时解析并持久化版本。服务端复核同一开放 PR，提供受限变更列表与补丁。OpenClaw 可选择只读版本快照做仓库搜索；发布器可按仓库启用固定提交的 COMMENT Review。参见[配置与验收边界](pr-review.md)。
 
 ## 当前实现调用链
 
@@ -46,7 +46,7 @@ flowchart LR
   F --> A[官方 ACP SDK]
   A --> H[已有编码 harness 与准备好的工作区]
   Q --> P[受控 publication]
-  P -->|评论或 draft PR| GH
+  P -->|评论、原生 Review 或 draft PR| GH
 ```
 
 ## 核心职责

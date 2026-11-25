@@ -47,12 +47,31 @@ export class DeliveryWorker {
         }
         if (!delivery.outcome) throw Error("Missing publication outcome");
         const publication = delivery.outcome.publication;
-        if (publication.kind === "none")
-          throw new AccessDenied("No publication requested");
-        const result =
-          publication.kind === "pull_request"
-            ? await this.github.publishPullRequest(delivery, publication)
-            : await this.github.publishComment(delivery, delivery.outcome.text);
+        let result: { id: number; url: string };
+        switch (publication.kind) {
+          case "none":
+            throw new AccessDenied("No publication requested");
+          case "review":
+            if (!this.github.publishReview)
+              throw new AccessDenied("Native reviews unavailable");
+            result = await this.github.publishReview(
+              delivery,
+              delivery.outcome.text,
+            );
+            break;
+          case "pull_request":
+            result = await this.github.publishPullRequest(
+              delivery,
+              publication,
+            );
+            break;
+          case "comment":
+            result = await this.github.publishComment(
+              delivery,
+              delivery.outcome.text,
+            );
+            break;
+        }
         this.store.markDelivery(delivery.id, "sent", {
           kind: publication.kind,
           ...result,

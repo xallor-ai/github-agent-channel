@@ -17,6 +17,8 @@ export const bindingDeclarationSchema = z
   .strictObject({
     enabled: z.boolean(),
     requireMention: z.boolean().default(true),
+    nativeReview: z.boolean().optional(),
+    deepReview: z.boolean().optional(),
     events: z
       .array(bindingEvent)
       .max(bindingEvent.options.length)
@@ -193,6 +195,8 @@ export class BindingRegistry {
         current.repo === who.repo &&
         current.enabled === next.enabled &&
         current.requireMention === next.requireMention &&
+        !!current.nativeReview === !!next.nativeReview &&
+        !!current.deepReview === !!next.deepReview &&
         current.triggerLabel === next.triggerLabel &&
         JSON.stringify(current.events) === JSON.stringify(next.events);
       if (expectedRevision !== rev && !(same && expectedRevision === rev - 1))

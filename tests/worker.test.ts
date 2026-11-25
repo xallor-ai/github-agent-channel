@@ -37,11 +37,27 @@ function github(overrides: Partial<GitHubClient> = {}): GitHubClient {
     ...overrides,
   };
 }
-function ready(t: test.TestContext) {
+function ready(t: test.TestContext, native = false) {
   const store = new TaskStore(":memory:");
   t.after(() => store.close());
   seedBinding(store, input, "worker");
-  const task = store.accept(input).task;
+  const task = store.accept(
+    native
+      ? {
+          ...input,
+          target: {
+            kind: "pull_request",
+            number: 4,
+            revision: {
+              baseRepoId: 2,
+              headRepoId: 2,
+              baseSha: "a".repeat(40),
+              headSha: "b".repeat(40),
+            },
+          },
+        }
+      : input,
+  ).task;
   store.claimAssignment("worker", "hash", Date.now() + 60000);
   store.finishAssignment(
     task.id,
@@ -52,7 +68,7 @@ function ready(t: test.TestContext) {
       outcome: {
         text: "answer",
         artifacts: [],
-        publication: { kind: "comment" },
+        publication: { kind: native ? "review" : "comment" },
       },
     },
     "digest",
@@ -199,6 +215,48 @@ test("disabling a binding during authorization prevents the reserved publication
   ).tick();
   assert.equal(attempts, 0);
   assert.equal(store.get(task.id)?.deliveryStatus, "failed");
+});
+
+test("native review is never downgraded or replayed", async (t) => {
+  for (const mode of ["missing", "lost", "ok"] as const) {
+    const { store, task } = ready(t, true);
+    let reviews = 0;
+    let comments = 0;
+    const url = "https://github.com/org/repo/pull/4#pullrequestreview-12";
+    const worker = new DeliveryWorker(
+      store,
+      github({
+        publishComment: async () => {
+          comments++;
+          throw Error("unexpected");
+        },
+        ...(mode === "missing"
+          ? {}
+          : {
+              publishReview: async () => {
+                reviews++;
+                if (mode === "lost") throw new AmbiguousExecution();
+                return { id: 12, url };
+              },
+            }),
+      }),
+    );
+    await worker.tick();
+    await worker.tick();
+    assert.equal(comments, 0);
+    assert.equal(reviews, mode === "missing" ? 0 : 1);
+    const current = store.get(task.id);
+    assert.equal(
+      current?.deliveryStatus,
+      mode === "ok" ? "sent" : mode === "lost" ? "unknown" : "failed",
+    );
+    if (mode === "ok")
+      assert.deepEqual(current?.publicationReceipt, {
+        kind: "review",
+        id: 12,
+        url,
+      });
+  }
 });
 
 test("a confirmed analysis failure sends one status notice without inventing an outcome; unknown execution is silent", async (t) => {

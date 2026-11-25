@@ -96,7 +96,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "resultDigest",
       ],
     },
-    3,
+    4,
   );
   db.exec(
     "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
@@ -116,5 +116,5 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE TABLE deliveries(deliveryId TEXT PRIMARY KEY,taskId TEXT NOT NULL REFERENCES tasks(id));
     CREATE TABLE assignments(taskId TEXT PRIMARY KEY REFERENCES tasks(id),workerId TEXT NOT NULL,leaseHash TEXT NOT NULL,expiresAt INTEGER NOT NULL,resultDigest TEXT);
     CREATE INDEX assignment_worker ON assignments(workerId);
-    PRAGMA user_version=3; COMMIT;`);
+    PRAGMA user_version=4; COMMIT;`);
 }

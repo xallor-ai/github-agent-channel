@@ -53,6 +53,8 @@ npm run channel -- agent repo status xallor.local.yaml agent.local.yaml
 
 **改规则：** 先 `status`，核对所有者、现有事件和修订；把 `expectedRevision` 改成刚读到的修订，再修改 `declaration` 并 `apply`。例如保留评论提及，同时增加 Issue 创建时的提及，可写 `events: [issue_comment.created, issues.opened]`。只有启用 `issues.labeled` 时才能并且必须设置 `triggerLabel`。仓库事件与写仓权限独立。
 
+**PR 评审：** 绑定声明可选 `deepReview: true` 和 `nativeReview: true`，分别允许读取任务源码快照和发布正文型原生 Review；使用对应 OpenClaw 配置并显式 apply。规则变化产生新修订，不能授予 draft PR 写权限。详见[配置、限制和回执](pr-review.md)。
+
 **停用：** 先查询最新修订，把文件改为下例后显式 `apply`（2 仅为示例）。停止进程、掉线、删除或损坏文件均不会停用仓库。
 
 ```yaml
