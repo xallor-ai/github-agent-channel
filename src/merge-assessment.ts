@@ -19,6 +19,7 @@ const label = (n: number) =>
 const source = z.number().int().positive().safe().nullable();
 const context = label(128);
 const status = z.enum(["passed", "failed", "pending", "unknown"]);
+const refName = label(255);
 const publicLink = z
   .string()
   .max(2048)
@@ -43,6 +44,16 @@ export const mergeFactsSchema = z.strictObject({
   draft: z.boolean().nullable(),
   conflict: z.enum(["none", "conflicting", "unknown"]),
   testMergeSha: sha.nullable(),
+  testMergeChecksKnown: z.boolean(),
+  headChecksKnown: z.boolean(),
+  baseRefName: refName.nullable(),
+  observedRevision: z
+    .strictObject({
+      baseSha: sha,
+      headSha: sha,
+      baseRefName: refName.nullable(),
+    })
+    .nullable(),
   rules: z.strictObject({
     known: z.boolean(),
     checks: z.array(z.strictObject({ name: context, appId: source })).max(100),
@@ -58,6 +69,7 @@ export const mergeFactsSchema = z.strictObject({
         sha,
         status,
         url: publicLink.nullable(),
+        required: z.boolean().nullable(),
       }),
     )
     .max(200),
@@ -104,12 +116,31 @@ export function assessMerge(f: MergeFacts): MergeAssessment {
   if (f.state === "closed" || f.state === "merged") {
     a.platform = "not_applicable";
     a.recommendation = "not_applicable";
+    if (!f.observedRevision)
+      a.missing.push("已确认 PR 终态，但无法确认该状态对应的版本");
+    else if (
+      f.observedRevision.baseSha !== f.base.sha ||
+      f.observedRevision.headSha !== f.head.sha ||
+      f.observedRevision.baseRefName !== f.baseRefName
+    ) {
+      a.details.push("终态对应实际观察版本，不能据此认定任务固定的版本已合入");
+    }
     return a;
   }
   if (!f.stable) {
     a.missing.push("未取得稳定的 base/head 快照；请重新查询当前版本");
     return a;
   }
+  const revisionMatches =
+    f.observedRevision !== null &&
+    f.observedRevision.baseSha === f.base.sha &&
+    f.observedRevision.headSha === f.head.sha &&
+    f.observedRevision.baseRefName === f.baseRefName;
+  if (!revisionMatches) {
+    a.missing.push("未能将最终观察版本与任务版本对应，请重新查询");
+    return a;
+  }
+  if (f.baseRefName === null) a.missing.push("未确认目标分支");
   if (f.state === "unknown") a.missing.push("未确认 PR 开放或关闭及合并状态");
   let blocked = false;
   const block = (reason: string) => {
@@ -130,20 +161,44 @@ export function assessMerge(f: MergeFacts): MergeAssessment {
   const test = f.checks.filter(
     (c) => c.scope === "test_merge" && c.sha === f.testMergeSha,
   );
-  const checks = test.length
+  // GitHub falls back to the head only if the test merge has no contexts.
+  // Neither a failed candidate lookup nor a partial rollup proves that absence.
+  const useCandidate = test.length > 0 || !f.testMergeChecksKnown;
+  const checks = useCandidate
     ? test
     : f.checks.filter((c) => c.scope === "head" && c.sha === f.head.sha);
-  for (const rule of f.rules.checks) {
-    const matches = checks.filter(
-      (c) =>
-        c.name === rule.name && (rule.appId === null || c.appId === rule.appId),
+  const coverage = useCandidate ? f.testMergeChecksKnown : f.headChecksKnown;
+  if (!coverage && f.rules.checks.length)
+    a.missing.push(
+      useCandidate && !f.testMergeSha
+        ? "未确认是否存在测试合并提交，无法选择必需检查的目标版本"
+        : (useCandidate ? "测试合并提交" : "PR head") +
+            "的检查取证不完整，请重新查询该提交的状态",
     );
+  for (const rule of f.rules.checks) {
+    const named = checks.filter(
+      (c) => c.name === rule.name && c.required !== false,
+    );
+    const unknownPublisher =
+      rule.appId !== null && named.some((c) => c.appId === null);
+    const sourceMatches = named.filter(
+      (c) => rule.appId === null || c.appId === rule.appId,
+    );
+    const applicabilityUnknown = sourceMatches.some((c) => c.required === null);
+    const matches = sourceMatches.filter((c) => c.required === true);
     const expected =
       "必需检查 " +
       literal(rule.name) +
       (rule.appId === null ? "（任意来源）" : "（App " + rule.appId + "）");
+    if (unknownPublisher)
+      a.missing.push(
+        expected + "：本版有同名检查，但来源无法确认，请核对发布该检查的 App",
+      );
+    if (applicabilityUnknown)
+      a.missing.push(expected + "：无法确认同名检查是否为本 PR 的必需检查");
     if (!matches.length) {
-      if (f.missing.length) a.missing.push(expected + "：当前结果不可确认");
+      if (unknownPublisher || applicabilityUnknown) continue;
+      if (!coverage) a.missing.push(expected + "：当前结果不可确认");
       else block(expected + "：当前版本及来源尚未上报，等待检查");
       continue;
     }
@@ -169,7 +224,7 @@ export function assessMerge(f: MergeFacts): MergeAssessment {
       );
     } else if (matches.some((c) => c.status === "unknown")) {
       a.missing.push(expected + "：" + subject + " 状态未知");
-    } else
+    } else if (!unknownPublisher && !applicabilityUnknown && coverage)
       a.details.push(
         expected + "：" + subject + " 通过" + observed(matches[0]),
       );
@@ -207,16 +262,20 @@ export function assessMerge(f: MergeFacts): MergeAssessment {
     )
       blocked = true;
   }
-  a.platform = blocked
-    ? "blocked"
-    : f.state !== "open"
+  a.platform =
+    f.state === "unknown"
       ? "unknown"
-      : f.rules.queueRequired
-        ? "queue"
-        : a.missing.length
-          ? "unknown"
-          : "ready";
-  if (blocked || a.platform === "queue" || f.review === "changes_requested")
+      : blocked
+        ? "blocked"
+        : f.rules.queueRequired
+          ? "queue"
+          : a.missing.length
+            ? "unknown"
+            : "ready";
+  if (
+    f.state !== "unknown" &&
+    (blocked || a.platform === "queue" || f.review === "changes_requested")
+  )
     a.recommendation = "against";
   return a;
 }
@@ -248,7 +307,9 @@ export function renderMergeAssessment(f: MergeFacts): string {
       f.number +
       " · 查询时间：" +
       f.observedAt,
-    "base：" +
+    "目标分支：" +
+      (f.baseRefName ? literal(f.baseRefName) : "未知") +
+      "\n任务版本：base：" +
       f.base.repository +
       " @ " +
       f.base.sha +
@@ -256,6 +317,19 @@ export function renderMergeAssessment(f: MergeFacts): string {
       f.head.repository +
       " @ " +
       f.head.sha,
+    ...(f.observedRevision
+      ? [
+          "实际观察版本：" +
+            "base：" +
+            f.observedRevision.baseSha +
+            "；head：" +
+            f.observedRevision.headSha +
+            "；目标分支：" +
+            (f.observedRevision.baseRefName
+              ? literal(f.observedRevision.baseRefName)
+              : "未知"),
+        ]
+      : ["实际观察版本：未取得"]),
     "1. 是否已合并：" + lifecycle[a.state] + "。",
     "2. 当前能否合入：" + platform[a.platform] + "。",
     "3. 工程建议：" + advice[a.recommendation],

@@ -32,6 +32,7 @@ import {
   ToolAuditStore,
   type CloudToolName,
   type ToolPhase,
+  type ToolFailureCode,
 } from "./tool-audit.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 
@@ -112,7 +113,12 @@ export class TaskStore {
       .get(repositoryId, commentId);
     return row ? this.decodeTask(row) : undefined;
   }
-  recordToolCall(id: string, name: CloudToolName, phase: ToolPhase): void {
+  recordToolCall(
+    id: string,
+    name: CloudToolName,
+    phase: ToolPhase,
+    failure?: ToolFailureCode,
+  ): void {
     if (
       phase === "requested" &&
       !this.db
@@ -120,7 +126,7 @@ export class TaskStore {
         .get(id)
     )
       throw new AssignmentConflict("No active task for tool audit");
-    this.audit.record(id, name, phase);
+    this.audit.record(id, name, phase, failure);
   }
   toolAudit(id: string) {
     return this.audit.rows(id);

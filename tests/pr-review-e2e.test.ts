@@ -84,6 +84,7 @@ async function fixture(
   );
   let head = h1;
   let closed = false;
+  let baseRef = "main";
   const replies: string[] = [];
   const reviews: { commit_id: string; body: string }[] = [];
   const filesRead: string[] = [];
@@ -112,7 +113,7 @@ async function fixture(
         state: closed ? "closed" : "open",
         merged: false,
         changed_files: 1,
-        base: { sha: baseSha, repo: { id: 2 } },
+        base: { sha: baseSha, ref: baseRef, repo: { id: 2 } },
         head: { sha: head, repo: { id: 2 } },
       });
     if (path === "/graphql") {
@@ -120,7 +121,7 @@ async function fixture(
       const identity = { databaseId: 2, nameWithOwner: "org/repo" };
       const pr = {
         number: 7,
-        baseRefName: "main",
+        baseRefName: baseRef,
         baseRefOid: baseSha,
         headRefOid: head,
         baseRepository: identity,
@@ -346,6 +347,9 @@ async function fixture(
     reviews,
     filesRead,
     replies,
+    retarget: () => {
+      baseRef = "release";
+    },
     url,
     closePr: () => {
       closed = true;
@@ -476,6 +480,24 @@ test("merge question traverses the bridge and scoped GitHub reads; a later close
   );
   assert.equal(await f.publisher.tick(), false);
   assert.equal(f.replies.length, 1);
+});
+
+test("retargeting to a branch at the identical SHA fences a previously assessed reply", async (t) => {
+  const f = await fixture(t);
+  const { taskId } = await f.comment(undefined, "@fixture /merge-status");
+  await f
+    .agentWith(async () => {
+      assert.fail("model dispatched");
+    })
+    .once();
+  assert.deepEqual(f.store.get(taskId)?.outcome?.publication, {
+    kind: "comment",
+    expectedBaseRef: "main",
+  });
+  f.retarget();
+  await f.publisher.tick();
+  assert.equal(f.replies.length, 0);
+  assert.equal(f.store.get(taskId)?.publicationReceipt, null);
 });
 
 test("PR comment resolves once at claim, persists the pin and lease hash, and cannot request opt-in deep tools", async (t) => {

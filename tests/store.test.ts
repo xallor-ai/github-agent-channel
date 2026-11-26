@@ -435,10 +435,20 @@ test("cloud tool counters persist across connections and restart without changin
   assert.deepEqual(store.toolAudit(task.id), []);
   assert.throws(() => store.recordToolCall(task.id, "read_file", "requested"));
   store.claimAssignment("w", "h", 2000, 1000);
-  assert.throws(() => store.recordToolCall(task.id, "read_file", "failed"));
+  assert.throws(() =>
+    store.recordToolCall(task.id, "read_file", "failed", "unknown"),
+  );
   store.recordToolCall(task.id, "read_file", "requested");
   peer.recordToolCall(task.id, "read_file", "requested");
-  peer.recordToolCall(task.id, "read_file", "failed");
+  assert.throws(() =>
+    store.recordToolCall(
+      task.id,
+      "read_file",
+      "failed",
+      "private raw failure" as never,
+    ),
+  );
+  peer.recordToolCall(task.id, "read_file", "failed", "scope");
   store.recordToolCall(task.id, "read_file", "succeeded");
   // A third request was initiated, but no terminal observation was made.
   peer.recordToolCall(task.id, "read_file", "requested");
@@ -464,6 +474,7 @@ test("cloud tool counters persist across connections and restart without changin
   );
   assert.ok(audit.firstRequestedAt <= audit.lastRequestedAt);
   assert.ok(audit.lastSucceededAt && audit.lastFailedAt);
+  assert.equal(audit.lastFailure, "scope");
   assert.deepEqual(
     Object.keys(audit).sort(),
     [
@@ -475,6 +486,7 @@ test("cloud tool counters persist across connections and restart without changin
       "lastRequestedAt",
       "lastSucceededAt",
       "lastFailedAt",
+      "lastFailure",
       "buildSha",
     ].sort(),
   );
@@ -517,7 +529,7 @@ test("an incompatible companion audit database is rejected without dropping its 
   const db = new DatabaseSync(sidecar);
   try {
     db.exec(
-      "CREATE TABLE retained(marker TEXT); INSERT INTO retained VALUES ('kept')",
+      "PRAGMA user_version=1; ALTER TABLE toolAudit DROP COLUMN lastFailure; INSERT INTO toolAudit(taskId,name,requested,succeeded,failed,firstRequestedAt,lastRequestedAt) VALUES ('historical','read_file',1,0,1,1000,1000)",
     );
   } finally {
     db.close();
@@ -527,8 +539,10 @@ test("an incompatible companion audit database is rejected without dropping its 
   const tasks = new DatabaseSync(path);
   try {
     assert.equal(
-      audit.prepare("SELECT marker FROM retained").get()?.marker,
-      "kept",
+      audit
+        .prepare("SELECT failed FROM toolAudit WHERE taskId='historical'")
+        .get()?.failed,
+      1,
     );
     assert.equal(
       tasks.prepare("SELECT status FROM tasks WHERE id=?").get(task.id)?.status,

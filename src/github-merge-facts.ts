@@ -75,6 +75,7 @@ const gates = identity.extend({
 });
 const classicRule = z.object({
   requiresStatusChecks: z.boolean(),
+  requiresStrictStatusChecks: z.boolean(),
   requiredStatusChecks: z
     .array(
       z.object({ context: name, app: z.object({ databaseId: id }).nullable() }),
@@ -93,11 +94,12 @@ const classicRule = z.object({
   lockBranch: z.boolean(),
 });
 const classicFields =
-  "requiresStatusChecks requiredStatusChecks { context app { databaseId } } requiresApprovingReviews requiresCodeOwnerReviews requireLastPushApproval requiredApprovingReviewCount requiresDeployments requiresConversationResolution requiresCommitSignatures requiresLinearHistory restrictsPushes lockBranch";
+  "requiresStatusChecks requiresStrictStatusChecks requiredStatusChecks { context app { databaseId } } requiresApprovingReviews requiresCodeOwnerReviews requireLastPushApproval requiredApprovingReviewCount requiresDeployments requiresConversationResolution requiresCommitSignatures requiresLinearHistory restrictsPushes lockBranch";
 const ruleset = z
   .array(z.object({ type: z.string(), parameters: z.unknown().optional() }))
   .max(100);
 const rulesetChecks = z.object({
+  strict_required_status_checks_policy: z.boolean(),
   required_status_checks: z
     .array(z.object({ context: name, integration_id: id.nullish() }))
     .max(100),
@@ -113,6 +115,7 @@ const reviews = z.object({
 const checkNode = z.discriminatedUnion("__typename", [
   z.object({
     __typename: z.literal("CheckRun"),
+    isRequired: z.boolean().nullish(),
     name,
     status: z.string(),
     conclusion: z.string().nullable(),
@@ -124,6 +127,7 @@ const checkNode = z.discriminatedUnion("__typename", [
   }),
   z.object({
     __typename: z.literal("StatusContext"),
+    isRequired: z.boolean().nullish(),
     context: name,
     state: z.string(),
     commit: z.object({ oid: sha }),
@@ -140,11 +144,11 @@ const rollup = z.object({
     })
     .nullable(),
 });
-const checkQuery = `query MergeChecks($owner:String!,$repo:String!,$oid:GitObjectID!) {
+const checkQuery = `query MergeChecks($owner:String!,$repo:String!,$oid:GitObjectID!,$number:Int!) {
  repository(owner:$owner,name:$repo) { ${repoFields} object(oid:$oid) { ... on Commit {
  oid statusCheckRollup { contexts(first:100) { pageInfo { hasNextPage } nodes { __typename
- ... on CheckRun { name status conclusion permalink checkSuite { commit { oid } app { databaseId } } }
- ... on StatusContext { context state commit { oid } } } } } } } } }`;
+ ... on CheckRun { isRequired(pullRequestNumber:$number) name status conclusion permalink checkSuite { commit { oid } app { databaseId } } }
+ ... on StatusContext { isRequired(pullRequestNumber:$number) context state commit { oid } } } } } } } } }`;
 function checkStatus(
   node: z.infer<typeof checkNode>,
 ): MergeFacts["checks"][number]["status"] {
@@ -221,6 +225,10 @@ export async function collectMergeFacts(
     draft: null,
     conflict: "unknown",
     testMergeSha: null,
+    baseRefName: null,
+    observedRevision: null,
+    headChecksKnown: false,
+    testMergeChecksKnown: false,
     rules: {
       known: false,
       checks: [],
@@ -308,6 +316,9 @@ export async function collectMergeFacts(
               ? "required"
               : "unknown";
       f.testMergeSha = details.potentialMergeCommit?.oid ?? null;
+      // A successful, identity-verified null proves there is no current test commit.
+      // A failed gate read leaves both the SHA null and coverage false.
+      f.testMergeChecksKnown = details.potentialMergeCommit === null;
       if (details.mergeQueueEntry) f.queue.entry = "queued";
     }
     const rs = await optional(
@@ -348,7 +359,8 @@ export async function collectMergeFacts(
         return r.ref.branchProtectionRule;
       },
     );
-    let review = false,
+    let strict = false,
+      review = false,
       queue = !!details?.mergeQueue || !!details?.mergeQueueEntry,
       unsupported = false,
       parsed = true;
@@ -366,6 +378,9 @@ export async function collectMergeFacts(
           parsed = false;
           miss("Classic required check sources unavailable");
         }
+        strict ||=
+          classic.requiresStrictStatusChecks &&
+          !!classic.requiredStatusChecks?.length;
         for (const c of classic.requiredStatusChecks ?? [])
           requireCheck(c.context, c.app?.databaseId ?? null);
       }
@@ -394,6 +409,9 @@ export async function collectMergeFacts(
           miss("Ruleset required check sources unavailable");
           continue;
         }
+        strict ||=
+          p.data.strict_required_status_checks_policy &&
+          p.data.required_status_checks.length > 0;
         for (const c of p.data.required_status_checks)
           requireCheck(c.context, c.integration_id ?? null);
       } else if (r.type === "pull_request") {
@@ -429,13 +447,19 @@ export async function collectMergeFacts(
       miss("Additional applicable branch gates were not evaluated");
     f.otherGates =
       details &&
-      ["BLOCKED", "BEHIND", "DIRTY", "DRAFT"].includes(details.mergeStateStatus)
+      (["BLOCKED", "DIRTY", "DRAFT"].includes(details.mergeStateStatus) ||
+        (details.mergeStateStatus === "BEHIND" && strict))
         ? "blocked"
         : details?.mergeStateStatus === "CLEAN" && !unsupported && f.rules.known
           ? "clear"
           : "unknown";
+    if (details?.mergeStateStatus === "BEHIND" && !strict)
+      miss(
+        "Base branch is ahead; a blocking strict update policy was not established",
+      );
     if (f.rules.checks.length > 0) {
-      if (!f.testMergeSha) miss("Current test merge commit unavailable");
+      if (!f.testMergeSha && !f.testMergeChecksKnown)
+        miss("Current test merge commit unavailable");
       const checks = await optional(
         "Commit checks and statuses (checks:read, statuses:read)",
         () => scoped("checks"),
@@ -446,10 +470,11 @@ export async function collectMergeFacts(
           ["test_merge", f.testMergeSha],
         ] as const) {
           if (!oid) continue;
-          await optional(scope + " check rollup", async () => {
+          const complete = await optional(scope + " check rollup", async () => {
             const raw = await checks.graphql<unknown>(checkQuery, {
               owner,
               repo,
+              number,
               oid,
             });
             const r = z
@@ -458,12 +483,14 @@ export async function collectMergeFacts(
             sameRepo(r);
             if (r.object.oid !== oid) throw Error();
             const contexts = r.object.statusCheckRollup?.contexts;
-            if (!contexts) return;
+            if (!contexts) return true; // Explicit null rollup on the verified commit.
+            let validSubjects = true;
             if (contexts.pageInfo.hasNextPage)
               miss(scope + " check coverage truncated at 100");
             for (const n of contexts.nodes) {
               const isRun = n.__typename === "CheckRun";
               if ((isRun ? n.checkSuite.commit : n.commit).oid !== oid) {
+                validSubjects = false;
                 miss(scope + " check returned a different SHA");
                 continue;
               }
@@ -487,11 +514,15 @@ export async function collectMergeFacts(
                 sha: oid,
                 name: label,
                 appId: isRun ? (n.checkSuite.app?.databaseId ?? null) : null,
+                required: n.isRequired ?? null,
                 status: checkStatus(n),
                 url,
               });
             }
+            return validSubjects && !contexts.pageInfo.hasNextPage;
           });
+          if (scope === "head") f.headChecksKnown = complete === true;
+          else f.testMergeChecksKnown = complete === true;
         }
     }
     // The test-merge commit and effective review/queue verdict can change with the same head.
@@ -524,6 +555,18 @@ export async function collectMergeFacts(
           ? "conflicting"
           : "unknown";
   }
+  // The task pin contains SHAs only. Store the branch observed at the start and the
+  // final observed pair separately; a terminal lifecycle can belong to a newer head.
+  const safeBranch = (value: string) =>
+    /^[^\p{Cc}\u2028\u2029\u202a-\u202e\u2066-\u2069]+$/u.test(value)
+      ? value
+      : null;
+  f.baseRefName = matches(first) ? safeBranch(first.baseRefName) : null;
+  f.observedRevision = {
+    baseSha: last.baseRefOid,
+    headSha: last.headRefOid,
+    baseRefName: safeBranch(last.baseRefName),
+  };
   f.observedAt = new Date().toISOString();
   return mergeFactsSchema.parse(f);
 }

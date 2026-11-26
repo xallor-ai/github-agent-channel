@@ -111,8 +111,8 @@ export type Artifact =
     }
   | { kind: "change_set"; name: string; baseSha: string; files: ChangedFile[] };
 export type PublicationRequest =
-  | { kind: "comment" }
-  | { kind: "review" }
+  | { kind: "comment"; expectedBaseRef?: string }
+  | { kind: "review"; expectedBaseRef?: string }
   | { kind: "none" }
   | {
       kind: "pull_request";

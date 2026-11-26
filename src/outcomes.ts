@@ -110,8 +110,14 @@ const artifactSchema = z.discriminatedUnion("kind", [
 ]);
 const publicationSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
-  z.strictObject({ kind: z.literal("review") }),
-  z.strictObject({ kind: z.literal("comment") }),
+  z.strictObject({
+    kind: z.literal("review"),
+    expectedBaseRef: z.string().min(1).max(255).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("comment"),
+    expectedBaseRef: z.string().min(1).max(255).optional(),
+  }),
   z.strictObject({
     kind: z.literal("pull_request"),
     title: z.string().trim().min(1).max(200),

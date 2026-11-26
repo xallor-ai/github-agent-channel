@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
-import { cloudToolNames } from "./tool-audit.js";
+import { cloudToolNames, type ToolFailureCode } from "./tool-audit.js";
 import { z } from "zod";
 import {
   AccessDenied,
@@ -49,6 +49,27 @@ import {
 } from "./outcomes.js";
 class BodyTooLarge extends Error {}
 class StaleAssignment extends Error {}
+// Only called for an admitted read, after the connector request has been parsed.
+// Do not inspect upstream messages, headers or bodies to guess a root cause.
+function classifyReadFailure(error: unknown): ToolFailureCode {
+  if (error instanceof StaleAssignment) return "lease";
+  if (error instanceof AccessDenied) return "scope";
+  if (error instanceof z.ZodError || error instanceof SyntaxError)
+    return "invalid_evidence";
+  const status =
+    error && typeof error === "object" && "status" in error
+      ? error.status
+      : undefined;
+  if (status === 401 || status === 403 || status === 404)
+    return "github_permission_or_resource";
+  if (
+    status === 408 ||
+    status === 429 ||
+    (typeof status === "number" && status >= 500 && status <= 599)
+  )
+    return "upstream_unavailable";
+  return "unknown";
+}
 async function jsonBody(req: IncomingMessage, limit: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -310,8 +331,17 @@ export class PullCoordinator {
           )
             throw new AccessDenied("Device no longer authorized");
         } catch (error) {
-          this.store.recordToolCall(id, data.name, "failed");
-          throw error;
+          this.store.recordToolCall(
+            id,
+            data.name,
+            "failed",
+            classifyReadFailure(error),
+          );
+          if (error instanceof AccessDenied || error instanceof StaleAssignment)
+            throw error;
+          // An upstream parse failure is not an invalid connector request.
+          send(503, { error: "Cloud tool read unavailable" });
+          return true;
         }
         this.store.recordToolCall(id, data.name, "succeeded");
         send(200, output);

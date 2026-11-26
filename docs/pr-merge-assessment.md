@@ -59,6 +59,10 @@
 
 两端均从部署者提供的 `CHANNEL_BUILD_SHA` 读取完整 40 位提交号（Docker 构建参数同名）。未提供就标记未知。构建号不是运行机器上的仓库 HEAD，也不证明镜像内容经过签名验证。
 
+判断针对**查询时间和目标分支**。PR 改投同 SHA 的其他分支，也会使待发判断失效。检查、审核、队列和分支规则是在采集窗口内读取的观察值，无法保证它们在用户阅读回帖时仍不变。任务 SHA 与最终观察到的 SHA 不同时分别展示；不能把一个新版本的合并记录归给旧版本。真实关闭事件若已撤销运行租约，不为保存结果恢复执行权限，管理员可按同一任务只读查询终态。
+
+仅在确认测试合并提交没有检查（或确认无该提交）时，才用 PR head 的检查代替；候选查询失败时列缺项。还要核对这条检查是否适用于该 PR 以及发布来源：同名的手工作业不能替代必需检查，来源不可见的状态不能据此判为通过或失败。参见 [GitHub 对必需检查的判定规则](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)。
+
 北京时间 2026-11-27 04:26:55（`2026-11-26T20:26:55.277Z`），在开发工作树调用 [collectMergeFacts](../src/github-merge-facts.ts)，对照采集前后两次独立的 `gh pr view`。目标为 [xallor-ai/github-agent-channel#25](https://github.com/xallor-ai/github-agent-channel/pull/25)。
 
 | 事实 | 对照结果 |

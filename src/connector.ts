@@ -285,9 +285,10 @@ export class OpenClawConnector implements RuntimeConnector {
           return {
             text,
             artifacts: [{ kind: "text", name: "merge_assessment", text }],
-            publication: {
-              kind: facts.state === "open" && facts.stable ? "comment" : "none",
-            },
+            publication:
+              facts.state === "open" && facts.stable && facts.baseRefName
+                ? { kind: "comment", expectedBaseRef: facts.baseRefName }
+                : { kind: "none" },
           };
         }
         const result = diffSchema.safeParse(await invoke("read_pull_diff", {}));
@@ -654,11 +655,18 @@ export class OpenClawConnector implements RuntimeConnector {
             kind:
               task.target.kind === "repository" ||
               (mergeFacts &&
-                (!mergeFacts.stable || mergeFacts.state !== "open"))
+                (!mergeFacts.stable ||
+                  mergeFacts.state !== "open" ||
+                  !mergeFacts.baseRefName))
                 ? "none"
                 : evidence && task.reviewPolicy?.nativeReview === true
                   ? "review"
                   : "comment",
+            ...(mergeFacts?.stable &&
+            mergeFacts.state === "open" &&
+            mergeFacts.baseRefName
+              ? { expectedBaseRef: mergeFacts.baseRefName }
+              : {}),
           },
           responseId: responseData.id,
         };

@@ -449,6 +449,14 @@ const openFacts: MergeFacts = {
   draft: false,
   conflict: "none",
   testMergeSha: null,
+  baseRefName: "main",
+  observedRevision: {
+    baseSha: revision.baseSha,
+    headSha: revision.headSha,
+    baseRefName: "main",
+  },
+  testMergeChecksKnown: false,
+  headChecksKnown: false,
   rules: {
     known: true,
     checks: [],

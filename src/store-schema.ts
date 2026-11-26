@@ -179,7 +179,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
 // and verify its exact layout before writing to an existing file.
 export function initializeToolAuditSchema(db: DatabaseSync) {
   const layout =
-    "CREATE TABLE toolAudit(taskId TEXT NOT NULL,name TEXT NOT NULL,requested INTEGER NOT NULL,succeeded INTEGER NOT NULL,failed INTEGER NOT NULL,firstRequestedAt INTEGER NOT NULL,lastRequestedAt INTEGER NOT NULL,lastSucceededAt INTEGER,lastFailedAt INTEGER,buildSha TEXT,PRIMARY KEY(taskId,name)) STRICT";
+    "CREATE TABLE toolAudit(taskId TEXT NOT NULL,name TEXT NOT NULL,requested INTEGER NOT NULL,succeeded INTEGER NOT NULL,failed INTEGER NOT NULL,firstRequestedAt INTEGER NOT NULL,lastRequestedAt INTEGER NOT NULL,lastSucceededAt INTEGER,lastFailedAt INTEGER,buildSha TEXT,lastFailure TEXT CHECK(lastFailure IN ('scope','lease','github_permission_or_resource','invalid_evidence','upstream_unavailable','unknown')),PRIMARY KEY(taskId,name)) STRICT";
   db.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
   try {
     const objects = db
@@ -189,9 +189,9 @@ export function initializeToolAuditSchema(db: DatabaseSync) {
     const app = db.prepare("PRAGMA application_id").get()?.application_id;
     if (!objects.length && version === 0 && app === 0) {
       db.exec(layout);
-      db.exec("PRAGMA user_version=1");
+      db.exec("PRAGMA user_version=2");
     } else if (
-      version !== 1 ||
+      version !== 2 ||
       app !== 0 ||
       objects.length !== 1 ||
       objects[0].sql !== layout

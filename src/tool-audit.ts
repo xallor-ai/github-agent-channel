@@ -12,6 +12,15 @@ export const cloudToolNames = [
 ] as const;
 export type CloudToolName = (typeof cloudToolNames)[number];
 export type ToolPhase = "requested" | "succeeded" | "failed";
+export const toolFailureCodes = [
+  "scope",
+  "lease",
+  "github_permission_or_resource",
+  "invalid_evidence",
+  "upstream_unavailable",
+  "unknown",
+] as const;
+export type ToolFailureCode = (typeof toolFailureCodes)[number];
 export interface CloudToolAudit {
   name: CloudToolName;
   requested: number;
@@ -21,6 +30,7 @@ export interface CloudToolAudit {
   lastRequestedAt: number;
   lastSucceededAt: number | null;
   lastFailedAt: number | null;
+  lastFailure: ToolFailureCode | null;
   buildSha: string | null;
 }
 
@@ -39,8 +49,19 @@ export class ToolAuditStore {
       throw e;
     }
   }
-  record(task: string, name: CloudToolName, phase: ToolPhase) {
+  record(
+    task: string,
+    name: CloudToolName,
+    phase: ToolPhase,
+    failure?: ToolFailureCode,
+  ) {
     if (!cloudToolNames.includes(name)) throw Error("Invalid audit tool");
+    if (
+      phase === "failed"
+        ? !failure || !toolFailureCodes.includes(failure)
+        : failure !== undefined
+    )
+      throw Error("Invalid audit failure classification");
     const now = Date.now();
     if (phase === "requested") {
       this.db
@@ -54,25 +75,23 @@ export class ToolAuditStore {
     }
     if (phase !== "succeeded" && phase !== "failed")
       throw Error("Invalid audit phase");
-    const timeColumn =
-      phase === "succeeded" ? "lastSucceededAt" : "lastFailedAt";
+    const update =
+      phase === "succeeded"
+        ? "succeeded=succeeded+1,lastSucceededAt=?"
+        : "failed=failed+1,lastFailedAt=?,lastFailure=?";
     const changed = this.db
       .prepare(
         "UPDATE toolAudit SET " +
-          phase +
-          "=" +
-          phase +
-          "+1," +
-          timeColumn +
-          "=? WHERE taskId=? AND name=? AND requested>succeeded+failed",
+          update +
+          " WHERE taskId=? AND name=? AND requested>succeeded+failed",
       )
-      .run(now, task, name);
+      .run(now, ...(failure ? [failure] : []), task, name);
     if (!changed.changes) throw Error("No outstanding cloud tool request");
   }
   rows(task: string): CloudToolAudit[] {
     return this.db
       .prepare(
-        "SELECT name,requested,succeeded,failed,firstRequestedAt,lastRequestedAt,lastSucceededAt,lastFailedAt,buildSha FROM toolAudit WHERE taskId=? ORDER BY name",
+        "SELECT name,requested,succeeded,failed,firstRequestedAt,lastRequestedAt,lastSucceededAt,lastFailedAt,lastFailure,buildSha FROM toolAudit WHERE taskId=? ORDER BY name",
       )
       .all(task) as unknown as CloudToolAudit[];
   }
