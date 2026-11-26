@@ -31,7 +31,7 @@ flowchart LR
 
 四态受理、配置修订及撤权/换绑顺序见[绑定生命周期](binding-lifecycle.md)。
 
-PR 事件固定双方仓库与 base/head；PR 会话评论在领取时解析并持久化版本。服务端复核同一开放 PR，提供受限变更列表与补丁。OpenClaw 可选择只读版本快照做仓库搜索；发布器可按仓库启用固定提交的 COMMENT Review。参见[配置与验收边界](pr-review.md)。
+PR 事件固定双方仓库与 base/head；PR 会话评论在领取时解析并持久化版本。服务端复核同一开放 PR，提供受限变更列表与补丁。连接器按深评绑定直接从 GitHub 获取固定提交，OpenClaw 通过只读工具搜索该提交；普通差异仍由服务端按版本提供；发布器可按仓库启用固定提交的 COMMENT Review。参见[配置与验收边界](pr-review.md)。
 
 ## 当前实现调用链
 

@@ -61,6 +61,8 @@ function fixture(
   options: {
     permission?: string;
     repoId?: number;
+    deepReview?: boolean;
+    grant?: () => unknown;
     failWrite?: boolean;
     writeStatus?: number;
     failRead?: boolean;
@@ -86,13 +88,16 @@ function fixture(
     calls.push({ path: url.pathname + url.search, method, body });
     let data: unknown;
     if (url.pathname === "/app/installations/1/access_tokens")
-      data = {
-        token: "fake-installation-token",
-        expires_at: new Date(Date.now() + 3600000).toISOString(),
-        permissions: body.permissions,
-        repository_selection: "selected",
-        repositories: [{ id: 2 }],
-      };
+      data =
+        !body.permissions.pull_requests && options.grant
+          ? options.grant()
+          : {
+              token: "fake-installation-token",
+              expires_at: new Date(Date.now() + 3600000).toISOString(),
+              permissions: body.permissions,
+              repository_selection: "selected",
+              repositories: [{ id: 2 }],
+            };
     else if (url.pathname === "/repos/org/repo") {
       if (options.failRead) throw new Error("network failed");
       data = { id: options.repoId ?? 2, name: "repo", owner: { login: "org" } };
@@ -160,12 +165,14 @@ function fixture(
     client: new OctokitGitHubClient(
       config,
       privateKey,
-      (i, r) =>
-        options.bindingEnabled?.() === false
-          ? undefined
-          : config.bindings.find(
-              (b) => b.installationId === i && b.repositoryId === r,
-            ),
+      (i, r) => {
+        const binding = config.bindings.find(
+          (b) => b.installationId === i && b.repositoryId === r,
+        );
+        return binding && options.bindingEnabled?.() !== false
+          ? { ...binding, deepReview: options.deepReview }
+          : undefined;
+      },
       async () => {},
       fetchImpl,
     ),
@@ -650,90 +657,90 @@ test("native review publication requires an explicit binding grant, before listi
   assert.ok(!calls.some((c) => c.path.includes("/reviews")));
 });
 
-const treeSha = "3".repeat(40);
-function snapshotFixture(
-  change: {
-    mode?: string;
-    truncated?: boolean;
-    wrongBlob?: boolean;
-    content?: Buffer;
-    count?: number;
-    moveHead?: boolean;
-    revoke?: boolean;
-    path?: string;
-  } = {},
-) {
-  const content = change.content ?? Buffer.from("unchanged caller");
-  const oid = createHash("sha1")
-    .update(`blob ${content.length}\0`)
-    .update(content)
-    .digest("hex");
-  let reads = 0;
-  return fixture({
-    revokeOnSecondCheck: change.revoke,
-    pull: () => ({
-      ...openPull,
-      head:
-        change.moveHead && reads > 0
-          ? { ...openPull.head, sha: "f".repeat(40) }
-          : openPull.head,
-    }),
-    gitObject: (path) => {
-      if (path.endsWith("/commits/" + revision.headSha))
-        return { sha: revision.headSha, tree: { sha: treeSha } };
-      if (path.endsWith("/trees/" + treeSha))
-        return {
-          sha: treeSha,
-          truncated: change.truncated ?? false,
-          tree: Array.from({ length: change.count ?? 1 }, (_, i) => ({
-            type: "blob",
-            mode: change.mode ?? "100644",
-            path: change.path ?? `src/caller${i}.ts`,
-            sha: oid,
-            size: content.length,
-            url: "https://untrusted.invalid/",
-          })),
-        };
-      if (path.endsWith("/blobs/" + oid)) {
-        reads++;
-        return {
-          sha: oid,
-          size: content.length,
-          encoding: "base64",
-          content: change.wrongBlob
-            ? Buffer.alloc(content.length).toString("base64")
-            : content.toString("base64"),
-        };
-      }
-      throw Error("unexpected path");
-    },
-  });
-}
-test("complete deep snapshot reads immutable Git objects and returns only paths and text", async () => {
-  const { client, calls } = snapshotFixture();
-  assert.deepEqual(await client.readReviewSnapshot(pinned), {
-    sha: revision.headSha,
-    files: [{ path: "src/caller0.ts", text: "unchanged caller" }],
-    complete: true,
-  });
-  assert.equal(calls.filter((c) => c.path.includes("/git/")).length, 3);
+const sourcePermissions = { contents: "read", metadata: "read" };
+const grantResponse = () => ({
+  token: "synthetic-read-only",
+  expires_at: new Date(Date.now() + 3599000).toISOString(),
+  permissions: sourcePermissions,
+  repository_selection: "selected",
+  repositories: [{ id: 2 }],
 });
-test("deep snapshot refuses partial, special, binary, oversized, unsafe and changed trees", async () => {
-  for (const change of [
-    { truncated: true },
-    { mode: "120000" },
-    { mode: "160000" },
-    { wrongBlob: true },
-    { content: Buffer.from([0xff]) },
-    { content: Buffer.from([0]) },
-    { count: 129 },
-    { content: Buffer.alloc(131073, 32) },
-    { moveHead: true },
-    { revoke: true },
-    { path: "../bad" },
-    { content: Buffer.alloc(128 * 1024, 1), count: 2 },
+test("each source grant mints a dedicated token limited to the task repository and its contents", async () => {
+  const grants = [
+    grantResponse(),
+    { ...grantResponse(), token: "second-read-only" },
+  ];
+  let n = 0;
+  const { client, calls } = fixture({
+    deepReview: true,
+    grant: () => grants[n++],
+  });
+  for (const grant of grants) {
+    assert.deepEqual(await client.issueSourceGrant(pinned, () => {}), {
+      token: grant.token,
+      expiresAt: grant.expires_at,
+    });
+  }
+  const mint = calls.filter(
+    (c) => c.method === "POST" && !c.body.permissions.pull_requests,
+  );
+  assert.equal(mint.length, 2);
+  for (const c of mint)
+    assert.deepEqual(c.body, {
+      repository_ids: [2],
+      permissions: sourcePermissions,
+    });
+});
+test("a wider, incomplete, invalid or expired source grant is withheld", async () => {
+  for (const override of [
+    { permissions: { ...sourcePermissions, issues: "read" } },
+    { permissions: { ...sourcePermissions, contents: "write" } },
+    { permissions: { metadata: "read" } },
+    { repository_selection: "all" },
+    { repositories: [{ id: 3 }] },
+    { repositories: [{ id: 2 }, { id: 3 }] },
+    { repositories: undefined },
+    { expires_at: "invalid" },
+    { expires_at: new Date(0).toISOString() },
+    { expires_at: new Date(Date.now() + 7200000).toISOString() },
+    { token: "" },
   ]) {
-    const { client } = snapshotFixture(change);
-    await assert.rejects(client.readReviewSnapshot(pinned));
+    const { client } = fixture({
+      deepReview: true,
+      grant: () => ({ ...grantResponse(), ...override }),
+    });
+    await assert.rejects(
+      client.issueSourceGrant(pinned, () => {}),
+      AccessDenied,
+    );
+  }
+});
+test("source grants require deep binding, authorized actor and unchanged PR before and after mint", async () => {
+  for (const scenario of [
+    "disabled",
+    "issue",
+    "revocation",
+    "new-head",
+    "denied-before",
+  ]) {
+    let minted = false;
+    const { client } = fixture({
+      deepReview: scenario !== "disabled",
+      grant: () => {
+        minted = true;
+        return grantResponse();
+      },
+      permission: scenario === "denied-before" ? "read" : "write",
+      revokeOnSecondCheck: scenario === "revocation",
+      pull: () =>
+        scenario === "new-head" && minted
+          ? { ...openPull, head: { ...openPull.head, sha: "f".repeat(40) } }
+          : openPull,
+    });
+    await assert.rejects(
+      client.issueSourceGrant(scenario === "issue" ? task : pinned, () => {}),
+      AccessDenied,
+    );
+    assert.equal(minted, ["revocation", "new-head"].includes(scenario));
   }
 });

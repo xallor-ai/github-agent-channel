@@ -1,4 +1,4 @@
-import { collectReviewSnapshot } from "./github-review-snapshot.js";
+import { z } from "zod";
 import { readPinnedPullFile } from "./github-pinned-file.js";
 import { publishNativeReview, reconcileNativeReview } from "./github-review.js";
 import {
@@ -156,18 +156,56 @@ export class OctokitGitHubClient implements GitHubClient {
     this.#binding(task);
     return collectPullDiff(client, task, initial, () => this.authorize(task));
   }
-  async readReviewSnapshot(task: Task) {
-    const client = await this.#authorized(task);
-    const { revision } = await checkPull(client, task);
-    this.#binding(task);
-    const snapshot = await collectReviewSnapshot(
-      client,
-      this.#fetch,
-      { owner: task.owner, repo: task.repo },
-      revision.headSha,
-    );
+  async issueSourceGrant(task: Task, checkAssignment: () => void) {
+    const checkScope = () => {
+      checkAssignment();
+      if (
+        this.#binding(task).deepReview !== true ||
+        task.target.kind !== "pull_request" ||
+        task.target.revision?.headRepoId !== task.repositoryId ||
+        task.target.revision.baseRepoId !== task.repositoryId
+      )
+        throw new AccessDenied("Deep review is not enabled for this revision");
+    };
+    checkScope();
     await this.authorize(task);
-    return snapshot;
+    checkScope();
+    // Direct App-authenticated mint: never reuse or forward a cached server token.
+    const permissions = { contents: "read", metadata: "read" } as const;
+    const response = await this.#app.octokit
+      .request("POST /app/installations/{installation_id}/access_tokens", {
+        installation_id: task.installationId,
+        repository_ids: [task.repositoryId],
+        permissions,
+        request: { redirect: "error" },
+      })
+      .catch(() => {
+        throw Error("Source grant unavailable");
+      });
+    const result = z
+      .object({
+        token: z
+          .string()
+          .min(1)
+          .max(4096)
+          .regex(/^[!-~]+$/),
+        expires_at: z.iso.datetime(),
+        permissions: z.strictObject({
+          contents: z.literal("read"),
+          metadata: z.literal("read"),
+        }),
+        repository_selection: z.literal("selected"),
+        repositories: z.tuple([z.object({ id: z.literal(task.repositoryId) })]),
+      })
+      .safeParse(response.data);
+    if (!result.success)
+      throw new AccessDenied("Source grant scope could not be confirmed");
+    await this.authorize(task);
+    checkScope();
+    const remaining = Date.parse(result.data.expires_at) - Date.now();
+    if (!(remaining > 0 && remaining <= 3_660_000))
+      throw new AccessDenied("Source grant expiry is invalid");
+    return { token: result.data.token, expiresAt: result.data.expires_at };
   }
   async readIssue(task: Task): Promise<unknown> {
     if (

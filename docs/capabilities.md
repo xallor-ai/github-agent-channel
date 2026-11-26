@@ -47,7 +47,7 @@ GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明
 | R05 | 读取单个仓库文件 | PR 按固定 head 读取；非 PR 沿用默认分支。GitHub Contents 单文件至多 128 KiB | [github.ts](../src/github.ts)、[测试](../tests/github.test.ts) | 旧版默认分支读取通过；PR 版本读取待真实验收 |
 | R06 | 搜索代码与上下文 | OpenClaw 深评可对任务快照搜索字面量、返回路径与行号；ACP 使用现有 harness 工具 | [快照测试](../tests/review-snapshot.test.ts) | ACP 编码曾实测；OpenClaw 深评待验收 |
 | R07 | 读取 PR 差异 | 同仓开放 PR 按指定 base/head 比较语义列文件、状态、改名与可用补丁；文件数量和字节上限有遗漏提示。无 CI 日志 | [变更采集](../src/github-pull-context.ts)、[GitHub 测试](../tests/github.test.ts) | 待真实 opened/synchronize |
-| R07a | 深评只读源码 | OpenClaw 可按任务使用有界完整文本快照或预备 bare 对象库；可读未改文件，搜索结果有截断标志 | [范围及限制](pr-review.md)、[快照测试](../tests/review-snapshot.test.ts) | 待真实未改调用方和跨版本隔离验收 |
+| R07a | 深评只读源码 | 连接器按授权自动获取同仓 PR 指定提交并复用本地 Git 对象库；可读未改文件，搜索结果有截断标志 | [范围及限制](pr-review.md)、[快照测试](../tests/review-snapshot.test.ts) | 待真实未改调用方和跨版本隔离验收 |
 | R08 | 固定版本 | PR 校验双方仓库和 base/head；ACP 编码要求工作区符合目标版本，不自动切换；仓库任务 OpenClaw 读取仍走默认分支 | [GitHub 客户端](../src/github.ts)、[工作区](../src/runtime-workspace.ts) | 旧版 draft PR parent/base 有实证；PR 评审路径仅本地 |
 | R09 | 仓库与工作区                       | 部分实现；映射干净独立 clone，校验 origin，拒绝隐藏修改的索引标志；不自动 clone/重置/分配 sandbox                    | [runtime-workspace.ts](../src/runtime-workspace.ts)                                 | 本地通过；不是多租户隔离                                       |
 | R10 | 修改文件并收集 diff                | ACP 委托 harness 编辑，保留 BOM 收集实际 UTF-8 文件变更；拒绝改 HEAD、特殊模式/超限文件                              | acp-connector.test.ts                                                               | 真实 OpenCode 修改单文件并发布 PR #4 |
