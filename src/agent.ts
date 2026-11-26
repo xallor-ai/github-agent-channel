@@ -1,5 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { RuntimeFailure } from "./runtime-failure.js";
+import { dirname, join } from "node:path";
+import { OpenClawConnector } from "./connector.js";
+import { openReviewSnapshot } from "./review-snapshot.js";
+import { prepareReviewCache } from "./review-cache.js";
 import { z } from "zod";
 import { createRuntime } from "./runtime-factory.js";
 import {
@@ -66,6 +70,7 @@ export class Agent {
     private runtime: RuntimeConnector,
     private token: string,
     private fetcher: typeof fetch = fetch,
+    private readonly prepareCache = prepareReviewCache,
   ) {}
   private async post(
     path: string,
@@ -175,9 +180,57 @@ export class Agent {
       );
       const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
       try {
-        const output = await this.runtime.run(
+        const task = assignment.task;
+        const pin = task.target.kind === "pull_request" && task.target.revision;
+        const runtime =
+          this.runtime instanceof OpenClawConnector &&
+          pin &&
+          this.config.runtime.type === "openclaw" &&
+          this.config.runtime.deepReview
+            ? this.runtime.withReviewSource(async () => {
+                const dir = await this.prepareCache(
+                  join(dirname(this.config.stateFile), "review-cache"),
+                  task,
+                  async () => {
+                    const response = await this.post(
+                      "/connector/v2/tasks/" + task.id + "/source-grant",
+                      { leaseToken: assignment.leaseToken },
+                      combined,
+                    );
+                    const grant = z
+                      .strictObject({
+                        token: z.string().min(1),
+                        expiresAt: z.iso.datetime(),
+                      })
+                      .safeParse(response.data);
+                    if (response.status !== 200 || !grant.success)
+                      throw Error("Invalid review source grant");
+                    return grant.data;
+                  },
+                  combined,
+                );
+                return openReviewSnapshot(
+                  dir,
+                  { fullName: task.owner + "/" + task.repo, sha: pin.headSha },
+                  combined,
+                );
+              })
+            : this.runtime;
+        const output = await runtime.run(
           assignment.task,
           async (name, args) => {
+            if (
+              ![
+                "read_issue",
+                "read_file",
+                "read_pull_diff",
+                "review_access",
+              ].includes(name)
+            )
+              throw new RuntimeFailure(
+                "tool_call_invalid",
+                "Unknown bridge tool",
+              );
             if (combined.aborted)
               throw new AmbiguousExecution("Execution interrupted");
             const response = await this.post(

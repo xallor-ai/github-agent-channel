@@ -47,6 +47,10 @@ test("agent config accepts file refs relative to config and rejects public HTTP 
     assert.throws(() => loadAgentConfig(path), /deployment.image/);
   }
   delete cfg.deployment;
+  cfg.runtime.reviewRepositories = { "7": dir };
+  save();
+  assert.throws(() => loadAgentConfig(path));
+  delete cfg.runtime.reviewRepositories;
   cfg.channel.baseUrl = "http://public.example.com";
   save();
   assert.throws(() => loadAgentConfig(path), /channel.baseUrl/);

@@ -50,7 +50,11 @@ const key = generateKeyPairSync("rsa", { modulusLength: 2048 })
 const reviewUrl = "https://github.com/org/repo/pull/7#pullrequestreview-23";
 const json = (body: unknown) => Response.json(body);
 
-async function fixture(t: test.TestContext) {
+async function fixture(
+  t: test.TestContext,
+  deepReview = false,
+  duringMint?: (store: TaskStore) => void,
+) {
   const dir = mkdtempSync(join(tmpdir(), "versioned-pr-e2e-"));
   const database = join(dir, "channel.db"),
     store = new TaskStore(database);
@@ -67,6 +71,7 @@ async function fixture(t: test.TestContext) {
     {
       enabled: true,
       nativeReview: true,
+      deepReview,
       events: [
         "pull_request.opened",
         "pull_request.synchronize",
@@ -81,7 +86,9 @@ async function fixture(t: test.TestContext) {
     const url = new URL(String(input));
     const path = url.pathname,
       method = init?.method ?? "GET";
-    if (path === "/app/installations/1/access_tokens")
+    if (path === "/app/installations/1/access_tokens") {
+      if (!JSON.parse(String(init?.body)).permissions.pull_requests)
+        duringMint?.(store);
       return json({
         token: "synthetic-installation",
         expires_at: new Date(Date.now() + 3600000).toISOString(),
@@ -89,6 +96,7 @@ async function fixture(t: test.TestContext) {
         repository_selection: "selected",
         repositories: [{ id: 2 }],
       });
+    }
     if (path === "/repos/org/repo")
       return json({ id: 2, name: "repo", owner: { login: "org" } });
     if (path.endsWith("/collaborators/alice/permission"))
@@ -380,12 +388,41 @@ test("PR comment resolves once at claim, persists the pin and lease hash, and ca
   const tool = (name: string, token = leaseToken) =>
     f.post("tasks/" + taskId + "/tool", { leaseToken: token, name, args: {} });
   assert.equal((await tool("read_pull_diff", "x".repeat(64))).status, 409);
-  for (const name of ["read_snapshot", "review_access"])
-    assert.equal((await tool(name)).status, 403);
+  assert.equal((await tool("review_access")).status, 403);
+  for (const name of ["read_snapshot", "read_source_grant"])
+    assert.equal((await tool(name)).status, 400);
+  assert.equal(
+    (await f.post("tasks/" + taskId + "/source-grant", { leaseToken })).status,
+    403,
+  );
   assert.equal((await tool("read_pull_diff")).status, 200);
   f.setHead(h1);
   assert.equal((await tool("read_pull_diff")).status, 403);
   assert.deepEqual(f.store.get(taskId)?.target, target);
   assert.equal(f.resolver.mock.callCount(), 1);
   assert.equal((await f.post("claim", {})).status, 204);
+});
+
+test("only the dedicated grant route releases a credential and never after the assignment expires", async (t) => {
+  for (const expire of [false, true]) {
+    const f = await fixture(t, true, (store) => {
+      if (expire) store.expireTasks(Date.now() + 60000);
+    });
+    const { taskId } = await f.comment();
+    const { leaseToken } = await (await f.post("claim", {})).json();
+    const path = "tasks/" + taskId + "/source-grant";
+    assert.equal(
+      (await f.post(path, { leaseToken: "z".repeat(64) })).status,
+      409,
+    );
+    assert.equal(
+      (await f.post(path, { leaseToken, repositoryId: 99 })).status,
+      400,
+    );
+    const res = await f.post(path, { leaseToken });
+    assert.equal(res.status, expire ? 409 : 200);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    if (expire) assert.doesNotMatch(await res.text(), /synthetic-installation/);
+    else assert.equal((await res.json()).token, "synthetic-installation");
+  }
 });

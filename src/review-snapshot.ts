@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { execFile } from "node:child_process";
 import { existsSync, lstatSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -25,17 +24,16 @@ const safePath = (path: string) =>
     .split("/")
     .some((s) => !s || s === "." || s === ".." || s.toLowerCase() === ".git");
 type Entry = { path: string; oid: string; size: number };
-type Pin = { repositoryId: number; fullName: string; sha: string };
+type Pin = { fullName: string; sha: string };
 
 // The directory, its metadata and the installed Git are administrator-owned.
 // Only OIDs from the pinned tree can reach cat-file. No checkout, remote,
 // attributes, diff drivers, revision expressions or model-supplied pathspecs.
 export async function openReviewSnapshot(
-  repositories: Record<string, string> | undefined,
-  { repositoryId, fullName, sha }: Pin,
+  dir: string,
+  { fullName, sha }: Pin,
   taskSignal?: AbortSignal,
 ) {
-  const dir = repositories?.[String(repositoryId)];
   if (
     !dir ||
     !isAbsolute(dir) ||
@@ -290,63 +288,4 @@ function findMatches(
   return { sha, matches, truncated };
 }
 
-// This input is from the authenticated cloud tool, never the model.
-// Tree mode/type and Git blob identity must be verified by its producer.
-const snapshotPayload = z.strictObject({
-  sha: z.string().regex(hash),
-  complete: z.literal(true),
-  files: z
-    .array(
-      z.strictObject({
-        path: z.string().max(1024).refine(safePath),
-        text: z
-          .string()
-          .max(128 * 1024)
-          .refine(
-            (s) => !s.includes("\0") && Buffer.byteLength(s) <= 128 * 1024,
-          ),
-      }),
-    )
-    .max(128),
-});
-export function openFetchedReviewSnapshot(payload: unknown, sha: string) {
-  const parsed = snapshotPayload.safeParse(payload);
-  if (!parsed.success || parsed.data.sha !== sha)
-    throw Error("Invalid review snapshot payload or version");
-  const files = new Map<string, { path: string; text: string }>();
-  let bytes = 0;
-  for (const file of parsed.data.files) {
-    bytes += Buffer.byteLength(file.text) + Buffer.byteLength(file.path);
-    if (bytes > 1_000_000 || files.has(file.path))
-      throw Error("Oversized or duplicate review snapshot entry");
-    files.set(file.path, file);
-  }
-  if (Buffer.byteLength(JSON.stringify(parsed.data)) > 1_000_000)
-    throw Error("Oversized review snapshot payload");
-  let closed = false;
-  function open() {
-    if (closed) throw Error("Review snapshot is closed");
-  }
-  return {
-    close() {
-      closed = true;
-      files.clear();
-    },
-    async read(path: string) {
-      open();
-      const file = files.get(path);
-      if (!file) throw Error("Not a regular file in the review tree");
-      return {
-        path,
-        sha,
-        text: file.text.slice(0, maxRead),
-        truncated: file.text.length > maxRead,
-      };
-    },
-    async search(query: string) {
-      open();
-      validateQuery(query);
-      return findMatches(sha, query, files.values(), false);
-    },
-  };
-}
+export type ReviewSnapshot = Awaited<ReturnType<typeof openReviewSnapshot>>;

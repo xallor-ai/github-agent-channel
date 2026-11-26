@@ -41,7 +41,8 @@ allowedPaths 支持精确文件和以 `/` 或 `/**` 结尾的目录前缀；不�
 | `POST /connector/v2/bindings/apply` | 设备 Bearer；提交指定仓库、expectedRevision、declaration，返回生效记录 |
 | `POST /connector/v2/claim`                | 设备 Bearer，空对象；204 或 `{task,leaseToken,expiresAt}`                         |
 | `POST /connector/v2/tasks/<id>/execution` | `{leaseToken,event:{kind:"started",provider,runId}}`；只记录当前 assignment 的运行标识 |
-| `POST /connector/v2/tasks/<id>/tool`      | `{leaseToken,name,args}`；按 target/租约授权；PR 可用 read_pull_diff；review_access、read_snapshot 为连接器快照操作，不能指定任意仓库或 SHA                      |
+| `POST /connector/v2/tasks/<id>/source-grant` | 有效设备及租约、已启用的深评绑定和固定同仓 PR；仅连接器下载进程使用单仓只读短期凭据，不能作为模型工具调用。 |
+| `POST /connector/v2/tasks/<id>/tool`      | `{leaseToken,name,args}`；按 target/租约授权；PR 可用 read_pull_diff；review_access 为连接器快照访问核验，不能指定任意仓库或 SHA                      |
 | `POST /connector/v2/tasks/<id>/result`    | `{leaseToken,status:"succeeded",outcome}` 或 `{leaseToken,status:"failed"或"unknown"}` |
 
 管理接口 `POST /admin/device-invites` 和 `POST /admin/device-revoke` 仅供受控管理入口使用，不经公网代理。所有任务的 target/source 必填。Issue/PR 的号码在 target.number，仓库目标可以携带 ref/sha；ACP 对明确的 target.sha 校验工作区 HEAD，不匹配时拒绝启动，不自动切分支；评论 ID 只在原始 source.commentId。PR 的 target.revision 保存 baseSha、headSha、baseRepoId 和 headRepoId；评论任务在授权领取时固定版本后再交付。安装、仓库和 actor 来自服务端，不允许 Runtime 提交替换字段。

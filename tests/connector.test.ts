@@ -532,6 +532,21 @@ test("missing or mixed PR revision fails before dispatch to OpenClaw", async () 
   assert.equal(requests, 0);
 });
 
+async function prepareView() {
+  const sha = revision.headSha;
+  const path = "unchanged.ts";
+  const text = "return impl();";
+  return {
+    close() {},
+    async read() {
+      return { sha, path, text, truncated: false };
+    },
+    async search() {
+      return { sha, matches: [{ path, line: 2, text }], truncated: false };
+    },
+  };
+}
+
 test("deep review searches then reads an unchanged file locally under fresh authorization", async () => {
   const calls: string[] = [];
   let turn = 0;
@@ -561,22 +576,17 @@ test("deep review searches then reads an unchanged file locally under fresh auth
       return Response.json(summary);
     },
   );
-  const result = await connector.run(pr, async (name) => {
-    calls.push(name);
-    if (name === "read_pull_diff") return diff;
-    if (name === "read_snapshot")
-      return {
-        sha: revision.headSha,
-        complete: true,
-        files: [{ path: "unchanged.ts", text: "// fixture\nreturn impl();\n" }],
-      };
-    assert.equal(name, "review_access");
-    return { authorized: true };
-  });
+  const result = await connector
+    .withReviewSource(prepareView)
+    .run(pr, async (name) => {
+      calls.push(name);
+      if (name === "read_pull_diff") return diff;
+      assert.equal(name, "review_access");
+      return { authorized: true };
+    });
   assert.deepEqual(calls, [
     "read_pull_diff",
     "review_access",
-    "read_snapshot",
     "review_access",
     "review_access",
     "review_access",
@@ -599,14 +609,8 @@ test("revocation after local search withholds results and prevents another model
     },
   );
   await assert.rejects(
-    connector.run(pr, async (name) => {
+    connector.withReviewSource(prepareView).run(pr, async (name) => {
       if (name === "read_pull_diff") return diff;
-      if (name === "read_snapshot")
-        return {
-          sha: revision.headSha,
-          complete: true,
-          files: [{ path: "immutable", text: "private" }],
-        };
       return { authorized: ++grants < 4 };
     }),
     /access not confirmed/,
@@ -617,6 +621,7 @@ test("revocation after local search withholds results and prevents another model
 
 test("invalid local snapshot calls are classified as model tool errors", async () => {
   for (const [name, args] of [
+    ["read_source_grant", {}],
     ["search_repo", {}],
     ["search_repo", { query: "one\ntwo" }],
     ["read_file", { path: "../x" }],
@@ -630,10 +635,8 @@ test("invalid local snapshot calls are classified as model tool errors", async (
       async () => Response.json(call(name, args)),
     );
     await assert.rejects(
-      c.run(pr, async (name) => {
+      c.withReviewSource(prepareView).run(pr, async (name) => {
         if (name === "read_pull_diff") return diff;
-        if (name === "read_snapshot")
-          return { sha: revision.headSha, complete: true, files: [] };
         assert.equal(name, "review_access");
         return { authorized: true };
       }),

@@ -151,7 +151,10 @@ export interface GitHubClient {
   authorize(task: Task): Promise<void>;
   resolvePullRevision?(task: Task): Promise<PullRevision>;
   readPullDiff?(task: Task): Promise<unknown>;
-  readReviewSnapshot?(task: Task): Promise<unknown>;
+  issueSourceGrant?(
+    task: Task,
+    checkAssignment: () => void,
+  ): Promise<{ token: string; expiresAt: string }>;
   publishReview?(
     task: Task,
     text: string,

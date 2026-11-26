@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+import { OpenClawConnector } from "../src/connector.js";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Agent } from "../src/agent.js";
 import { AgentStore } from "../src/agent-store.js";
@@ -402,4 +405,160 @@ test("text-only runtime results are rejected without fabricating publication or 
   assert.equal(reported.leaseToken, "lease-value");
   assert.equal(reported.status, "failed");
   assert.equal(reported.failure, "runtime_response_invalid");
+});
+
+test("runtime cannot request a repository grant through its tool invoker", async (t) => {
+  const paths: string[] = [];
+  const f = await fixture(t, (path, _body, res) => {
+    paths.push(path);
+    respond(
+      res,
+      path.endsWith("/claim")
+        ? assignment()
+        : { accepted: true, duplicate: false },
+    );
+  });
+  const agent = new Agent(
+    config(f.base),
+    f.store(),
+    {
+      run: async (_task, invoke) => {
+        await assert.rejects(invoke("read_source_grant", {}), {
+          code: "tool_call_invalid",
+        });
+        return outcome("summary");
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.deepEqual(
+    paths.map((p) => p.split("/").pop()),
+    ["claim", "result"],
+  );
+});
+test("pinned review grants stay in the cache preparer, outside model requests, journal and results", async (t) => {
+  const token = "installation-read-fixture";
+  let sha = "",
+    grants = 0,
+    requests = 0;
+  const revision = () => ({
+    baseRepoId: 2,
+    headRepoId: 2,
+    baseSha: sha,
+    headSha: sha,
+  });
+  const reports: unknown[] = [];
+  const f = await fixture(t, (path, body, res) => {
+    assert.ok(!JSON.stringify(body).includes(token));
+    if (path.endsWith("/claim"))
+      return respond(res, {
+        ...assignment(),
+        expiresAt: Date.now() + 60000,
+        task: {
+          ...task,
+          target: { kind: "pull_request", number: 4, revision: revision() },
+        },
+      });
+    if (path.endsWith("/source-grant")) {
+      grants++;
+      assert.deepEqual(body, { leaseToken: "lease-value" });
+      return respond(res, {
+        token,
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+      });
+    }
+    if (path.endsWith("/tool")) {
+      if (body.name === "read_pull_diff")
+        return respond(res, {
+          untrusted: true,
+          revision: revision(),
+          changedFiles: 0,
+          files: [],
+          limitations: [],
+        });
+      assert.equal(body.name, "review_access");
+      return respond(res, { authorized: true });
+    }
+    if (path.endsWith("/execution")) return respond(res, { accepted: true });
+    reports.push(body);
+    respond(res, { accepted: true, duplicate: false });
+  });
+  const bare = join(realpathSync.native(dirname(f.path)), "fixture.git");
+  const git = (args: string[]) =>
+    execFileSync("git", args, {
+      input: "",
+      encoding: "utf8",
+      windowsHide: true,
+    }).trim();
+  git(["init", "--bare", "-q", bare]);
+  git([
+    "--git-dir",
+    bare,
+    "config",
+    "remote.origin.url",
+    "https://github.com/org/repo.git",
+  ]);
+  const tree = git(["--git-dir", bare, "mktree"]);
+  sha = git([
+    "--git-dir",
+    bare,
+    "-c",
+    "user.name=fixture",
+    "-c",
+    "user.email=test@example.org",
+    "commit-tree",
+    tree,
+    "-m",
+    "fixture",
+  ]);
+  const cfg = config(f.base);
+  assert.ok(cfg.runtime.type === "openclaw");
+  cfg.stateFile = f.path;
+  cfg.runtime.deepReview = true;
+  cfg.runtime.timeoutMs = 60000;
+  const runtime = new OpenClawConnector(
+    cfg.runtime,
+    "model-token",
+    async (_url, init) => {
+      requests++;
+      assert.ok(!JSON.stringify(init).includes(token));
+      return Response.json({
+        id: "r1",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Reviewed." }],
+          },
+        ],
+      });
+    },
+  );
+  const agent = new Agent(
+    cfg,
+    f.store(),
+    runtime,
+    "dedicated-cloud-token",
+    fetch,
+    async (root, assigned, grant) => {
+      assert.equal(root, join(dirname(f.path), "review-cache"));
+      assert.equal(assigned.id, task.id);
+      assert.equal((await grant()).token, token);
+      return bare;
+    },
+  );
+  await agent.once();
+  assert.match(JSON.stringify(reports), /"status":"succeeded"/);
+  assert.equal(grants, 1);
+  assert.equal(requests, 1);
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  try {
+    const row = db.prepare("SELECT * FROM journal WHERE id=?").get(task.id);
+    assert.ok(row);
+    assert.ok(!JSON.stringify(row).includes(token));
+  } finally {
+    db.close();
+  }
 });
