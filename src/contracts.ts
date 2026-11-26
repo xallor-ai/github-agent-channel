@@ -123,6 +123,7 @@ export type PublicationReceipt = {
   url: string;
 };
 export interface Task extends NewTask {
+  reviewPolicy?: { deepReview: boolean; nativeReview: boolean };
   id: string;
   status: TaskState;
   deliveryStatus: DeliveryState;
@@ -158,7 +159,7 @@ export interface GitHubClient {
   ): Promise<{ id: number; url: string }>;
   reconcileReview?(
     task: Task,
-    id: number,
+    id?: number,
   ): Promise<{ id: number; url: string }>;
   readIssue(task: Task): Promise<unknown>;
   readFile(task: Task, path: string): Promise<unknown>;
@@ -172,6 +173,16 @@ export interface GitHubClient {
   ): Promise<{ id: number; url: string }>;
 }
 export class AccessDenied extends Error {}
+export class PullTargetRejected extends AccessDenied {
+  constructor(
+    readonly reason:
+      | "pr_open_unconfirmed"
+      | "pr_outside_binding"
+      | "pr_revision_changed",
+  ) {
+    super(reason);
+  }
+}
 export class AmbiguousExecution extends Error {}
 
 export type BindingLookup = (

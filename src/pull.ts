@@ -3,7 +3,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
 import { z } from "zod";
-import { AccessDenied, type GitHubClient, type Task } from "./contracts.js";
+import {
+  AccessDenied,
+  PullTargetRejected,
+  type GitHubClient,
+  type Task,
+} from "./contracts.js";
 import {
   TaskStore,
   AssignmentConflict,
@@ -147,15 +152,31 @@ export class PullCoordinator {
             workerId,
             hash(leaseToken),
             error instanceof AccessDenied ? "rejected" : "failed",
-            error instanceof AccessDenied
-              ? "Task authorization denied"
-              : "Task authorization unavailable",
+            error instanceof PullTargetRejected
+              ? error.reason
+              : error instanceof AccessDenied
+                ? "Task authorization denied"
+                : "Task authorization unavailable",
           );
           // This is a denied GitHub actor, not a rejected connector identity.
           // Keep the healthy poller alive and disclose no rejected task content.
           if (error instanceof AccessDenied) send(204);
           else send(503, { error: "Task authorization unavailable" });
           return true;
+        }
+        if (task.target.kind === "pull_request") {
+          const binding = this.store.activeBinding(
+            task.installationId,
+            task.repositoryId,
+          );
+          if (binding?.id !== task.bindingId) throw new StaleAssignment();
+          task = {
+            ...task,
+            reviewPolicy: {
+              deepReview: binding.deepReview === true,
+              nativeReview: binding.nativeReview === true,
+            },
+          };
         }
         send(200, { task, leaseToken, expiresAt });
         return true;

@@ -164,6 +164,7 @@ export class OpenClawConnector implements RuntimeConnector {
       combined.throwIfAborted();
     };
     let evidence: z.infer<typeof diffSchema> | undefined;
+    let modelDispatched = false;
     let fileReads = 0,
       searches = 0,
       limitedReads = 0;
@@ -190,7 +191,10 @@ export class OpenClawConnector implements RuntimeConnector {
           Buffer.byteLength(JSON.stringify(evidence)) > 80 * 1024
         )
           throw Error("PR diff does not match the assigned revision or limits");
-        if (this.config.deepReview === true) {
+        if (
+          this.config.deepReview === true &&
+          task.reviewPolicy?.deepReview === true
+        ) {
           await access();
           const repos = this.config.reviewRepositories;
           snapshot = repos?.[String(pin.headRepoId)]
@@ -246,6 +250,8 @@ export class OpenClawConnector implements RuntimeConnector {
       for (let round = 0; round < this.config.maxToolRounds; round++) {
         let response: Response;
         try {
+          combined.throwIfAborted();
+          modelDispatched = true;
           response = await this.fetcher(
             new URL("/v1/responses", this.config.baseUrl),
             {
@@ -456,7 +462,9 @@ export class OpenClawConnector implements RuntimeConnector {
             kind:
               task.target.kind === "repository"
                 ? "none"
-                : evidence && this.config.publishReview
+                : evidence &&
+                    this.config.publishReview &&
+                    task.reviewPolicy?.nativeReview === true
                   ? "review"
                   : "comment",
           },
@@ -467,6 +475,16 @@ export class OpenClawConnector implements RuntimeConnector {
         "tool_round_limit",
         "Runtime tool round limit reached",
       );
+    } catch (error) {
+      if (
+        !modelDispatched &&
+        (combined.aborted || error instanceof AmbiguousExecution)
+      )
+        throw new RuntimeFailure(
+          "preparation_interrupted",
+          "OpenClaw was not dispatched",
+        );
+      throw error;
     } finally {
       snapshot?.close();
     }

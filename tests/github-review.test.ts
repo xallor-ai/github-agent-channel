@@ -21,7 +21,7 @@ const target = {
     headSha: sha,
     baseSha: "b".repeat(40),
     baseRepoId: 2,
-    headRepoId: 3,
+    headRepoId: 2,
   },
 } as const;
 const task = {
@@ -330,5 +330,20 @@ test("admin recovery verifies only the original repository and review with insta
     if (mode === "revoked-binding")
       expectedCalls.push("GET /repos/org/repo/pulls/6/reviews/8");
     assert.deepEqual(calls, expectedCalls);
+  }
+});
+
+test("operator can discover a unique verified native review without a response ID and without posting", async () => {
+  for (const [listed, ok] of [
+    [[], false],
+    [[expected], true],
+    [[expected, expected], false],
+    [[{ ...expected, commit_id: "f".repeat(40) }], false],
+  ] as const) {
+    const f = fixture({ listed: [...listed] });
+    const result = reconcileNativeReview(task, undefined, f.client, bot);
+    if (ok) assert.deepEqual(await result, { id: 8, url });
+    else await assert.rejects(result);
+    assert.equal(f.writes.length, 0);
   }
 });

@@ -8,6 +8,7 @@ export const failureCodes = {
     "no_final_answer",
     "runtime_response_invalid",
     "runtime_failed",
+    "preparation_interrupted",
   ]),
   unknown: z.enum([
     "runtime_interrupted",
