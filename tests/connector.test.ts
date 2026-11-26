@@ -783,18 +783,40 @@ test("a changed line of spaces is substantive source data even without another c
   assert.equal(called, 1);
 });
 
-test("verified empty-line changes are reported as observed, not missing evidence or a clean code review", async () => {
-  const c = new OpenClawConnector(settings, "secret", async () => {
-    throw Error("Unexpected model call");
-  });
-  const r = await c.run(
-    { ...pr, source: { event: "pull_request", action: "opened" } },
-    async () => ({
-      ...diff,
-      files: [{ ...diff.files[0], patch: "@@ -1,0 +1 @@\n+\n" }],
-    }),
+for (const [status, marker, adds, dels] of [
+  ["modified", "+", 1, 0],
+  ["added", "+", 1, 0],
+  ["removed", "-", 0, 1],
+] as const) {
+  test(
+    "verified empty-line " +
+      status +
+      " is a factual notice rather than missing code",
+    async () => {
+      const c = new OpenClawConnector(settings, "secret", async () => {
+        throw Error("Unexpected model call");
+      });
+      const patch =
+        (adds ? "@@ -1,0 +1 @@" : "@@ -1 +1,0 @@") + "\n" + marker + "\n";
+      const result = await c.run(
+        { ...pr, source: { event: "pull_request", action: "opened" } },
+        async () => ({
+          ...diff,
+          files: [
+            {
+              ...diff.files[0],
+              status,
+              patch,
+              additions: adds,
+              deletions: dels,
+            },
+          ],
+        }),
+      );
+      assert.match(result.text, /已取得完整补丁/);
+      assert.ok(result.text.includes(status + ": 1"));
+      assert.match(result.text, /未执行语义评审/);
+      assert.equal(result.publication.kind, "comment");
+    },
   );
-  assert.match(r.text, /已取得完整补丁/);
-  assert.match(r.text, /未执行语义评审/);
-  assert.equal(r.publication.kind, "comment");
-});
+}

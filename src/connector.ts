@@ -237,7 +237,6 @@ export class OpenClawConnector implements RuntimeConnector {
             !evidence.limitations.length &&
             evidence.files.every((f) => {
               if (
-                f.status !== "modified" ||
                 f.patchStatus !== "provided" ||
                 !f.patch ||
                 !f.patch.startsWith("@@ ")
@@ -257,8 +256,25 @@ export class OpenClawConnector implements RuntimeConnector {
             })
           ) {
             // Empty source lines can affect literal data: report the observation, not approval.
+            const counts = new Map<string, number>();
+            for (const file of evidence.files) {
+              const status = [
+                "modified",
+                "added",
+                "removed",
+                "renamed",
+                "copied",
+                "changed",
+              ].includes(file.status)
+                ? file.status
+                : "other";
+              counts.set(status, (counts.get(status) ?? 0) + 1);
+            }
+            const actions = [...counts]
+              .map(([status, n]) => status + ": " + n)
+              .join(", ");
             return {
-              text: `固定版本 ${pin.baseSha} → ${pin.headSha}：已取得完整补丁，可见文本增删均为空行。未执行语义评审，不能据此判定无影响或可合并。`,
+              text: `固定版本 ${pin.baseSha} → ${pin.headSha}：已取得完整补丁（文件状态：${actions}），可见文本增删均为空行。未执行语义评审，不能据此判定无影响或可合并。`,
               artifacts: [],
               publication: { kind: "comment" },
             };
