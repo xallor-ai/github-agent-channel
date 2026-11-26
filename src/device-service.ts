@@ -63,6 +63,17 @@ function matchesActivityBinding(
     agent.nativeReview === runtime.nativeReview
   );
 }
+type VerifiedPrincipal = Parameters<BindingRegistry["apply"]>[0];
+function sameBindingIdentity(a: VerifiedPrincipal, b: VerifiedPrincipal) {
+  return (
+    a.installationId === b.installationId &&
+    a.repositoryId === b.repositoryId &&
+    a.deviceId === b.deviceId &&
+    a.administratorId === b.administratorId &&
+    a.owner === b.owner &&
+    a.repo === b.repo
+  );
+}
 const layout = [
   "CREATE TABLE devices(deviceId TEXT PRIMARY KEY, githubUserId INTEGER NOT NULL, credential BLOB NOT NULL UNIQUE, revoked INTEGER NOT NULL CHECK(revoked IN(0,1,2))) STRICT",
   "CREATE TABLE invites(digest BLOB PRIMARY KEY, githubUserId INTEGER NOT NULL, expiresAt INTEGER NOT NULL) STRICT",
@@ -287,21 +298,22 @@ export class DeviceService {
     });
     return { deviceId, githubUserId };
   }
-  async #verify(credential: string, input: z.infer<typeof target>) {
-    const device = this.authenticate(credential);
-    const before =
-      device &&
-      this.#registry.ownedSelection(device.deviceId, input.owner, input.repo);
+  async #verify(
+    credential: string,
+    input: z.infer<typeof target>,
+    before: ReturnType<BindingRegistry["ownedSelections"]>,
+  ) {
     try {
       return await this.#verifier.verify(credential, input);
     } catch (e) {
-      if (
-        e instanceof AdministratorLost &&
-        before &&
-        e.repositoryId === before.repositoryId &&
-        e.installationId === before.installationId
-      )
-        this.#registry.disableIfCurrent(before);
+      if (e instanceof AdministratorLost) {
+        const affected = before.find(
+          (b) =>
+            e.repositoryId === b.repositoryId &&
+            e.installationId === b.installationId,
+        );
+        if (affected) this.#registry.disableIfCurrent(affected);
+      }
       if (e instanceof AccessDenied) {
         if (e.message === "Device is not paired")
           throw new Rejection(401, "device_unauthorized");
@@ -395,21 +407,24 @@ export class DeviceService {
           : target.parse(body);
         const paired = this.authenticate(credential);
         if (!paired) throw new Rejection(401, "device_unauthorized");
+        const owned = this.#registry.ownedSelections(
+          paired.deviceId,
+          paired.githubUserId,
+          selection.owner,
+          selection.repo,
+        );
         const before = feed
-          ? this.#registry.ownedSelection(
-              paired.deviceId,
-              selection.owner,
-              selection.repo,
+          ? owned.filter((binding) =>
+              matchesActivityBinding(binding, feed.runtime),
             )
-          : undefined;
-        if (
-          feed &&
-          (!before ||
-            before.administratorId !== paired.githubUserId ||
-            !matchesActivityBinding(before, feed.runtime))
-        )
+          : owned;
+        if (feed && before.length === 0)
           throw new Rejection(403, "binding_owner");
-        const { who, installation } = await this.#verify(credential, selection);
+        const { who, installation } = await this.#verify(
+          credential,
+          selection,
+          owned,
+        );
         const coverage = {
           ...installation,
           serverWriteProfile:
@@ -434,15 +449,18 @@ export class DeviceService {
         )
           throw new Rejection(403, "binding_owner");
         if (feed) {
-          if (!binding || !matchesActivityBinding(binding, feed.runtime))
+          const verifiedBefore = before.find((b) =>
+            sameBindingIdentity(b, who),
+          );
+          if (!binding || !verifiedBefore)
             throw new Rejection(403, "binding_owner");
           if (
-            !before ||
-            before.revision !== binding.revision ||
-            before.installationId !== binding.installationId ||
-            before.repositoryId !== binding.repositoryId
+            verifiedBefore.revision !== binding.revision ||
+            !sameBindingIdentity(binding, who)
           )
             throw new Rejection(409, "binding_conflict");
+          if (!matchesActivityBinding(binding, feed.runtime))
+            throw new Rejection(403, "binding_owner");
           if (!this.#recentActivities)
             throw new Rejection(503, "service_error");
           const bindingId = [

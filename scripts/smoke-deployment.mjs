@@ -34,8 +34,9 @@ const holders = [];
 const timeout = Number(process.env.CHANNEL_SMOKE_COMMAND_TIMEOUT_MS || 600000);
 let imageBuilt = false;
 let networkCreated = false;
-function docker(args, quiet = false) {
+function docker(args, quiet = false, input) {
   const result = spawnSync("docker", args, {
+    input,
     encoding: "utf8",
     timeout,
     maxBuffer: 5_000_000,
@@ -616,6 +617,45 @@ try {
       const agentId = compose(agentTestCompose, ["ps", "-q", "agent"], true);
       const agentInspect = JSON.parse(docker(["inspect", agentId], true))[0];
       assert.deepEqual(agentInspect.HostConfig.PortBindings, {});
+      const bindingInput =
+        "owner: fixture\nrepo: fixture\ndeclaration:\n  enabled: true\n  events: [issue_comment.created]\n";
+      const repoCLI = (op) =>
+        JSON.parse(
+          docker(
+            [
+              "compose",
+              "-f",
+              agentTestCompose,
+              "exec",
+              "-T",
+              "agent",
+              "node",
+              "dist/cli.js",
+              "agent",
+              "repo",
+              op,
+              "-",
+              "/app/agent.runtime.yaml",
+            ],
+            true,
+            bindingInput,
+          ),
+        );
+      const applied = repoCLI("apply");
+      assert.equal(applied.state, "active");
+      let consumed = false;
+      for (let i = 0; i < 30; i++) {
+        const s = repoCLI("status");
+        if (s.localActivityInbox?.totalReceived > 0) {
+          consumed = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 750));
+      }
+      assert.ok(
+        consumed,
+        "containerized bridge must consume the host-supplied declaration's observed activity",
+      );
       let recovered = false;
       for (let attempt = 0; attempt < 30; attempt++) {
         const phase = compose(

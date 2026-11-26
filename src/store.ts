@@ -384,6 +384,13 @@ export class TaskStore {
         )
         .run(next, next);
     }
+    if (input.target.kind === "pull_request" && githubTime !== undefined)
+      this.ledger.detachPreCloseReviews(
+        input.repositoryId,
+        input.target.number,
+        githubTime,
+        cutoff == null ? null : Number(cutoff),
+      );
   }
   recordRuntime(id: string, event: RuntimeEvent): void {
     const task = this.get(id);
@@ -627,14 +634,20 @@ export class TaskStore {
     id: string,
     status: DeliveryState,
     receipt?: PublicationReceipt,
+    diagnostic?: string,
   ): void {
     if (!["sent", "failed", "unknown"].includes(status))
       throw Error("Invalid delivery transition");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
+        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=?,error=COALESCE(?,error) WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
       )
-      .run(status, receipt ? JSON.stringify(receipt) : null, id);
+      .run(
+        status,
+        receipt ? JSON.stringify(receipt) : null,
+        diagnostic ?? null,
+        id,
+      );
     if (!changed.changes) throw Error("Delivery is not sending");
   }
   recover(): void {

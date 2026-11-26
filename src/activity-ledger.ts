@@ -209,6 +209,44 @@ export class ActivityLedger {
     };
   }
 
+  // Use the individual close instant, even if a later close was delivered first.
+  // This repairs attribution only; the representative and its lease are untouched.
+  detachPreCloseReviews(
+    repositoryId: number,
+    number: number,
+    closedAt: number,
+    latestClosedAt: number | null,
+  ) {
+    const representative =
+      "SELECT id FROM tasks WHERE repositoryId=? AND json_extract(target,'$.kind')='pull_request' AND json_extract(target,'$.number')=?";
+    const stale = `duplicate=1 AND reason='review' AND (
+      ((githubTime IS NULL OR githubTime<=?) AND taskId IN (${representative} AND githubTime>?))
+      OR (githubTime>? AND githubTime<=? AND taskId IN (${representative} AND githubTime<=?)))`;
+    const scope = [
+      closedAt,
+      repositoryId,
+      number,
+      closedAt,
+      closedAt,
+      latestClosedAt,
+      repositoryId,
+      number,
+      closedAt,
+    ];
+    this.db
+      .prepare(
+        `UPDATE activities SET data=json_set(data,'$.taskId',NULL,'$.reason','closed')
+      WHERE cursor IN (SELECT cursor FROM deliveries WHERE ${stale})`,
+      )
+      .run(...scope);
+    this.db
+      .prepare(
+        `UPDATE deliveries SET taskId=NULL,reason='closed',reviewFollowUp=NULL,duplicate=0
+      WHERE ${stale}`,
+      )
+      .run(...scope);
+  }
+
   private decode(row: Record<string, unknown>): Activity {
     return { ...JSON.parse(String(row.data)), cursor: Number(row.cursor) };
   }

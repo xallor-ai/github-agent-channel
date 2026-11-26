@@ -38,6 +38,15 @@ repo: xallor
 npm run channel -- agent repo apply xallor.local.yaml agent.local.yaml
 ```
 
+**Docker 部署须在 bridge 所用卷内登记。** 上面是原生 bridge 的命令；容器使用命名卷里的 journal 和 inbox。将同一份非敏感仓库声明通过标准输入交给运行中的 agent 容器（保持已有项目和 compose 路径）：
+
+```sh
+docker compose -f ./agent-data/.channel-agent/compose.yaml exec -T agent node dist/cli.js agent repo apply - /app/agent.runtime.yaml < xallor.local.yaml
+docker compose -f ./agent-data/.channel-agent/compose.yaml exec -T agent node dist/cli.js agent repo status - /app/agent.runtime.yaml < xallor.local.yaml
+```
+
+在 PowerShell 中可用 `Get-Content -Raw -Encoding utf8 xallor.local.yaml | docker compose ...` 代替输入重定向。容器与原生客户端不能共享一份本机收件进度。若之前只在宿主机 apply，应在容器内重做相同声明的幂等 apply，然后核对当前 bindingId 和 localActivityInbox；不需要重新配对或重建绑定。
+
 例如设备配置为 `openclaw/github` 时，一次操作就会绑定并显示 `xallor-ai/xallor → openclaw/github`。省略 `declaration` 相当于启用，省略 `events` 表示跟随 Channel 支持的事件范围。服务端只会收到 App 已订阅、安装已获权且实际投递的活动。普通评论更新上下文；开放线程中直接提及 App 的评论、或创建 Issue 时明确提及 App，才会按默认策略委派。自己的评论记作回执，不会再次唤醒 Agent。推送不会单独启动评审。
 
 在同一台已授权设备上更换负责 Agent：选用指向新 Agent 的本机配置并再次显式 `apply`。修改本地文件本身不改变远端绑定；领取任务或读取活动时身份须与绑定一致。当前不支持另一台设备接管已有绑定。
@@ -78,6 +87,6 @@ npm run channel -- agent repo activities xallor.local.yaml agent.local.yaml 0 25
 
 由获授权的调用方保存每个仓库绑定的 `nextCursor`，有 `hasMore` 时继续翻页；换修订后可从 0 开始。活动页只暴露当前启用的绑定修订，最多保留最近 7 天、每仓库 1024 条；`truncated` 表示有记录已越过保留边界。它不是完整审计档案，也不会自动重放过期模型任务。摘录自身被裁短时有独立的 `truncated`。`agent run` 会为本机已成功 `apply` 的绑定自动分批读取活动页并保存游标。`status` 中的 `localActivityInbox` 展示本机与当前绑定修订匹配的收件进度；没有匹配记录为 null，本机收件库无法读取为 unavailable。收到活动仅表示连接器读到了这批记录，不会为此额外调用模型，也不代表模型会话已收到通知。没有成功 `apply` 的本地文件、单独执行 `status` 或有冲突的配置不会新增本机订阅。活动接口每页均返回 `bindingId`，包括空页；绑定修订变化时不得沿用旧修订的回执。生产环境哪些组合有实际回执，见[能力台账](capabilities.md)。
 
-后台轮询独立于任务领取与执行。每次读取一个仓库的一页（最多 25 条），结束后至少等 5 秒再读取下一仓；单次最多等待 15 秒。仅保存游标、已读条数、是否遇到保留缺口及最后确认时间，不保存摘录或发起人。`pollStatus` 为 `synced`、`not_yet_polled`、`denied` 或 `unconfirmed`；拒绝时不展示旧的进度计数。
+后台轮询独立于任务领取与执行。每次读取一个仓库的一页（最多 25 条）；单次最多等待 15 秒。仅保存游标、已读条数、是否遇到保留缺口及最后确认时间，不保存摘录或发起人。`pollStatus` 为 `synced`、`not_yet_polled`、`denied` 或 `unconfirmed`；拒绝时不展示旧的进度计数。
 
 后台收件与执行领取独立：首次可立即检查，此后每轮结束至少等 15 秒，轮转一个仓库、一页至多 25 条。没有游标进展的仓库至少等 60 秒；连续错误或拒绝按 60、120、240、480、900 秒退避，其他可读仓库不随之停收。它不是实时推送保证；不缓存成功授权来代替下一次校验。

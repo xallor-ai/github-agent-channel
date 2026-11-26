@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +25,9 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
   let now = 1000;
   let gate: (() => Promise<void>) | undefined;
   const selection = { owner: "org", repo: "project" };
-  const repository = { id: 12, name: "project", owner: { login: "org" } };
+  let installationId = 56;
+  let repositoryId = 12;
+  let permission = "admin";
   const user = { id: 99, login: "person" };
   const githubToken = "github_user_token_fixture";
   let lastPoll: number | null = null;
@@ -43,15 +45,20 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
       githubCalls++;
       const { origin, pathname } = new URL(String(url));
       assert.equal(origin, "https://api.github.com");
+      const repository = {
+        id: repositoryId,
+        name: "project",
+        owner: { login: "org" },
+      };
       const route: Record<string, unknown> = {
         "/user": { id: githubUserId },
         "/repos/org/project/installation": {
-          id: 56,
+          id: installationId,
           suspended_at: null,
           events: ["issues"],
           permissions: { issues: "read", metadata: "read" },
         },
-        "/app/installations/56/access_tokens": {
+        [`/app/installations/${installationId}/access_tokens`]: {
           token: "ghs_test",
           repository_selection: "selected",
           repositories: [repository],
@@ -59,7 +66,7 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
         },
         "/user/99": user,
         "/repos/org/project/collaborators/person/permission": {
-          permission: "admin",
+          permission,
           user,
         },
         "/repos/org/project": repository,
@@ -206,6 +213,109 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
     assert.equal((await allowed.json()).activities.length, 0);
     assert.equal(githubCalls, beforeFeeds + 5 * i);
   }
+  const observe = (
+    installationId: number,
+    repositoryId: number,
+    marker: string,
+  ) => {
+    const binding = tasks.activeBinding(installationId, repositoryId)!;
+    tasks.observe({
+      input: {
+        ...selection,
+        installationId,
+        repositoryId,
+        bindingId: binding.id,
+        deliveryId: randomUUID(),
+        actorId: 99,
+        actorLogin: "person",
+        prompt: marker,
+        source: { event: "issues", action: "opened" },
+        target: { kind: "issue", number: 1 },
+      },
+      execute: false,
+      reason: "observed",
+    });
+  };
+  const assertActivity = async (
+    installationId: number,
+    repositoryId: number,
+    marker: string,
+  ) => {
+    const allowed = await feed(ownToken);
+    assert.equal(allowed.status, 200);
+    const page = await allowed.json();
+    assert.equal(
+      page.bindingId,
+      `${installationId}:${repositoryId}:${who.deviceId}:1`,
+    );
+    assert.deepEqual(
+      page.activities.map((activity: { excerpt: string }) => activity.excerpt),
+      [marker],
+    );
+  };
+  observe(56, 12, "retired installation");
+  tasks.registry.disableIfCurrent(
+    tasks.registry.get({ installationId, repositoryId })!,
+  );
+  installationId = 57;
+  const beforeNoCandidate = githubCalls;
+  assert.equal((await feed(ownToken)).status, 403);
+  assert.equal(githubCalls, beforeNoCandidate);
+  assert.equal((await write()).status, 200);
+  observe(57, 12, "new installation");
+  await assertActivity(57, 12, "new installation");
+
+  repositoryId = 13; // Same name and App installation, new GitHub repository ID.
+  assert.equal((await feed(ownToken)).status, 403);
+  assert.equal((await write()).status, 200);
+  observe(57, 13, "replacement repository");
+  await assertActivity(57, 13, "replacement repository");
+
+  const current = tasks.registry.get({ installationId, repositoryId })!;
+  const feedGate = Promise.withResolvers<void>();
+  const releaseFeed = Promise.withResolvers<void>();
+  gate = () => {
+    feedGate.resolve();
+    return releaseFeed.promise;
+  };
+  const pendingFeed = feed(ownToken);
+  await feedGate.promise;
+  tasks.registry.apply(
+    {
+      ...selection,
+      installationId,
+      repositoryId,
+      deviceId: who.deviceId,
+      administratorId: who.githubUserId,
+    },
+    current.revision,
+    {
+      enabled: true,
+      responsibleAgent: fixtureAgent,
+      triggerLabel: "changed",
+    },
+  );
+  releaseFeed.resolve();
+  assert.equal((await pendingFeed).status, 409);
+  gate = undefined;
+
+  permission = "read";
+  assert.equal((await feed(ownToken)).status, 403);
+  assert.equal(
+    tasks.registry.get({ installationId: 57, repositoryId: 13 })?.enabled,
+    false,
+  );
+  assert.equal(
+    tasks.registry.get({ installationId: 57, repositoryId: 12 })?.enabled,
+    true,
+  );
+  permission = "admin";
+  const disabledCurrent = await feed(ownToken);
+  assert.equal(disabledCurrent.status, 403);
+  assert.deepEqual(await disabledCurrent.json(), { error: "binding_owner" });
+  repositoryId = 12;
+  await assertActivity(57, 12, "new installation");
+
   let resume!: () => void, entered!: () => void;
   const waiting = new Promise<void>((r) => (entered = r));
   gate = () => {
@@ -230,7 +340,7 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
   device = new DeviceService(options);
   assert.equal(device.authenticate(ownToken), undefined);
   assert.equal(
-    tasks.registry.get({ installationId: 56, repositoryId: 12 })?.enabled,
+    tasks.registry.get({ installationId: 57, repositoryId: 12 })?.enabled,
     false,
   );
   assert.equal((await revoke()).status, 200);
