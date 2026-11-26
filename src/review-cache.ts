@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, existsSync } from "node:fs";
 import {
-  cp,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -13,7 +13,14 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  resolve,
+} from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Task } from "./contracts.js";
 import { gitEnvironment } from "./runtime-workspace.js";
@@ -76,28 +83,47 @@ function run(dir: string, args: string[], signal: AbortSignal, auth?: string) {
         windowsHide: true,
         maxBuffer: 65536,
       },
-      (err, stdout) => (err ? fail(unavailable()) : ok(stdout.trim())),
+      (err, stdout) => {
+        if (
+          err &&
+          auth &&
+          (signal.aborted || err.killed || typeof err.code !== "number")
+        )
+          return fail(new UnconfirmedGitExit());
+        if (err) fail(unavailable());
+        else ok(stdout.trim());
+      },
     );
     child.stdin?.end();
   });
 }
+const fetchMarker = ".fetch-in-flight";
+class UnconfirmedGitExit extends Error {}
 const transfer: Transfer = async (dir, url, sha, token, signal) => {
-  await run(
-    dir,
-    [
-      "fetch",
-      "--quiet",
-      "--no-tags",
-      "--depth=1",
-      "--no-recurse-submodules",
-      "--no-auto-maintenance",
-      "--no-write-fetch-head",
-      url,
-      sha + ":refs/heads/h" + sha,
-    ],
-    signal,
-    token,
-  );
+  const marker = join(dirname(dir), fetchMarker);
+  await writeFile(marker, basename(dir), { flag: "wx", mode: 0o600 });
+  try {
+    await run(
+      dir,
+      [
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--depth=1",
+        "--no-recurse-submodules",
+        "--no-auto-maintenance",
+        "--no-write-fetch-head",
+        url,
+        sha + ":refs/heads/h" + sha,
+      ],
+      signal,
+      token,
+    );
+  } catch (error) {
+    if (!(error instanceof UnconfirmedGitExit)) await rm(marker);
+    throw error;
+  }
+  await rm(marker);
 };
 
 function cacheConfig(url: string) {
@@ -209,9 +235,32 @@ async function verify(dir: string, sha: string, signal: AbortSignal) {
 // Publish immutable objects first, then the shallow boundary and the new ref.
 // Existing readers retain their OIDs throughout. No fetch writes into a
 // published repository, so a failed/aborted transfer cannot dirty earlier pins.
-async function publishIncrement(stage: string, dir: string, sha: string) {
+async function copyForIncrement(from: string, to: string, signal: AbortSignal) {
+  for await (const entry of await opendir(from)) {
+    signal.throwIfAborted();
+    const src = join(from, entry.name),
+      dst = join(to, entry.name);
+    if (entry.isDirectory()) {
+      await mkdir(dst, { mode: 0o700 });
+      await copyForIncrement(src, dst, signal);
+    } else
+      await copyFile(
+        src,
+        dst,
+        constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL,
+      );
+  }
+  signal.throwIfAborted();
+}
+async function publishIncrement(
+  stage: string,
+  dir: string,
+  sha: string,
+  signal: AbortSignal,
+) {
   async function moveNew(from: string, to: string) {
     for await (const entry of await opendir(from)) {
+      signal.throwIfAborted();
       const source = join(from, entry.name),
         dest = join(to, entry.name);
       if (entry.isDirectory()) {
@@ -223,6 +272,7 @@ async function publishIncrement(stage: string, dir: string, sha: string) {
   await moveNew(join(stage, "objects"), join(dir, "objects"));
   if (await exists(join(stage, "shallow")))
     await rename(join(stage, "shallow"), join(dir, "shallow"));
+  signal.throwIfAborted();
   const ref = "refs/heads/h" + sha;
   await rename(join(stage, ref), join(dir, ref));
 }
@@ -290,6 +340,33 @@ export function createReviewCachePreparer(fetchObjects: Transfer) {
       } catch {
         throw Error("Review cache is busy");
       }
+      const key = createHash("sha256")
+        .update(
+          JSON.stringify([
+            task.installationId,
+            task.repositoryId,
+            task.bindingId,
+          ]),
+        )
+        .digest("hex");
+      const dir = join(root, key);
+      const url =
+        "https://github.com/" +
+        task.owner.toLowerCase() +
+        "/" +
+        task.repo.toLowerCase() +
+        ".git";
+      if (await exists(join(root, fetchMarker))) {
+        // A previous Git HTTPS helper may still own its staging directory.
+        // Do not delete staging or admit new downloads until operator reconciliation.
+        if (!(await exists(dir)))
+          throw Error("Review download needs reconciliation");
+        await validate(dir, url, key, signal);
+        if (!(await exists(join(dir, "refs/heads/h" + rev.headSha))))
+          throw Error("Review download needs reconciliation");
+        await verify(dir, rev.headSha, signal);
+        return dir;
+      }
       // No process can still own a preparation under this root lock, and
       // published readers only use the final digest directory. Reclaim just
       // the reserved mkdtemp names from our initially empty private root.
@@ -308,22 +385,6 @@ export function createReviewCachePreparer(fetchObjects: Transfer) {
         )
           throw Error("Unexpected entry in dedicated review cache root");
       });
-      const key = createHash("sha256")
-        .update(
-          JSON.stringify([
-            task.installationId,
-            task.repositoryId,
-            task.bindingId,
-          ]),
-        )
-        .digest("hex");
-      const dir = join(root, key);
-      const url =
-        "https://github.com/" +
-        task.owner.toLowerCase() +
-        "/" +
-        task.repo.toLowerCase() +
-        ".git";
       const cold = !(await exists(dir));
       let work = cold
         ? (staging = await mkdtemp(join(root, ".preparing-")))
@@ -356,10 +417,7 @@ export function createReviewCachePreparer(fetchObjects: Transfer) {
           if (used + (await walk(dir, signal)) > diskLimit)
             throw Error("Review cache storage limit exceeded");
           work = staging = await mkdtemp(join(root, ".preparing-"));
-          await cp(dir, work, {
-            recursive: true,
-            mode: constants.COPYFILE_FICLONE,
-          });
+          await copyForIncrement(dir, work, signal);
           await validate(work, url, key, signal);
         }
         const { token, expiresAt } = await grant();
@@ -401,11 +459,12 @@ export function createReviewCachePreparer(fetchObjects: Transfer) {
       if (cold) {
         await rename(work, dir);
         staging = undefined;
-      } else if (staging) await publishIncrement(staging, dir, sha);
+      } else if (staging) await publishIncrement(staging, dir, sha, signal);
       return dir;
     } finally {
       try {
-        if (staging) await rm(staging, { recursive: true, force: true });
+        if (staging && !(await exists(join(root, fetchMarker))))
+          await rm(staging, { recursive: true, force: true });
       } finally {
         try {
           lock?.close();

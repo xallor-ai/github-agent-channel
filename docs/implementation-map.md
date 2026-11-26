@@ -39,7 +39,7 @@
 | [agent-store.ts](../src/agent-store.ts)               | schema v3 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
 | [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
 | [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，接收已解析 token，不再读取凭据或保留空能力声明                            |
-| [review-cache.ts](../src/review-cache.ts) | 桥接进程维护隔离的 Git 对象库，按授权获取固定版本，不更新共享工作树。 |
+| [review-cache.ts](../src/review-cache.ts) | 桥接进程维护隔离的 Git 对象库，按授权获取固定版本，不更新共享工作树；下载退出不明时隔离 staging，仍可读取已验证的旧版本。 |
 | [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），PR 自动装入有界 diff，可选任务快照和正文型原生 Review                          |
 | [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
 | [runtime-workspace.ts](../src/runtime-workspace.ts)   | 干净 clone 的 origin/目标 SHA/元数据检查；共用索引校验拒绝隐藏修改；收集实际变更，不 clone/reset/push     |
