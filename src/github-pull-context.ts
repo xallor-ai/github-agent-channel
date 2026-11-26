@@ -166,7 +166,10 @@ export async function collectPullDiff(
       error && typeof error === "object" && "status" in error
         ? error.status
         : undefined;
-    if (status === 401 || status === 403 || error instanceof AccessDenied)
+    if (
+      (typeof status === "number" && status >= 400 && status < 500) ||
+      error instanceof AccessDenied
+    )
       throw error;
     await recheck();
     return {

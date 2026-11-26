@@ -514,7 +514,7 @@ try {
           "node",
           "--input-type=module",
           "-e",
-          "import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync('/data/smoke.db');console.log(db.prepare('SELECT count(*) AS n FROM smoke_publications').get().n);db.close();",
+          "import {DatabaseSync} from 'node:sqlite';const db=new DatabaseSync('/data/smoke.db',{readOnly:true,timeout:5000});console.log(db.prepare('SELECT count(*) AS n FROM smoke_publications').get().n);db.close();",
         ],
         true,
       );
@@ -627,7 +627,7 @@ try {
             "node",
             "--input-type=module",
             "-e",
-            "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/agent.db');console.log(d.prepare('SELECT phase FROM journal WHERE id=?').get('" +
+            "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/agent.db',{readOnly:true,timeout:5000});console.log(d.prepare('SELECT phase FROM journal WHERE id=?').get('" +
               crashedTask +
               "')?.phase);d.close();",
           ],
@@ -663,7 +663,7 @@ try {
               "node",
               "--input-type=module",
               "-e",
-              "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/smoke.db');console.log(d.prepare('SELECT count(*) AS n FROM smoke_claims').get().n);d.close();",
+              "import {DatabaseSync} from 'node:sqlite';const d=new DatabaseSync('/data/smoke.db',{readOnly:true,timeout:5000});console.log(d.prepare('SELECT count(*) AS n FROM smoke_claims').get().n);d.close();",
             ],
             true,
           ),

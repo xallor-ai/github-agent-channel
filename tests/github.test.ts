@@ -756,6 +756,9 @@ test("unavailable comparison on an authorized automatic review exposes a coverag
   const a = fixture({ compareStatus: 503 });
   const data = await a.client.readPullDiff(auto);
   assert.equal(data.files.length, 0);
+  await assert.rejects(
+    fixture({ compareStatus: 404 }).client.readPullDiff(auto),
+  );
   assert.ok(data.limitations.length);
   assert.equal(
     a.calls.filter((c) => c.path === "/repos/org/repo/pulls/5").length,
