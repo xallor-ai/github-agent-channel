@@ -347,3 +347,17 @@ test("operator can discover a unique verified native review without a response I
     assert.equal(f.writes.length, 0);
   }
 });
+
+test("an exhausted native review marker scan blocks the POST", async () => {
+  const f = fixture({
+    listed: Array.from({ length: 100 }, () => ({
+      ...expected,
+      body: "unrelated",
+    })),
+  });
+  await assert.rejects(
+    publishNativeReview(task, "summary", f.client, bot, async () => {}),
+    AccessDenied,
+  );
+  assert.equal(f.writes.length, 0);
+});
