@@ -685,8 +685,22 @@ export class TaskStore {
   reactionUnknown(taskId: string) {
     return this.ownerReceipts.unknown(taskId);
   }
+  reactionLookupRetryAt(taskId: string) {
+    return this.ownerReceipts.lookupRetryAt(taskId);
+  }
   reconcileReaction(taskId: string, reactionId: number) {
     this.ownerReceipts.finish(taskId, { status: "sent", reactionId }, true);
+  }
+  noteReactionLookupLimit(taskId: string, retryAt?: number) {
+    return this.transaction(() => {
+      if (!this.ownerReceipts.unknown(taskId)) return false;
+      this.ownerReceipts.finish(
+        taskId,
+        { status: "unknown", reason: "lookup_rate_limited", retryAt },
+        true,
+      );
+      return true;
+    });
   }
   publicationAllowed(taskId: string) {
     return !!this.db

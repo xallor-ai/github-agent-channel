@@ -99,6 +99,8 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 同一原评论重复投递时，`requestedDeliveryId` 是所查投递，`ownerReceipt.deliveryId` 是接收端实际确认的原始事件，两者可能不同。只有原评论 ID 时使用 `GET /repositories/<repositoryId>/comments/<commentId>/receipts`，普通讨论没有执行任务也能查。GitHub 限流只暂停相应安装后续未发的收件表情；当前失败条目不自动重投。执行排队过期与负责人收到评论是两件事；关闭、改绑或失权仍拦截新写入。
 
+若原写入结果未知，而只读对账又遭 GitHub 限流，回执保留 `unknown / lookup_rate_limited`。在同安装的冷却期限内，后续待发项不出队，管理员重查返回 429，不访问 GitHub。到期后可以再查，仍不会重新发送原写入。
+
 ## 预构建镜像
 
 用一次性容器生成部署 bundle 时，生成用户应与后续执行 Compose 的部署账号一致，并确保它能读到引用的 secret。否则生成器创建的700目录可能属于root，普通账号运行 Compose 时会报 `.env: permission denied`。确需由root生成时，只修正该次输出目录和配置的归属，不放宽所有 secret 权限；本次实际遇到并解决的情况见[真实评审闭环](channel-review-validation-20261123.md)。

@@ -37,12 +37,19 @@ export class ReactionWorker {
         if (e instanceof AmbiguousExecution) {
           // One read-only recovery attempt. Absence (or a failed lookup) is
           // not proof the POST failed. Never enqueue another POST on this path.
-          const id = await this.github
-            .lookupOwnerReaction?.(task)
-            .catch(() => null);
-          result = id
-            ? { status: "sent", reactionId: id }
-            : { status: "unknown", reason: "unconfirmed" };
+          result = { status: "unknown", reason: "unconfirmed" };
+          try {
+            const id = await this.github.lookupOwnerReaction?.(task);
+            if (id) result = { status: "sent", reactionId: id };
+          } catch (lookupError) {
+            const { reason, retryAt } = reactionFailure(lookupError);
+            if (reason === "rate_limited")
+              result = {
+                status: "unknown",
+                reason: "lookup_rate_limited",
+                retryAt,
+              };
+          }
         } else {
           const { reason, retryAt } = reactionFailure(e);
           result = {

@@ -54,6 +54,7 @@ function fixture(
     postHeaders?: Record<string, string>;
     postReply?: unknown;
     listed?: unknown[];
+    limitLookup?: boolean;
     commentDeleted?: boolean;
   } = {},
 ) {
@@ -119,6 +120,11 @@ function fixture(
           headers: options.postHeaders,
         });
       }
+      if (options.limitLookup)
+        return Response.json(
+          { message: "private test body" },
+          { status: 429, headers: { "retry-after": "120" } },
+        );
       return json(options.listed ?? [other]);
     }
     throw Error("Unexpected path " + path);
@@ -353,4 +359,36 @@ test("worker never repeats a lost POST; lookup can confirm only a matching react
         : { status: "unknown", reason: "unconfirmed" },
     );
   }
+});
+
+test("ambiguous POST plus rate-limited verification keeps the write unknown and reports the lookup delay", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const f = fixture({ postStatus: 500, limitLookup: true });
+  let reserved = false,
+    finished = 0;
+  const worker = new ReactionWorker(
+    {
+      reserveReaction() {
+        if (!reserved) {
+          reserved = true;
+          return task;
+        }
+      },
+      reactionAllowed: () => true,
+      finishReaction(_task, result) {
+        finished++;
+        assert.deepEqual(result, {
+          status: "unknown",
+          reason: "lookup_rate_limited",
+          retryAt: now + 120000,
+        });
+      },
+    },
+    f.github,
+  );
+  assert.equal(await worker.tick(), true);
+  assert.equal(await worker.tick(), false);
+  assert.equal(finished, 1);
+  assert.equal(f.posts(), 1);
 });

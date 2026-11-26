@@ -182,51 +182,82 @@ test("two offline days expire execution, not the receipt of the original comment
   assert.equal(f.store.get(item.taskId!)?.deliveryStatus, "skipped");
 });
 
-test("rate limit fences only pending eyes of this installation across restart until the advertised deadline", (t) => {
-  let now = Date.now();
-  t.mock.method(Date, "now", () => now);
-  const f = open(t),
-    first = f.observe(1),
-    second = f.observe(2);
-  const other = {
-    installationId: 9,
-    repositoryId: 80,
-    owner: "org9",
-    repo: "repo9",
-  };
-  const b = seedBinding(f.store, other, "phone");
-  const task = f.store.observe({
-    execute: true,
-    reason: "mention",
-    input: { ...first.input, ...other, bindingId: b.id, deliveryId: "foreign" },
-  });
-  f.store.confirmActivities("phone", fixtureAgent, f.b.id, [
-    first.entry,
-    second.entry,
-  ]);
-  f.store.confirmActivities("phone", fixtureAgent, b.id, [
-    { deliveryId: "foreign", cursor: task.cursor },
-  ]);
-  assert.equal(f.store.reserveReaction()?.id, first.taskId);
-  const retryAt = now + 3600_000;
-  f.store.finishReaction(first.taskId!, {
-    status: "failed",
-    reason: "rate_limited",
-    retryAt,
-  });
-  f.restart();
-  assert.equal(f.store.reserveReaction()?.id, task.taskId);
-  f.store.finishReaction(task.taskId!, { status: "sent", reactionId: 77 });
-  now = retryAt - 1;
-  assert.equal(f.store.reserveReaction(), undefined);
-  now++;
-  assert.equal(f.store.reserveReaction()?.id, second.taskId);
-  assert.equal(
-    f.store.ownerReceipt(first.entry.deliveryId)?.reaction?.status,
-    "failed",
+for (const origin of ["write", "lookup"] as const)
+  test(
+    "rate-limited " +
+      origin +
+      " fences only pending eyes of this installation across restart until the advertised deadline",
+    (t) => {
+      let now = Date.now();
+      t.mock.method(Date, "now", () => now);
+      const f = open(t),
+        first = f.observe(1),
+        second = f.observe(2);
+      const other = {
+        installationId: 9,
+        repositoryId: 80,
+        owner: "org9",
+        repo: "repo9",
+      };
+      const b = seedBinding(f.store, other, "phone");
+      const task = f.store.observe({
+        execute: true,
+        reason: "mention",
+        input: {
+          ...first.input,
+          ...other,
+          bindingId: b.id,
+          deliveryId: "foreign",
+        },
+      });
+      f.store.confirmActivities("phone", fixtureAgent, f.b.id, [
+        first.entry,
+        second.entry,
+      ]);
+      f.store.confirmActivities("phone", fixtureAgent, b.id, [
+        { deliveryId: "foreign", cursor: task.cursor },
+      ]);
+      assert.equal(f.store.reserveReaction()?.id, first.taskId);
+      const retryAt = now + 3600_000;
+      f.store.finishReaction(
+        first.taskId!,
+        origin === "write"
+          ? { status: "failed", reason: "rate_limited", retryAt }
+          : { status: "unknown", reason: "lookup_rate_limited", retryAt },
+      );
+      assert.equal(
+        f.store.noteReactionLookupLimit(first.taskId!, now + 70_000),
+        origin === "lookup",
+      );
+      assert.equal(
+        f.store.noteReactionLookupLimit(second.taskId!, retryAt + 10_000),
+        false,
+      );
+      const firstReceipt = f.store.ownerReceipt(
+        first.entry.deliveryId,
+      )?.reaction;
+      assert.equal(
+        firstReceipt?.reason,
+        origin === "lookup" ? "lookup_rate_limited" : "rate_limited",
+      );
+      f.restart();
+      assert.equal(f.store.reactionLookupRetryAt(first.taskId!), retryAt);
+      assert.equal(f.store.reactionLookupRetryAt(second.taskId!), retryAt);
+      assert.equal(f.store.reactionLookupRetryAt(task.taskId!), null);
+      assert.equal(f.store.reserveReaction()?.id, task.taskId);
+      f.store.finishReaction(task.taskId!, { status: "sent", reactionId: 77 });
+      now = retryAt - 1;
+      assert.equal(f.store.reserveReaction(), undefined);
+      now++;
+      assert.equal(f.store.reactionLookupRetryAt(first.taskId!), null);
+      assert.equal(f.store.reserveReaction()?.id, second.taskId);
+      assert.equal(
+        f.store.ownerReceipt(first.entry.deliveryId)?.reaction?.status,
+        origin === "write" ? "failed" : "unknown",
+      );
+      assert.equal(f.store.reserveReaction(), undefined);
+    },
   );
-  assert.equal(f.store.reserveReaction(), undefined);
-});
 
 test("ordinary comments remain traceable after retention and repeated installations cannot schedule duplicate writes", (t) => {
   const f = open(t),

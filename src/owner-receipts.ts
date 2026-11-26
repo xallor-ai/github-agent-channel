@@ -15,8 +15,10 @@ export class ExpiredActivities extends Error {
 }
 export type ReactionResult =
   | { status: "sent"; reactionId: number }
+  | { status: "unknown"; reason: "unconfirmed" }
+  | { status: "unknown"; reason: "lookup_rate_limited"; retryAt?: number }
   | {
-      status: "unknown" | "failed";
+      status: "failed";
       retryAt?: number;
       reason:
         | "unconfirmed"
@@ -202,7 +204,10 @@ export class OwnerReceipts {
         reconcile ? "unknown" : "sending",
       );
     if (!changes.changes) throw Error("Reaction state changed");
-    if (result.status === "failed" && result.reason === "rate_limited") {
+    if (
+      (result.status === "failed" && result.reason === "rate_limited") ||
+      (result.status === "unknown" && result.reason === "lookup_rate_limited")
+    ) {
       const until = Math.max(
         Date.now() + 60_000,
         Number.isSafeInteger(result.retryAt) ? result.retryAt! : 0,
@@ -220,5 +225,13 @@ export class OwnerReceipts {
         "SELECT 1 FROM ownerReceipts WHERE taskId=? AND reactionStatus='unknown'",
       )
       .get(id);
+  }
+  lookupRetryAt(taskId: string) {
+    const row = this.db
+      .prepare(
+        "SELECT c.until FROM reactionCooldowns c JOIN tasks t ON c.installationId=t.installationId WHERE t.id=? AND c.until>?",
+      )
+      .get(taskId, Date.now());
+    return row ? Number(row.until) : null;
   }
 }

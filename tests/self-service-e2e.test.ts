@@ -45,6 +45,8 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const publication: string[] = [];
   const eyes: string[] = [];
   let revealHistoricalReaction = false;
+  let limitHistoricalLookup = false;
+  let historicalReads = 0;
   let actorAllowed = true,
     secondAdmin = true;
   // Only external GitHub transport is synthetic. Octokit authenticates managers,
@@ -102,6 +104,12 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
             { status: 502 },
           );
         }
+        historicalReads++;
+        if (limitHistoricalLookup)
+          return Response.json(
+            { message: "cooldown" },
+            { status: 429, headers: { "retry-after": "60" } },
+          );
         return Response.json(
           revealHistoricalReaction
             ? [
@@ -597,8 +605,18 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
       const auditPath = "/tasks/" + unknownId + "/reconcile-reaction";
       assert.equal((await post(auditPath, tokens[0], {})).status, 401);
       assert.equal((await post(auditPath, "admin", {})).status, 409);
+      limitHistoricalLookup = true;
+      assert.equal((await post(auditPath, "admin", {})).status, 429);
+      const limitedCount = historicalReads;
+      limitHistoricalLookup = false;
+      assert.equal((await post(auditPath, "admin", {})).status, 429);
+      assert.equal(historicalReads, limitedCount);
       revealHistoricalReaction = true;
-      const fixed = await post(auditPath, "admin", {});
+      const later = Date.now() + 61_000;
+      const now = t.mock.method(Date, "now", () => later);
+      const fixed = await post(auditPath, "admin", {}).finally(() =>
+        now.mock.restore(),
+      );
       assert.equal(fixed.status, 200);
       assert.equal((await fixed.json()).ownerReceipt.reaction.reactionId, 779);
       assert.equal(eyes.filter((p) => p.endsWith("/503/reactions")).length, 1);

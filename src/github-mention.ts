@@ -1,7 +1,13 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmStrikethroughFromMarkdown } from "mdast-util-gfm-strikethrough";
+import { gfmStrikethrough } from "micromark-extension-gfm-strikethrough";
 
 type Node = import("mdast").Root | import("mdast").RootContent;
 const comment = /^<!--(?:(?!-->)[\s\S])*-->\s*$/;
+const markdown = {
+  extensions: [gfmStrikethrough({ singleTilde: true })],
+  mdastExtensions: [gfmStrikethroughFromMarkdown()],
+};
 
 // An occurrence in a quoted example or link is content, not a delegation.
 // Limit accepted prose containers explicitly; a new AST node type cannot opt in.
@@ -26,7 +32,7 @@ export function mentionsBot(body: string, login: string): boolean {
     );
   let root;
   try {
-    root = fromMarkdown(body);
+    root = fromMarkdown(body, markdown);
   } catch {
     return false;
   }
@@ -47,14 +53,6 @@ export function mentionsBot(body: string, login: string): boolean {
     // meaning is ambiguous. Self-contained comments only hide their contents.
     if (block.type === "html" && !comment.test(block.value)) return false;
     if (block.type !== "paragraph" && block.type !== "heading") continue;
-    // Strikethrough is a GitHub extension, not CommonMark. Do not turn
-    // withdrawn instructions in such a paragraph into an action.
-    if (
-      body
-        .slice(block.position?.start.offset, block.position?.end.offset)
-        .includes("~~")
-    )
-      continue;
     // Inline HTML can change the meaning of sibling text (e.g. <code>...).
     // Do not infer rendered prose in a paragraph containing raw HTML.
     const pending: Node[] = [...block.children];
@@ -81,6 +79,9 @@ export function mentionsBot(body: string, login: string): boolean {
         let left = offset;
         if (m.index === 0)
           while (left > 0 && /[*_]/.test(body[left - 1])) left--;
+        // Parenthesized prose can start a word. Check the outer boundary
+        // as well: a parenthesis inside a URL/path does not start a word.
+        while (left > 0 && body[left - 1] === "(") left--;
         if (left && !/[\s，。：；！？、（]/u.test(body[left - 1])) continue;
         const next = body[offset + m[0].length];
         if (next && /[a-z0-9@/\[\]-]/i.test(next)) continue;

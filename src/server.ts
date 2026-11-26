@@ -14,6 +14,7 @@ import { StaleBinding, TaskStore } from "./store.js";
 import { normalizeWebhook } from "./webhook.js";
 import { AccessDenied } from "./contracts.js";
 import { assessMerge } from "./merge-assessment.js";
+import { reactionFailure } from "./github-reaction.js";
 function authorized(header: string | undefined, token: string) {
   const a = Buffer.from(header ?? "");
   const b = Buffer.from(`Bearer ${token}`);
@@ -200,6 +201,14 @@ export function createChannelServer(
             send(409, { error: "No unknown owner reaction to reconcile" });
             return;
           }
+          const retryAt = store.reactionLookupRetryAt(task.id);
+          if (retryAt !== null) {
+            send(429, {
+              error: "GitHub reaction lookup rate limited; check later",
+              retryAt,
+            });
+            return;
+          }
           try {
             const reactionId = await reconcileOwnerReaction(task);
             if (!reactionId) {
@@ -210,10 +219,21 @@ export function createChannelServer(
               store.reconcileReaction(task.id, reactionId);
               send(200, { ownerReceipt: store.ownerReceipt(task.deliveryId) });
             }
-          } catch {
-            send(409, {
-              error: "Cannot confirm bot reaction; inspect the current receipt",
-            });
+          } catch (e) {
+            const failure = reactionFailure(e);
+            if (failure.reason === "rate_limited") {
+              store.noteReactionLookupLimit(
+                task.id,
+                failure.retryAt ?? Date.now() + 60_000,
+              );
+              send(429, {
+                error: "GitHub reaction lookup rate limited; check later",
+              });
+            } else
+              send(409, {
+                error:
+                  "Cannot confirm bot reaction; inspect the current receipt",
+              });
           }
           return;
         }
