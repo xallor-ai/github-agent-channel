@@ -136,6 +136,13 @@ export function initializeTaskSchema(db: DatabaseSync) {
       ],
       clarificationSelections: ["taskId", "choices"],
       clarificationAttempts: ["taskId", "startedAt"],
+      undeliveredAnswers: [
+        "taskId",
+        "questionTaskId",
+        "attempt",
+        "githubTime",
+        "rejectedAt",
+      ],
       clarificationCandidates: [
         "cursor",
         "questionTaskId",
@@ -218,6 +225,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX clarification_match ON clarifications(bindingId,thread,actorId,askedAt) WHERE answerTaskId IS NULL AND closed=0;
     CREATE TABLE clarificationSelections(taskId TEXT PRIMARY KEY REFERENCES tasks(id),choices TEXT NOT NULL) STRICT;
     CREATE TABLE clarificationAttempts(taskId TEXT PRIMARY KEY REFERENCES tasks(id),startedAt INTEGER NOT NULL) STRICT;
+    CREATE TABLE undeliveredAnswers(taskId TEXT PRIMARY KEY REFERENCES tasks(id), questionTaskId TEXT NOT NULL REFERENCES clarifications(questionTaskId), attempt INTEGER NOT NULL,githubTime INTEGER NOT NULL,rejectedAt INTEGER NOT NULL, UNIQUE(questionTaskId,attempt)) STRICT;
     CREATE TABLE clarificationCandidates(cursor INTEGER PRIMARY KEY,questionTaskId TEXT NOT NULL REFERENCES tasks(id),input TEXT NOT NULL,githubTime INTEGER NOT NULL,receivedAt INTEGER NOT NULL) STRICT;
     CREATE INDEX clarification_inflight ON clarificationCandidates(questionTaskId,githubTime,cursor);
     CREATE INDEX clarification_candidate_age ON clarificationCandidates(receivedAt,cursor);

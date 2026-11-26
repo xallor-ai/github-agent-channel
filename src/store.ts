@@ -734,12 +734,15 @@ export class TaskStore {
   ): void {
     if (!["rejected", "failed"].includes(status) || !error)
       throw Error("Invalid assignment rejection");
-    const changed = this.db
-      .prepare(
-        "UPDATE tasks SET status=?,deliveryStatus='skipped',error=? WHERE id=? AND runtime IS NULL AND status IN ('running','unknown') AND EXISTS (SELECT 1 FROM assignments WHERE taskId=tasks.id AND workerId=? AND leaseHash=?)",
-      )
-      .run(status, error, id, workerId, leaseHash);
-    if (!changed.changes) throw new AssignmentConflict("Task is not running");
+    this.transaction(() => {
+      const changed = this.db
+        .prepare(
+          "UPDATE tasks SET status=?,deliveryStatus='skipped',error=? WHERE id=? AND runtime IS NULL AND status IN ('running','unknown') AND EXISTS (SELECT 1 FROM assignments WHERE taskId=tasks.id AND workerId=? AND leaseHash=?)",
+        )
+        .run(status, error, id, workerId, leaseHash);
+      if (!changed.changes) throw new AssignmentConflict("Task is not running");
+      this.questions.undelivered(id, error === "pr_open_unconfirmed");
+    });
   }
   confirmActivities(
     deviceId: string,
@@ -790,9 +793,12 @@ export class TaskStore {
     });
   }
   publicationAllowed(taskId: string) {
-    return this.questions.selectionValid(taskId) && !!this.db
-      .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
-      .get(taskId);
+    return (
+      this.questions.selectionValid(taskId) &&
+      !!this.db
+        .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
+        .get(taskId)
+    );
   }
   fenceContinuationPublication(
     task: Task,

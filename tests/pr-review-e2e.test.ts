@@ -83,6 +83,7 @@ async function fixture(
     },
   );
   let head = h1;
+  let reviewerCanWrite = true;
   let closed = false;
   let baseRef = "main";
   const replies: string[] = [];
@@ -123,7 +124,10 @@ async function fixture(
     if (path === "/repos/org/repo")
       return json({ id: 2, name: "repo", owner: { login: "org" } });
     if (path.endsWith("/collaborators/alice/permission"))
-      return json({ permission: "write", user: sender });
+      return json({
+        permission: reviewerCanWrite ? "write" : "read",
+        user: sender,
+      });
     if (path.endsWith("/pulls/7"))
       return json({
         number: 7,
@@ -358,6 +362,9 @@ async function fixture(
   };
   return {
     github,
+    setReviewerAccess: (allowed: boolean) => {
+      reviewerCanWrite = allowed;
+    },
     store,
     post,
     pr,
@@ -459,6 +466,63 @@ for (const changed of ["closed", "new_head"] as const) {
     },
   );
 }
+
+test("a rejected undispatched answer leaves the original question open for a fresh authorized reply", async (t) => {
+  const f = await fixture(t);
+  let calls = 0;
+  const agent = f.agentWith(async () => {
+    if (++calls === 1)
+      return json({
+        status: "completed",
+        id: "q",
+        output: [
+          {
+            type: "function_call",
+            name: "request_clarification",
+            call_id: "q1",
+            arguments: JSON.stringify({ question: "Which system?" }),
+          },
+        ],
+      });
+    return json({
+      status: "completed",
+      id: "r",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Reviewed Linux." }],
+        },
+      ],
+    });
+  });
+  const root = (
+    await f.reply(8, "@fixture inspect this change", f.postedAt - 2000)
+  ).taskId;
+  await agent.once();
+  await f.publisher.tick();
+  f.setReviewerAccess(false);
+  const first = await f.reply(11, "Windows", f.postedAt + 1000);
+  assert.equal(await agent.once(), false);
+  assert.equal(f.store.get(first.taskId)?.status, "rejected");
+  assert.equal(f.store.clarificationState(root)?.status, "waiting");
+  assert.equal(calls, 1);
+  f.setReviewerAccess(true);
+  const duplicate = await f.reply(11, "Windows", f.postedAt + 1000);
+  assert.equal(duplicate.taskId, first.taskId);
+  assert.equal(await agent.once(), false);
+  const second = await f.reply(
+    12,
+    "/answer " + root + " Linux",
+    Date.now() + 2000,
+  );
+  assert.ok(second.taskId && second.taskId !== first.taskId);
+  await agent.once();
+  await f.publisher.tick();
+  assert.equal(f.store.get(second.taskId)?.deliveryStatus, "sent");
+  assert.equal(f.store.conversation(first.taskId)?.rootTaskId, root);
+  assert.equal(calls, 2);
+});
 
 test("an implicit answer delivered during an uncertain question write is only activated after verified readback", async (t) => {
   const f = await fixture(t);

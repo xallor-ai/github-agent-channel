@@ -18,9 +18,9 @@ export class ClarificationLedger {
   context(id: string): Pick<Task, "continuation" | "questionChoices"> {
     const prior = this.db
       .prepare(
-        "SELECT q.rootTaskId,q.questionTaskId,r.prompt AS originalPrompt,json_extract(t.outcome,'$.text') AS question FROM clarifications q JOIN tasks r ON r.id=q.rootTaskId JOIN tasks t ON t.id=q.questionTaskId WHERE q.answerTaskId=?",
+        "SELECT q.rootTaskId,q.questionTaskId,r.prompt AS originalPrompt,json_extract(t.outcome,'$.text') AS question FROM clarifications q JOIN tasks r ON r.id=q.rootTaskId JOIN tasks t ON t.id=q.questionTaskId WHERE q.answerTaskId=? OR q.questionTaskId=(SELECT questionTaskId FROM undeliveredAnswers WHERE taskId=?)",
       )
-      .get(id);
+      .get(id, id);
     if (prior) {
       const history: { question: string; answer: string }[] = [];
       let parent = String(prior.questionTaskId);
@@ -107,6 +107,7 @@ export class ClarificationLedger {
     input: NewTask,
     time: number | undefined,
     ordinary: boolean,
+    receivedAt = Date.now(),
   ): Match | undefined {
     if (
       input.source.event !== "issue_comment" ||
@@ -138,7 +139,8 @@ export class ClarificationLedger {
     const rows = this.db
       .prepare(
         `
-      SELECT q.questionTaskId,q.askedAt,q.expiresAt,q.answerTaskId FROM clarifications q
+      SELECT q.questionTaskId,q.askedAt,q.expiresAt,q.answerTaskId,
+      (SELECT max(u.githubTime,u.rejectedAt) FROM undeliveredAnswers u WHERE u.questionTaskId=q.questionTaskId ORDER BY u.attempt DESC LIMIT 1) AS retryAfter FROM clarifications q
       LEFT JOIN tasks a ON a.id=q.answerTaskId
       WHERE q.bindingId=? AND q.thread=? AND q.actorId=? AND q.closed=0 AND q.askedAt<=? AND q.expiresAt>?
       AND (q.answerTaskId IS NULL OR a.githubTime>=?) AND (? IS NULL OR q.questionTaskId=?)
@@ -154,7 +156,7 @@ export class ClarificationLedger {
         selectorId,
         selectorId,
       );
-    const now = Date.now();
+    const now = receivedAt;
     const inflight = this.db
       .prepare(
         `SELECT t.id FROM clarificationAttempts p JOIN tasks t ON t.id=p.taskId
@@ -188,6 +190,7 @@ export class ClarificationLedger {
       rows.some(
         (r) =>
           r.answerTaskId !== null ||
+          (r.retryAfter !== null && time <= Number(r.retryAfter)) ||
           Number(r.expiresAt) <= now ||
           r.askedAt === time,
       )
@@ -264,7 +267,7 @@ export class ClarificationLedger {
         time = Number(r.githubTime);
       const m =
         confirmed && Date.now() - Number(r.receivedAt) < 24 * 3600000
-          ? this.match(input, time, true)
+          ? this.match(input, time, true, Number(r.receivedAt))
           : undefined;
       let id = null;
       if (m?.reason === "clarification_reply" && m.questionId === question.id) {
@@ -301,21 +304,50 @@ export class ClarificationLedger {
       )
       .run(thread, repositoryId, time ?? null, time ?? null);
   }
+  undelivered(taskId: string, terminalTarget: boolean) {
+    const r = this.db
+      .prepare(
+        "SELECT q.questionTaskId,t.githubTime FROM clarifications q JOIN tasks t ON t.id=q.answerTaskId WHERE q.answerTaskId=?",
+      )
+      .get(taskId);
+    if (!r) return;
+    if (r.githubTime === null) throw Error("Undated clarification answer");
+    this.db
+      .prepare(
+        "INSERT INTO undeliveredAnswers SELECT ?,?,coalesce((SELECT attempt FROM undeliveredAnswers WHERE questionTaskId=? ORDER BY attempt DESC LIMIT 1),0)+1,?,?",
+      )
+      .run(
+        taskId,
+        r.questionTaskId!,
+        r.questionTaskId!,
+        r.githubTime,
+        Date.now(),
+      );
+    this.db
+      .prepare(
+        "UPDATE clarifications SET answerTaskId=NULL,closed=MAX(closed,?) WHERE answerTaskId=?",
+      )
+      .run(Number(terminalTarget), taskId);
+  }
   state(id: string) {
     const q = this.db
       .prepare(
         `SELECT rootTaskId,questionTaskId,actorId AS expectedActorId,askedAt,expiresAt,answerTaskId,
+      coalesce((SELECT attempt FROM undeliveredAnswers u WHERE u.questionTaskId=q.questionTaskId ORDER BY attempt DESC LIMIT 1),0) AS undeliveredAttempts,
+      (SELECT taskId FROM undeliveredAnswers u WHERE u.questionTaskId=q.questionTaskId ORDER BY attempt DESC LIMIT 1) AS lastUndeliveredTaskId,
       CASE WHEN answerTaskId IS NOT NULL THEN 'answered' WHEN closed=1 THEN 'closed' WHEN NOT EXISTS(SELECT 1 FROM bindings b WHERE b.installationId||':'||b.repositoryId||':'||b.deviceId||':'||b.revision=q.bindingId AND json_extract(b.declaration,'$.enabled')=1) THEN 'retired' WHEN expiresAt<=? THEN 'expired' ELSE 'waiting' END AS status
-      FROM clarifications q WHERE questionTaskId=? OR answerTaskId=? ORDER BY questionTaskId=? DESC LIMIT 1`,
+      FROM clarifications q WHERE questionTaskId=? OR answerTaskId=? OR questionTaskId=(SELECT questionTaskId FROM undeliveredAnswers WHERE taskId=?) ORDER BY questionTaskId=? DESC LIMIT 1`,
       )
-      .get(Date.now(), id, id, id);
+      .get(Date.now(), id, id, id, id);
     return q ? { ...q } : null;
   }
   conversation(id: string) {
     const rootTaskId = String(
       this.db
-        .prepare("SELECT rootTaskId FROM clarifications WHERE answerTaskId=?")
-        .get(id)?.rootTaskId ?? id,
+        .prepare(
+          "SELECT rootTaskId FROM clarifications WHERE answerTaskId=? OR questionTaskId=(SELECT questionTaskId FROM undeliveredAnswers WHERE taskId=?)",
+        )
+        .get(id, id)?.rootTaskId ?? id,
     );
     const turns = [];
     let cursor: string | null = rootTaskId;
@@ -338,6 +370,10 @@ export class ClarificationLedger {
           ? JSON.parse(String(row.publicationReceipt))
           : null,
         questionStatus: isQuestion ? question?.status : null,
+        undeliveredAttempts: isQuestion ? question?.undeliveredAttempts : 0,
+        lastUndeliveredTaskId: isQuestion
+          ? question?.lastUndeliveredTaskId
+          : null,
         nextTaskId,
       });
       cursor = nextTaskId;

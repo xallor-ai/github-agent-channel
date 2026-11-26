@@ -291,6 +291,88 @@ test("a unique inflight question holds an implicit reply without claiming silent
   assert.equal(result?.reason, "clarification_reply");
   assert.equal(f.store.get(result!.taskId!)?.continuation?.questionTaskId, q);
 });
+
+test("only an undisclosed claim may release a provisional answer; its comment and run remain auditable", (t) => {
+  const f = fixture(t),
+    q = f.request("inspect");
+  f.ask(q, "Which build?");
+  const answer = f.comment("use first");
+  const rejected = f.receive(answer).taskId!;
+  assert.equal(
+    f.store.claimAssignment("worker", "a", Date.now() + 60000)?.id,
+    rejected,
+  );
+  const refusedAt = Date.now();
+  const clock = t.mock.method(Date, "now", () => refusedAt);
+  f.store.rejectUndeliveredClaim(
+    rejected,
+    "worker",
+    "a",
+    "rejected",
+    "Task authorization denied",
+  );
+  f.restart();
+  assert.equal(f.store.clarificationState(q)?.status, "waiting");
+  assert.equal(f.store.get(rejected)?.continuation?.rootTaskId, q);
+  assert.equal(f.store.get(rejected)?.deliveryStatus, "skipped");
+  assert.equal(
+    f.receive({ ...answer, deliveryId: "retry-same" }).taskId,
+    rejected,
+  );
+  assert.equal(
+    f.store.claimAssignment("worker", "b", refusedAt + 60000),
+    undefined,
+  );
+  assert.equal(f.receive(f.comment("out of order"), refusedAt).taskId, null);
+  clock.mock.restore();
+  const accepted = f.receive(f.comment("use second"), refusedAt + 2000).taskId!;
+  assert.notEqual(accepted, rejected);
+  assert.equal(f.store.clarificationState(q)?.answerTaskId, accepted);
+  assert.equal(
+    f.store.conversation(rejected)?.turns[0].lastUndeliveredTaskId,
+    rejected,
+  );
+  assert.equal(f.store.conversation(accepted)?.turns[0].undeliveredAttempts, 1);
+  assert.equal(
+    f.store.claimAssignment("worker", "b", refusedAt + 60000)?.id,
+    accepted,
+  );
+  f.store.finishAssignment(
+    accepted,
+    "worker",
+    "b",
+    { status: "unknown" },
+    "digest",
+  );
+  assert.equal(f.store.clarificationState(q)?.status, "answered");
+  assert.equal(
+    f.receive(f.comment("do not replay"), refusedAt + 4000).taskId,
+    null,
+  );
+});
+
+test("a candidate received before expiry can settle after the question window, while a new late reply cannot", (t) => {
+  const f = fixture(t),
+    q = f.request("root"),
+    r = f.ask(q, "Which?", f.after, true);
+  const expires = f.after + 7 * 86400000;
+  let now = expires - 3000;
+  const clock = t.mock.method(Date, "now", () => now);
+  const valid = f.comment("original evidence");
+  assert.equal(
+    f.receive(valid, expires - 4000).reason,
+    "clarification_pending",
+  );
+  now = expires + 3000;
+  assert.equal(
+    f.receive(f.comment("/answer " + q + " too late"), expires - 1000).reason,
+    "clarification_unmatched",
+  );
+  f.store.resolveUnknownDelivery(q, "sent", r);
+  assert.equal(f.store.clarificationState(q)?.status, "answered");
+  assert.ok(f.store.activityReceipt(valid.deliveryId)?.taskId);
+  clock.mock.restore();
+});
 test("obsolete choices cannot be sent after a delayed close retires both questions", (t) => {
   const f = fixture(t),
     a = f.request("first");
