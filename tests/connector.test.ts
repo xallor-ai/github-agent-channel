@@ -708,6 +708,13 @@ test("automatic review without any pinned patch cannot turn PR prose into a clea
     [
       {
         ...diff.files[0],
+        patch: "@@ -1,2 +1,2 @@\n ".padEnd(12286, "a") + "\n-",
+        patchStatus: "truncated",
+      },
+    ],
+    [
+      {
+        ...diff.files[0],
         patch: "@@ -1,2 +1,2 @@\n " + "a".repeat(12000),
         patchStatus: "truncated",
       },

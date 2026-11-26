@@ -218,7 +218,9 @@ export class OpenClawConnector implements RuntimeConnector {
                 file.patchStatus !== "unavailable" &&
                 file.patch &&
                 /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@[^\n]*\n(?: [^\n]*\n)*[+-]/m.test(
-                  file.patch,
+                  file.patchStatus === "truncated"
+                    ? file.patch.slice(0, file.patch.lastIndexOf("\n") + 1)
+                    : file.patch,
                 ),
             )
           )
