@@ -215,7 +215,11 @@ export class OpenClawConnector implements RuntimeConnector {
           if (
             !evidence.files.some(
               (file) =>
-                file.patchStatus !== "unavailable" && file.patch?.trim(),
+                file.patchStatus !== "unavailable" &&
+                file.patch &&
+                /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@[^\n]*\n(?: [^\n]*\n)*[+-]/m.test(
+                  file.patch,
+                ),
             )
           )
             throw new RuntimeFailure(

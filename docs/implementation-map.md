@@ -17,6 +17,8 @@
 
 [DeviceService](../src/device-service.ts) 核验设备凭据，[BindingPrincipalVerifier](../src/binding-principal.ts) 核对安装和管理员权限，[BindingRegistry](../src/binding-registry.ts) 与任务同库；[客户端命令](../src/self-service-cli.ts) 显式登记/停用。任务库已按首次受理时间拒绝排队满 24 小时的任务，独立于执行租约。
 
+自动 PR 评审在 OpenClaw 调用前检查固定差异中的变更行。Compare 读取失败须重新验证权限与版本；可确定缺少材料时记录失败并按原发布栅栏发送未完成通知，明确拒绝或失去权限时不这样转换。
+
 ## 全部生产模块
 
 | 文件                                                  | 实际职责与边界                                                                                            |

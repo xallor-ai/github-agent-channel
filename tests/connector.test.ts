@@ -705,6 +705,13 @@ test("automatic review without any pinned patch cannot turn PR prose into a clea
   for (const files of [
     [],
     [{ ...diff.files[0], patch: undefined, patchStatus: "unavailable" }],
+    [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,2 +1,2 @@\n " + "a".repeat(12000),
+        patchStatus: "truncated",
+      },
+    ],
   ]) {
     await assert.rejects(
       c.run(auto, async () => ({
