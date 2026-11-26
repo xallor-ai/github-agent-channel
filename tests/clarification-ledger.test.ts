@@ -190,6 +190,48 @@ test("competing questions require a scoped selection; invalid, stale or cross-th
   );
   assert.equal(f.store.clarificationState(b)?.status, "waiting");
 });
+test("offline queue expiry preserves the unstarted answer and accepts a new reply, while an expired running lease stays consumed", (t) => {
+  for (const claimed of [false, true]) {
+    const f = fixture(t),
+      q = f.request("Check login");
+    f.ask(q, "Which browser?");
+    const original = f.comment("Firefox"),
+      first = f.receive(original).taskId!;
+    if (claimed)
+      assert.equal(
+        f.store.claimAssignment("worker", "lease", Date.now() + 60_000)?.id,
+        first,
+      );
+    const later = Date.now() + 25 * 3600000;
+    const clock = t.mock.method(Date, "now", () => later);
+    f.store.expireTasks();
+    assert.equal(f.store.get(first)?.status, claimed ? "unknown" : "rejected");
+    assert.equal(
+      f.store.clarificationState(q)?.status,
+      claimed ? "answered" : "waiting",
+    );
+    assert.equal(
+      f.receive({ ...original, deliveryId: "duplicate" }, f.after + 1000)
+        .taskId,
+      first,
+    );
+    const next = f.receive(f.comment("/answer " + q + " Safari"), later);
+    if (claimed) assert.equal(next.taskId, null);
+    else {
+      assert.ok(next.taskId && next.taskId !== first);
+      assert.equal(f.store.get(next.taskId)?.continuation?.rootTaskId, q);
+      assert.equal(
+        f.store.conversation(first)?.turns[0].lastUndeliveredTaskId,
+        first,
+      );
+      assert.equal(
+        f.store.claimAssignment("worker", "back", later + 60_000)?.id,
+        next.taskId,
+      );
+    }
+    clock.mock.restore();
+  }
+});
 test("expired or retired questions cannot start a new run", (t) => {
   const f = fixture(t),
     a = f.request("alpha");

@@ -500,12 +500,25 @@ export class TaskStore {
   }
   private expireInTransaction(now: number): void {
     this.questions.expireCandidates(now);
+    // Only queued answers have positive evidence of non-dispatch. An expired
+    // running lease below remains unknown and must not reopen its question.
+    const expiredAnswers = this.db
+      .prepare(
+        "SELECT t.id,t.createdAt FROM tasks t JOIN clarifications q ON q.answerTaskId=t.id WHERE t.status='queued' AND t.createdAt<=?",
+      )
+      .all(now - QUEUE_MAX_AGE_MS);
     this.db
       .prepare(
         `UPDATE tasks SET status='rejected', deliveryStatus='skipped', error='Queue deadline expired before execution'
       WHERE status='queued' AND createdAt<=?`,
       )
       .run(now - QUEUE_MAX_AGE_MS);
+    for (const row of expiredAnswers)
+      this.questions.undelivered(
+        String(row.id),
+        false,
+        Number(row.createdAt) + QUEUE_MAX_AGE_MS,
+      );
     this.db
       .prepare(
         `UPDATE tasks SET status='unknown', error='Connector lease expired; reconcile execution'

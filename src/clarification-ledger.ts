@@ -304,7 +304,11 @@ export class ClarificationLedger {
       )
       .run(thread, repositoryId, time ?? null, time ?? null);
   }
-  undelivered(taskId: string, terminalTarget: boolean) {
+  undelivered(
+    taskId: string,
+    terminalTarget: boolean,
+    rejectedAt = Date.now(),
+  ) {
     const r = this.db
       .prepare(
         "SELECT q.questionTaskId,t.githubTime FROM clarifications q JOIN tasks t ON t.id=q.answerTaskId WHERE q.answerTaskId=?",
@@ -321,7 +325,7 @@ export class ClarificationLedger {
         r.questionTaskId!,
         r.questionTaskId!,
         r.githubTime,
-        Date.now(),
+        rejectedAt,
       );
     this.db
       .prepare(
