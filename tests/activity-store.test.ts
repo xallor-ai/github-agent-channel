@@ -458,3 +458,171 @@ test("automatic review dedup does not reuse a task fenced by a prior close", (t)
   assert.notEqual(next.taskId, first.taskId);
   assert.equal(review("repeat", 35).taskId, next.taskId);
 });
+
+test("a late close separates coalesced reviews without replaying dispatched work", (t) => {
+  const clock = t.mock.method(Date, "now", () => 1_000);
+  for (const phase of ["queued", "dispatched", "published"]) {
+    clock.mock.mockImplementation(() => 1_000);
+    const store = new TaskStore(":memory:");
+    t.after(() => store.close());
+    const scope = {
+      installationId: 1,
+      repositoryId: 2,
+      owner: "org",
+      repo: "repo",
+    };
+    const binding = seedBinding(store, scope, "device", [
+      "pull_request.synchronize",
+      "pull_request.closed",
+    ]);
+    const base: NewTask = {
+      ...scope,
+      bindingId: binding.id,
+      actorId: 4,
+      actorLogin: "alice",
+      prompt: "first review",
+      deliveryId: "old",
+      source: { event: "pull_request", action: "synchronize" },
+      target: {
+        kind: "pull_request",
+        number: 2,
+        revision: {
+          baseRepoId: 2,
+          headRepoId: 2,
+          baseSha: "a".repeat(40),
+          headSha: "b".repeat(40),
+        },
+      },
+    };
+    const old = store.observe({
+      input: base,
+      execute: true,
+      reason: "review",
+      githubTime: 10,
+    });
+    const fresh = {
+      ...base,
+      deliveryId: "fresh",
+      actorId: 5,
+      actorLogin: "bob",
+      prompt: "reopened review",
+    };
+    const repeat = store.observe({
+      input: fresh,
+      execute: true,
+      reason: "review",
+      githubTime: 30,
+    });
+    assert.equal(repeat.taskId, old.taskId);
+    clock.mock.mockImplementation(() => 9_000);
+    if (phase !== "queued")
+      store.claimAssignment("device", "lease", Date.now() + 60000);
+    if (phase === "published") {
+      store.finishAssignment(
+        old.taskId!,
+        "device",
+        "lease",
+        {
+          status: "succeeded",
+          outcome: {
+            text: "Reviewed",
+            artifacts: [],
+            publication: { kind: "comment" },
+          },
+        },
+        "digest",
+      );
+      assert.equal(store.pendingDelivery()?.id, old.taskId);
+      store.markDelivery(old.taskId!, "sent", {
+        kind: "comment",
+        id: 1,
+        url: "https://github.com/org/repo/pull/2#issuecomment-1",
+      });
+    }
+    store.observe({
+      input: {
+        ...base,
+        deliveryId: "close",
+        source: { event: "pull_request", action: "closed" },
+      },
+      execute: false,
+      reason: "closed",
+      githubTime: 20,
+    });
+    const receipt = store.activityReceipt("fresh")!;
+    if (phase !== "queued") {
+      assert.equal(receipt.taskId, old.taskId);
+      if (phase === "published") {
+        assert.equal(store.get(old.taskId!)?.deliveryStatus, "sent");
+        assert.equal(receipt.reviewFollowUp, undefined);
+      } else
+        assert.equal(receipt.reviewFollowUp, "reconcile_before_new_review");
+      assert.equal(
+        store.claimAssignment("device", "next", Date.now() + 60000),
+        undefined,
+      );
+    } else {
+      assert.notEqual(receipt.taskId, old.taskId);
+      assert.equal(receipt.activity?.taskId, receipt.taskId);
+      assert.equal(store.get(old.taskId!)?.status, "rejected");
+      const next = store.claimAssignment("device", "next", Date.now() + 60000);
+      assert.equal(next?.id, receipt.taskId);
+      assert.equal(next?.createdAt, 1_000);
+      assert.equal(next?.actorId, 5);
+      assert.equal(next?.prompt, "reopened review");
+    }
+  }
+});
+
+test("same-version fresh delivery after reassignment cannot reuse a never-dispatched retired task", (t) => {
+  const store = new TaskStore(":memory:");
+  t.after(() => store.close());
+  const scope = { installationId: 1, repositoryId: 2, owner: "o", repo: "r" };
+  const b = seedBinding(store, scope, "device", ["pull_request.synchronize"]);
+  const input: NewTask = {
+    ...scope,
+    bindingId: b.id,
+    deliveryId: "first",
+    actorId: 4,
+    actorLogin: "alice",
+    prompt: "r",
+    source: { event: "pull_request", action: "synchronize" },
+    target: {
+      kind: "pull_request",
+      number: 2,
+      revision: {
+        baseRepoId: 2,
+        headRepoId: 2,
+        baseSha: "a".repeat(40),
+        headSha: "b".repeat(40),
+      },
+    },
+  };
+  const first = store.observe({
+    input,
+    reason: "review",
+    execute: true,
+    githubTime: 10,
+  });
+  store.registry.apply(
+    { ...scope, deviceId: "device", administratorId: 44 },
+    1,
+    {
+      enabled: true,
+      responsibleAgent: { ...fixtureAgent, id: "new" },
+      events: ["pull_request.synchronize"],
+    },
+  );
+  const now = store.activeBinding(1, 2)!;
+  const accept = (deliveryId: string) =>
+    store.observe({
+      input: { ...input, bindingId: now.id, deliveryId },
+      reason: "review",
+      execute: true,
+      githubTime: 20,
+    });
+  assert.equal(accept("first").taskId, first.taskId);
+  const next = accept("new");
+  assert.notEqual(next.taskId, first.taskId);
+  assert.equal(store.get(next.taskId!)?.bindingId, now.id);
+});

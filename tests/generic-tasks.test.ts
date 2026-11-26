@@ -45,7 +45,7 @@ const envelope = {
 };
 async function receive(event: string, payload: unknown, settings = config) {
   const raw = Buffer.from(JSON.stringify(payload));
-  return normalizeWebhook(
+  const decision = await normalizeWebhook(
     {
       github: settings.github,
       lookup: (i, r) =>
@@ -61,6 +61,8 @@ async function receive(event: string, payload: unknown, settings = config) {
     },
     "test",
   );
+  assert.ok(!decision || !("closure" in decision));
+  return decision;
 }
 test("opted-in Issue and repository events produce scoped targets without invented comments", async () => {
   const issue = await receive("issues", {

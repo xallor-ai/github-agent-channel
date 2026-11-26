@@ -29,8 +29,10 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
   const user = { id: 99, login: "person" };
   const githubToken = "github_user_token_fixture";
   let lastPoll: number | null = null;
+  let githubCalls = 0;
   const options = {
     runtimeLastSeen: () => lastPoll,
+    recentActivities: tasks.activitiesForDevice.bind(tasks),
     registry: tasks.registry,
     dbPath,
     appId: "1",
@@ -38,6 +40,7 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
     adminToken: "admin-test",
     now: () => now,
     fetchImpl: (async (url, init) => {
+      githubCalls++;
       const { origin, pathname } = new URL(String(url));
       assert.equal(origin, "https://api.github.com");
       const route: Record<string, unknown> = {
@@ -177,6 +180,32 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
     (await post(base + "/bindings/read", otherToken, selection)).status,
     403,
   );
+  const feed = (credential: string, overrides?: object) =>
+    post(base + "/activities", credential, {
+      ...selection,
+      runtime: fixtureAgent,
+      after: 0,
+      limit: 25,
+      ...overrides,
+    });
+  const beforeFeeds = githubCalls;
+  for (const [credential, overrides] of [
+    [otherToken, {}],
+    [ownToken, { repo: "unbound" }],
+    [ownToken, { runtime: { ...fixtureAgent, id: "other-agent" } }],
+    [ownToken, { runtime: { ...fixtureAgent, deepReview: false } }],
+  ] as const) {
+    const denied = await feed(credential, overrides);
+    assert.equal(denied.status, 403);
+    assert.deepEqual(await denied.json(), { error: "binding_owner" });
+  }
+  assert.equal(githubCalls, beforeFeeds);
+  for (let i = 1; i <= 2; i++) {
+    const allowed = await feed(ownToken);
+    assert.equal(allowed.status, 200);
+    assert.equal((await allowed.json()).activities.length, 0);
+    assert.equal(githubCalls, beforeFeeds + 5 * i);
+  }
   let resume!: () => void, entered!: () => void;
   const waiting = new Promise<void>((r) => (entered = r));
   gate = () => {

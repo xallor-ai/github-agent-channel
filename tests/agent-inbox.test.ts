@@ -115,6 +115,8 @@ test("activity polling resumes a durable cursor and persists no private event da
 });
 
 test("stale and empty receipts cannot move the cursor; local stop fences an in-flight receipt", async (t) => {
+  let now = 100_000;
+  t.mock.method(Date, "now", () => now);
   const stateFile = fixture(t);
   rememberActivityBinding(stateFile, connection.baseUrl, profile, binding);
   const inbox = new ActivityInbox(stateFile);
@@ -132,6 +134,7 @@ test("stale and empty receipts cannot move the cursor; local stop fences an in-f
       ),
       /binding|receipt/i,
     );
+    now += 60_000;
     const result = await inbox.pollOne(
       connection,
       profile,
@@ -153,6 +156,79 @@ test("stale and empty receipts cannot move the cursor; local stop fences an in-f
         throw Error("stopped binding was polled");
       }),
       undefined,
+    );
+  } finally {
+    inbox.close();
+  }
+});
+
+test("idle and failed repositories wait independently; healthy progress and new revisions remain eligible", async (t) => {
+  let now = 100_000;
+  t.mock.method(Date, "now", () => now);
+  const stateFile = fixture(t);
+  const first = binding;
+  const second = { ...binding, repo: "second", repositoryId: 3 };
+  const third = { ...binding, repo: "third", repositoryId: 4 };
+  for (const registered of [first, second, third])
+    rememberActivityBinding(stateFile, connection.baseUrl, profile, registered);
+  const inbox = new ActivityInbox(stateFile);
+  const signal = new AbortController().signal;
+  const visits: string[] = [];
+  let secondErrors = true;
+  let thirdHasActivity = true;
+  let firstRevision = 1;
+  const fetcher: typeof fetch = async (_, init) => {
+    const { repo, after } = JSON.parse(String(init?.body));
+    visits.push(repo);
+    if (repo === "second" && secondErrors)
+      return new Response(null, { status: 502 });
+    const progressed = repo === "third" && thirdHasActivity;
+    return Response.json({
+      bindingId:
+        repo === "repo"
+          ? `1:2:worker:${firstRevision}`
+          : repo === "second"
+            ? "1:3:worker:1"
+            : "1:4:worker:1",
+      activities: [],
+      nextCursor: progressed ? after + 1 : after,
+      hasMore: false,
+      truncated: progressed,
+    });
+  };
+  const poll = () => inbox.pollOne(connection, profile, signal, fetcher);
+  try {
+    await poll(); // first: empty
+    await poll(); // second: first failure
+    await poll(); // third: makes progress
+    thirdHasActivity = false;
+    now += 59_999;
+    await poll(); // third remains eligible and is now idle
+    await poll(); // everybody is waiting
+    assert.deepEqual(visits, ["repo", "second", "third", "third"]);
+
+    now += 1;
+    await poll(); // first can poll after 60 seconds
+    await poll(); // second fails again and extends to 120 seconds
+    now += 60_000;
+    await poll(); // third recovers before second
+    await poll(); // first wakes on schedule
+    await poll();
+    assert.deepEqual(visits.slice(4), ["repo", "second", "third", "repo"]);
+
+    firstRevision = 2;
+    inbox.remember(connection.baseUrl, profile, { ...first, revision: 2 });
+    await poll(); // new revision is eligible despite prior idle delay
+    assert.equal(visits.at(-1), "repo");
+    const attempts = visits.length;
+    secondErrors = false;
+    now += 60_000;
+    await poll(); // second recovers
+    assert.equal(visits.length, attempts + 1);
+    assert.equal(visits.at(-1), "second");
+    assert.equal(
+      inbox.status(connection.baseUrl, profile, "org", "second")?.pollStatus,
+      "synced",
     );
   } finally {
     inbox.close();

@@ -77,6 +77,11 @@ export function createChannelServer(
         }
         let accepted;
         try {
+          if ("closure" in task) {
+            store.closeThread(task.closure);
+            send(200, { ignored: true });
+            return;
+          }
           accepted = store.observe(task);
         } catch (e) {
           if (!(e instanceof StaleBinding)) throw e;

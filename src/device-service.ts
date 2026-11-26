@@ -19,7 +19,7 @@ import {
 } from "./binding-registry.js";
 import type { TaskStore } from "./store.js";
 import { feedQueryFields } from "./activity-feed.js";
-import { sameRuntimeIdentity } from "./runtime-profile.js";
+import { sameRuntimeIdentity, type RuntimeProfile } from "./runtime-profile.js";
 import { AccessDenied } from "./contracts.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -50,6 +50,19 @@ const paths = {
   apply: "/connector/v2/bindings/apply",
   activities: "/connector/v2/activities",
 };
+function matchesActivityBinding(
+  binding: ReturnType<BindingRegistry["get"]>,
+  runtime: RuntimeProfile,
+) {
+  const agent = binding?.responsibleAgent;
+  return (
+    binding?.enabled === true &&
+    agent !== undefined &&
+    sameRuntimeIdentity(agent, runtime) &&
+    agent.deepReview === runtime.deepReview &&
+    agent.nativeReview === runtime.nativeReview
+  );
+}
 const layout = [
   "CREATE TABLE devices(deviceId TEXT PRIMARY KEY, githubUserId INTEGER NOT NULL, credential BLOB NOT NULL UNIQUE, revoked INTEGER NOT NULL CHECK(revoked IN(0,1,2))) STRICT",
   "CREATE TABLE invites(digest BLOB PRIMARY KEY, githubUserId INTEGER NOT NULL, expiresAt INTEGER NOT NULL) STRICT",
@@ -389,6 +402,13 @@ export class DeviceService {
               selection.repo,
             )
           : undefined;
+        if (
+          feed &&
+          (!before ||
+            before.administratorId !== paired.githubUserId ||
+            !matchesActivityBinding(before, feed.runtime))
+        )
+          throw new Rejection(403, "binding_owner");
         const { who, installation } = await this.#verify(credential, selection);
         const coverage = {
           ...installation,
@@ -414,13 +434,7 @@ export class DeviceService {
         )
           throw new Rejection(403, "binding_owner");
         if (feed) {
-          if (
-            !binding?.enabled ||
-            !binding.responsibleAgent ||
-            !sameRuntimeIdentity(binding.responsibleAgent, feed.runtime) ||
-            binding.responsibleAgent.deepReview !== feed.runtime.deepReview ||
-            binding.responsibleAgent.nativeReview !== feed.runtime.nativeReview
-          )
+          if (!binding || !matchesActivityBinding(binding, feed.runtime))
             throw new Rejection(403, "binding_owner");
           if (
             !before ||

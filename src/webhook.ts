@@ -14,6 +14,14 @@ export type WebhookDecision =
       execute: false;
       reason: ObservationReason;
     };
+export type ThreadClosure = Pick<
+  NewTask,
+  "bindingId" | "installationId" | "repositoryId" | "owner" | "repo"
+> & {
+  target: Extract<NewTask["target"], { kind: "issue" | "pull_request" }>;
+  githubTime?: number;
+};
+type WebhookIngress = WebhookDecision | { closure: ThreadClosure };
 
 const id = z.number().int().positive().safe();
 const actor = z.object({
@@ -45,6 +53,9 @@ const ref = z.object({
   repo: z.object({ id }).nullable(),
 });
 const pr = item.extend({ base: ref, head: ref });
+const pullClosure = issue.extend({
+  base: z.object({ repo: z.object({ id }) }),
+});
 const envelope = z.object({
   sender: actor,
   installation: z.object({ id }),
@@ -110,7 +121,7 @@ export async function normalizeWebhook(
   raw: Buffer,
   headers: { signature: string; delivery: string; event: string },
   secret: string,
-): Promise<WebhookDecision | null> {
+): Promise<WebhookIngress | null> {
   // Fatal decoding ensures the SDK's string API verifies exactly the received UTF-8 bytes.
   let payload: string;
   try {
@@ -150,29 +161,70 @@ export async function normalizeWebhook(
     return null;
   const isSelf =
     sender.login.toLowerCase() === config.github.botLogin.toLowerCase();
-  if (
-    isSelf
-      ? key !== "issue_comment.created" || sender.type !== "Bot"
-      : sender.type !== "User" || !/^[A-Za-z0-9-]{1,39}$/.test(sender.login)
-  )
-    return null;
+  const human =
+    !isSelf &&
+    sender.type === "User" &&
+    /^[A-Za-z0-9-]{1,39}$/.test(sender.login);
+  const selfReceipt =
+    isSelf && key === "issue_comment.created" && sender.type === "Bot";
   const binding = config.lookup(installation.id, repository.id);
   if (
     !binding?.enabled ||
-    !binding.events.includes(key) ||
     binding.installationId !== installation.id ||
     binding.repositoryId !== repository.id ||
     binding.owner !== repository.owner.login ||
     binding.repo !== repository.name
   )
     return null;
-  const scope = {
-    deliveryId: headers.delivery,
+  const bindingScope = {
     bindingId: binding.id,
     installationId: installation.id,
     repositoryId: repository.id,
     owner: binding.owner,
     repo: binding.repo,
+  };
+  if (!binding.events.includes(key) || (!human && !selfReceipt)) {
+    // A signed closure can stop old work even when the sender or event is
+    // excluded from observations. Do not retain its actor, title or body.
+    const bot =
+      sender.type === "Bot" &&
+      /^[A-Za-z0-9-]{1,39}\[bot\]$/i.test(sender.login);
+    if (!human && !bot) return null;
+    if (key === "issues.closed") {
+      const value = z.object({ issue }).safeParse(event);
+      if (
+        !value.success ||
+        value.data.issue.state !== "closed" ||
+        value.data.issue.pull_request
+      )
+        return null;
+      return {
+        closure: {
+          ...bindingScope,
+          target: { kind: "issue", number: value.data.issue.number },
+          githubTime: githubTime(value.data.issue.closed_at),
+        },
+      };
+    }
+    if (key === "pull_request.closed") {
+      const value = z.object({ pull_request: pullClosure }).safeParse(event);
+      if (!value.success) return null;
+      const target = value.data.pull_request;
+      if (target.state !== "closed" || target.base.repo.id !== repository.id)
+        return null;
+      return {
+        closure: {
+          ...bindingScope,
+          target: { kind: "pull_request", number: target.number },
+          githubTime: githubTime(target.closed_at),
+        },
+      };
+    }
+    return null;
+  }
+  const scope = {
+    ...bindingScope,
+    deliveryId: headers.delivery,
     actorId: sender.id,
     actorLogin: sender.login,
     source: {

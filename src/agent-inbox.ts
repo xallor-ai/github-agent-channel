@@ -17,8 +17,12 @@ type Binding = {
   enabled: boolean;
 };
 type Entry = Binding & { seq: number; cursor: number };
+type Wait = { revision: number; until: number; failures: number };
 const PAGE = 25;
 const MAX_BYTES = 256 * 1024;
+const POLL_INTERVAL_MS = 15_000;
+const IDLE_INTERVAL_MS = 60_000;
+const MAX_RETRY_MS = 15 * 60_000;
 const profileKey = (p: RuntimeProfile) =>
   JSON.stringify([p.type, p.id, p.deepReview, p.nativeReview]);
 const bindingKey = (b: Binding) =>
@@ -51,6 +55,7 @@ async function pageBody(response: Response): Promise<unknown> {
 /** Stores only confirmed registrations and consumption progress, never event bodies. */
 export class ActivityInbox {
   readonly #db: DatabaseSync;
+  readonly #wait = new Map<number, Wait>();
   #last = 0;
   constructor(stateFile: string) {
     const path = stateFile + ".inbox";
@@ -157,10 +162,19 @@ export class ActivityInbox {
     stop.throwIfAborted();
     const origin = new URL(connection.baseUrl).origin;
     const profileId = profileKey(profile);
-    const candidates = this.#db.prepare(`SELECT * FROM bindings
-      WHERE origin=? AND profile=? AND enabled=1 AND seq>? ORDER BY seq LIMIT 1`);
-    const binding = (candidates.get(origin, profileId, this.#last) ??
-      candidates.get(origin, profileId, 0)) as Entry | undefined;
+    const now = Date.now();
+    const eligible = (
+      this.#db
+        .prepare(
+          `SELECT * FROM bindings WHERE origin=? AND profile=? AND enabled=1 ORDER BY seq`,
+        )
+        .all(origin, profileId) as unknown as Entry[]
+    ).filter((entry) => {
+      const wait = this.#wait.get(entry.seq);
+      return !wait || wait.revision !== entry.revision || wait.until <= now;
+    });
+    const binding =
+      eligible.find((entry) => entry.seq > this.#last) ?? eligible[0];
     if (!binding) return undefined;
     this.#last = binding.seq; // A denied or slow repository does not starve another.
     const bindingId = bindingKey(binding);
@@ -168,6 +182,24 @@ export class ActivityInbox {
       stop,
       AbortSignal.timeout(Math.min(connection.timeout, 15_000)),
     ]);
+    const postpone = (failed: boolean) => {
+      const previous = this.#wait.get(binding.seq);
+      const failures = failed
+        ? Math.min(
+            5,
+            1 +
+              (previous?.revision === binding.revision ? previous.failures : 0),
+          )
+        : 0;
+      const duration = failed
+        ? Math.min(MAX_RETRY_MS, IDLE_INTERVAL_MS * 2 ** (failures - 1))
+        : IDLE_INTERVAL_MS;
+      this.#wait.set(binding.seq, {
+        revision: binding.revision,
+        until: Date.now() + duration,
+        failures,
+      });
+    };
     const mark = (status: "denied" | "unconfirmed") => {
       this.#db
         .prepare(
@@ -175,6 +207,7 @@ export class ActivityInbox {
         WHERE seq=? AND revision=? AND enabled=1 AND cursor=?`,
         )
         .run(status, status, binding.seq, binding.revision, binding.cursor);
+      postpone(true);
     };
     try {
       const response = await fetcher(
@@ -250,9 +283,10 @@ export class ActivityInbox {
           binding.revision,
           binding.cursor,
         );
-      return changed.changes
-        ? { received: activities.length, truncated }
-        : undefined;
+      if (!changed.changes) return undefined;
+      if (nextCursor > binding.cursor) this.#wait.delete(binding.seq);
+      else postpone(false);
+      return { received: activities.length, truncated };
     } catch (error) {
       if (!stop.aborted) mark("unconfirmed");
       throw error;
@@ -302,7 +336,7 @@ export async function runActivityInbox(
       // No LLM, task claiming, or memoization of observations here.
       await inbox.pollOne(connection, profile, signal).catch(() => undefined);
       try {
-        await delay(5000, undefined, { signal });
+        await delay(POLL_INTERVAL_MS, undefined, { signal });
       } catch {
         if (!signal.aborted) throw Error("Activity poll interrupted");
       }
