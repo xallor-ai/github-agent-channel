@@ -75,7 +75,74 @@ const server = createChannelServer(
   store,
   secrets.webhookSecret,
   secrets.adminToken,
-  coordinator,
+  {
+    async handle(req, res) {
+      // Synthetic registry authority for the Docker CLI/volume integration path.
+      if (
+        ![
+          "/connector/v2/bindings/read",
+          "/connector/v2/bindings/apply",
+          "/connector/v2/activities",
+        ].includes(req.url)
+      )
+        return coordinator.handle(req, res);
+      if (
+        req.headers.authorization !== "Bearer " + credential ||
+        req.method !== "POST"
+      ) {
+        res.writeHead(403);
+        res.end();
+        return true;
+      }
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const q = JSON.parse(Buffer.concat(chunks));
+      if (q.repo !== "fixture" || q.owner !== "fixture") {
+        res.writeHead(403);
+        res.end();
+        return true;
+      }
+      const b = store.registry.get({ installationId: 1, repositoryId: 2 });
+      const id = "1:2:smoke-worker:" + b.revision;
+      const binding = req.url.endsWith("/apply")
+        ? store.registry.apply(
+            {
+              installationId: b.installationId,
+              repositoryId: b.repositoryId,
+              repo: b.repo,
+              owner: b.owner,
+              deviceId: b.deviceId,
+              administratorId: b.administratorId,
+            },
+            q.expectedRevision,
+            q.declaration,
+          )
+        : b;
+      const value = req.url.endsWith("/activities")
+        ? {
+            ...store.activitiesForDevice(
+              "smoke-worker",
+              q.after,
+              q.limit,
+              q.runtime,
+              id,
+            ),
+            bindingId: id,
+          }
+        : {
+            binding,
+            coverage: {
+              subscriptions: ["issue_comment"],
+              permissions: { issues: "write" },
+              serverWriteProfile: false,
+              runtimePoll: { status: "unknown", lastPolledAt: null },
+            },
+          };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(value));
+      return true;
+    },
+  },
 );
 server.on("request", (req, res) => {
   if (req.url === "/connector/v2/claim")

@@ -38,6 +38,15 @@ repo: xallor
 npm run channel -- agent repo apply xallor.local.yaml agent.local.yaml
 ```
 
+**Docker 部署须在 bridge 所用卷内登记。** 上面是原生 bridge 的命令；容器使用命名卷里的 journal 和 inbox。将同一份非敏感仓库声明通过标准输入交给运行中的 agent 容器（保持已有项目和 compose 路径）：
+
+```sh
+docker compose -f ./agent-data/.channel-agent/compose.yaml exec -T agent node dist/cli.js agent repo apply - /app/agent.runtime.yaml < xallor.local.yaml
+docker compose -f ./agent-data/.channel-agent/compose.yaml exec -T agent node dist/cli.js agent repo status - /app/agent.runtime.yaml < xallor.local.yaml
+```
+
+在 PowerShell 中可用 `Get-Content -Raw -Encoding utf8 xallor.local.yaml | docker compose ...` 代替输入重定向。容器与原生客户端不能共享一份本机收件进度。若之前只在宿主机 apply，应在容器内重做相同声明的幂等 apply，然后核对当前 bindingId 和 localActivityInbox；不需要重新配对或重建绑定。
+
 例如设备配置为 `openclaw/github` 时，一次操作就会绑定并显示 `xallor-ai/xallor → openclaw/github`。省略 `declaration` 相当于启用，省略 `events` 表示跟随 Channel 支持的事件范围。服务端只会收到 App 已订阅、安装已获权且实际投递的活动。普通评论更新上下文；开放线程中直接提及 App 的评论、或创建 Issue 时明确提及 App，才会按默认策略委派。自己的评论记作回执，不会再次唤醒 Agent。推送不会单独启动评审。
 
 在同一台已授权设备上更换负责 Agent：选用指向新 Agent 的本机配置并再次显式 `apply`。修改本地文件本身不改变远端绑定；领取任务或读取活动时身份须与绑定一致。当前不支持另一台设备接管已有绑定。

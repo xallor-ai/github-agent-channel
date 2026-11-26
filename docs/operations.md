@@ -44,7 +44,7 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 ## v2 内部升级与回滚
 
-以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 4、连接器 journal 3）。不兼容的旧库须保留，改用新路径/卷。
+以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 5、连接器 journal 3）。不兼容的旧库须保留，改用新路径/卷。
 
 生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
@@ -102,3 +102,5 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 连接器只上报固定失败原因码，不保存异常消息。确认模型没有给出可用结果（轮次耗尽、没有最终回答、工具调用或结果格式无效）时，Channel 可在仍开放、仍授权的原 Issue/PR 发布一条状态通知。通知有自己的发布回执，任务保持 failed，不产生分析成果。未知执行、授权失败和旧失败任务不自动重跑或补发。
 
 原生 Review 的 POST 回包丢失且没有 ID 时，管理员先 GET `/tasks/<id>/lookup-review`，只读查验原 PR 上唯一的 Bot、任务标记、正文、commit 与链接。无匹配、多匹配、无法读取或超出扫描上限均保持 unknown，不证明写入失败。查得唯一链接后才按原流程提交 resolve-delivery；不重跑模型或 POST Review。
+
+**草稿 PR 部分发布。** 如分支已创建但草稿 PR 未确认，delivery 保持 unknown。按诊断中的任务分支、commit SHA，在原仓逐一核对远端 ref 和关联 PR；branch confirmed 仅表示 ref 写入获得确认，branch unconfirmed 表示该写入也需核验。若崩溃发生在记录诊断前，检查固定的 channel/<task-id>。不要自动删分支或重试 POST；找到真实 PR 时按原管理流程记录 URL。仅有分支不能冒充 PR 回执。

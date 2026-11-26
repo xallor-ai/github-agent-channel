@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
-import { openSync, closeSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  openSync,
+  closeSync,
+  readSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -115,7 +121,28 @@ async function post<T>(
 
 function readDesired(file: string) {
   try {
-    return desiredFile.parse(parse(readFileSync(file, "utf8")));
+    if (file === "-" && process.stdin.isTTY)
+      throw Error("Pipe a declaration to stdin");
+    const fd = file === "-" ? 0 : openSync(file, "r");
+    try {
+      const data = Buffer.alloc(8193);
+      let size = 0;
+      while (size < data.length) {
+        const n = readSync(fd, data, size, data.length - size, null);
+        if (!n) break;
+        size += n;
+      }
+      if (size === data.length) throw Error("Declaration exceeds 8 KiB");
+      return desiredFile.parse(
+        parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            data.subarray(0, size),
+          ),
+        ),
+      );
+    } finally {
+      if (file !== "-") closeSync(fd);
+    }
   } catch {
     throw Error(
       "Invalid or unreadable repository declaration; no request sent",

@@ -626,3 +626,81 @@ test("same-version fresh delivery after reassignment cannot reuse a never-dispat
   assert.notEqual(next.taskId, first.taskId);
   assert.equal(store.get(next.taskId!)?.bindingId, now.id);
 });
+
+test("late close detaches stale receipts from a newer running review without replay", (t) => {
+  const store = new TaskStore(":memory:");
+  t.after(() => store.close());
+  const scope = { installationId: 1, repositoryId: 2, owner: "org", repo: "r" };
+  const binding = seedBinding(store, scope, "device", [
+    "pull_request.synchronize",
+    "pull_request.closed",
+  ]);
+  const target = {
+    kind: "pull_request" as const,
+    number: 2,
+    revision: {
+      baseRepoId: 2,
+      headRepoId: 2,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+    },
+  };
+  const review = (deliveryId: string, githubTime?: number) =>
+    store.observe({
+      input: {
+        ...scope,
+        bindingId: binding.id,
+        deliveryId,
+        actorId: 42,
+        actorLogin: "alice",
+        prompt: "review",
+        target,
+        source: { event: "pull_request", action: "synchronize" },
+      },
+      execute: true,
+      reason: "review",
+      githubTime,
+    });
+  const fresh = review("post", 30);
+  for (const [id, when] of [
+    ["pre", 10],
+    ["tie", 20],
+    ["unknown", undefined],
+    ["other-post", 35],
+  ] as const) {
+    assert.equal(review(id, when).taskId, fresh.taskId);
+  }
+  assert.equal(
+    store.claimAssignment("device", "lease", Date.now() + 60000)?.id,
+    fresh.taskId,
+  );
+  store.closeThread({
+    ...scope,
+    bindingId: binding.id,
+    target,
+    githubTime: 20,
+  });
+  const feed = store.activitiesForDevice(
+    "device",
+    0,
+    100,
+    fixtureAgent,
+    binding.id,
+  ).activities;
+  for (const id of ["pre", "tie", "unknown"]) {
+    const receipt = store.activityReceipt(id)!;
+    assert.equal(receipt.taskId, null);
+    assert.equal(receipt.reason, "closed");
+    assert.equal(receipt.activity?.taskId, null);
+    assert.equal(feed.find((a) => a.deliveryId === id)?.reason, "closed");
+    assert.equal(feed.find((a) => a.deliveryId === id)?.taskId, null);
+    assert.equal(review(id, 50).taskId, null);
+  }
+  assert.equal(store.activityReceipt("other-post")?.taskId, fresh.taskId);
+  assert.equal(store.activityReceipt("post")?.taskId, fresh.taskId);
+  assert.equal(
+    store.assignedTask(fresh.taskId!, "device", "lease")?.status,
+    "running",
+  );
+  assert.equal(store.publicationAllowed(fresh.taskId!), true);
+});

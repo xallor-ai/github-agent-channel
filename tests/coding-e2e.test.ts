@@ -132,7 +132,7 @@ async function fixture(
     )
       data = { sha: "d".repeat(40) };
     else if (method === "POST" && path === "/repos/org/repo/git/refs")
-      data = { object: { sha: "d".repeat(40) } };
+      data = { ref: body.ref, object: { sha: "d".repeat(40) } };
     else if (method === "POST" && path === "/repos/org/repo/pulls")
       data = { id: 77, html_url: "https://github.com/org/repo/pull/7" };
     else throw Error(`Unexpected fixture API ${method} ${path}`);
