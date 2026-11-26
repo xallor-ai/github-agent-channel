@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
 import { z } from "zod";
@@ -124,15 +125,20 @@ export class PullCoordinator {
     try {
       this.expire();
       if (path === "/connector/v2/claim") {
-        z.strictObject({}).parse(await jsonBody(req, 4096));
+        const { runtime } = z
+          .strictObject({ runtime: runtimeProfileSchema })
+          .parse(await jsonBody(req, 4096));
         const leaseToken = randomBytes(32).toString("hex"),
           expiresAt = Date.now() + this.config.timeoutMs;
         let task = this.store.claimAssignment(
           workerId,
           hash(leaseToken),
           expiresAt,
+          Date.now(),
+          runtime,
         );
         if (!task) {
+          this.store.recordRuntimePoll(workerId, runtime);
           send(204);
           return true;
         }
@@ -168,11 +174,40 @@ export class PullCoordinator {
           );
           // This is a denied GitHub actor, not a rejected connector identity.
           // Keep the healthy poller alive and disclose no rejected task content.
-          if (error instanceof AccessDenied) send(204);
-          else send(503, { error: "Task authorization unavailable" });
+          if (error instanceof AccessDenied) {
+            this.store.recordRuntimePoll(workerId, runtime);
+            send(204);
+          } else send(503, { error: "Task authorization unavailable" });
           return true;
         }
-        send(200, { task, leaseToken, expiresAt });
+        const binding = this.store.activeBinding(
+          task.installationId,
+          task.repositoryId,
+        );
+        if (!binding || binding.id !== task.bindingId)
+          throw new StaleAssignment();
+        const threadContext = this.store
+          .recentThread(task)
+          .filter((e) => e.deliveryId !== task.deliveryId)
+          .map((e) => ({
+            actor: e.actorLogin,
+            event: e.source.event,
+            excerpt: e.excerpt,
+            truncated: e.truncated,
+          }));
+        this.store.recordRuntimePoll(workerId, runtime);
+        send(200, {
+          task: {
+            ...task,
+            reviewPolicy: {
+              deepReview: !!binding.deepReview,
+              nativeReview: !!binding.nativeReview,
+            },
+            threadContext,
+          },
+          leaseToken,
+          expiresAt,
+        });
         return true;
       }
       const match = path.match(

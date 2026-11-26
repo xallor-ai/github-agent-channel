@@ -1,73 +1,81 @@
-# 从连接器启用仓库
+# 为仓库选择负责 Agent
 
-以下命令都使用 Node 24，从 Channel 检出目录运行。管理员负责首次邀请和撤销；配对成功后，仓库管理员在自己的连接器上新增、查询、修改和停用绑定，不必登录 ECS 或开放入站端口。
+从已配对的设备运行下面的命令。新增仓库不改服务端配置，也不重复使用个人 GitHub 令牌。示例使用 Node 24。
 
-## 首次配对
+## 1. 服务运营者：部署一次服务，邀请设备
 
-1. 在服务端宿主机（或其受控管理入口）上，从可信渠道核对配置者的 GitHub **数字用户 ID**。将服务端管理令牌通过本机秘密管理工具注入环境变量 `CHANNEL_ADMIN_TOKEN`，再执行：
+按[部署与运维](operations.md)配置 GitHub App、服务端及 HTTPS 入口。App 的安装范围须包含目标仓库，并订阅希望关注的事件。管理员在可信管理入口向设备所有者的 **GitHub 数字用户 ID** 签发邀请。示例中的 URL 是服务端管理入口，而非设备访问的公网地址：
 
-   ```sh
-   npm run channel -- admin invite http://127.0.0.1:18896 123456 ./channel-data/secrets/invite.private
-   ```
+```sh
+npm run channel -- admin invite http://127.0.0.1:18896 123456 ./secrets/invite.private
+```
 
-   示例端口为部署的宿主回环映射，请按实际端口调整；公网入口不转发管理接口。每个邀请绑定一个用户，10 分钟内有效、只可消费一次。命令要求输出文件不存在，回显过期时间和文件路径。管理员通过私密渠道把文件交给指定用户，不传管理令牌。文件须保存在用户专用目录，Windows 请限制目录 ACL。
+管理员凭据通过该机的 `CHANNEL_ADMIN_TOKEN` 注入，不能交给设备。输出文件须不存在；邀请 10 分钟有效，只能消费一次。私下交付邀请文件。设备丢失时，在同一管理入口执行 `admin revoke <channel-url> <device-id>`，按[运维指南](operations.md)核对撤销前的在途发布。
 
-2. 用户在连接器上执行 `npm run channel -- agent init`，填写 `agent.local.yaml` 中的 Channel HTTPS 地址与自己的 runtime。这个文件选择处理任务的 Agent：OpenClaw 由 `runtime.agentId` 指定，ACP 使用配置的本地 harness 和工作区。不同设备应使用不同配置和不同凭据。保留 `channel.tokenFile` 引用，其父目录必须存在；首次配对会创建随机设备令牌，已有文件不会被覆盖。也可用 `channel.tokenEnv` 引用自行生成的 32 随机字节 base64url 字符串。
+## 2. 设备所有者：连接一次 Agent
 
-3. 确认目标是可信 Channel，使用邀请对应的 GitHub 用户身份配对。例如在已用该身份登录 GitHub CLI 的终端：
+运行 `npm run channel -- agent init`，在生成的 `agent.local.yaml` 选择 Channel 地址、`runtime.type` 和 `runtime.agentId`。例如 `openclaw` 加 `github` 对应负责人 `openclaw/github`；ACP 使用本机显式命名的 harness。运行及凭据配置分别见 [OpenClaw](setup.md) 和 [ACP](acp-setup.md)。确保设备凭据目录仅当前用户可访问（Windows 请限制 ACL）。首次配对会创建 `channel.tokenFile`；如使用 `channel.tokenEnv`，由秘密管理工具注入 32 个随机字节的 base64url 编码。
 
-   ```sh
-   gh auth token --hostname github.com | npm run channel -- agent pair ./secrets/invite.private agent.local.yaml
-   ```
+在已登录获邀 GitHub 账号的终端运行：
 
-   也可由秘密管理工具注入短期用户令牌 `CHANNEL_PAIR_GITHUB_TOKEN`。配对时 GitHub 用户令牌会发给 Channel 以核对用户身份；不要放进命令参数、YAML 或聊天。后续仓库操作只用设备令牌。记下返回的 `deviceId` 供撤销时使用；删除已消费的邀请文件。若配对响应中断，保留本地设备令牌，用下一节的只读查询确认，不要自动重新配对。
+```sh
+gh auth token --hostname github.com | npm run channel -- agent pair ./secrets/invite.private agent.local.yaml
+npm run channel -- agent run agent.local.yaml
+```
 
-## 启用、改规则、停用
+配对只向可信 Channel 提交一次用户令牌，以后使用设备凭据。记下返回的设备 ID；删除已消费的邀请。如果配对响应丢失，保留设备凭据，恢复连接后用只读查询核对。负责 Agent 通过设备出站领取任务，无须对公网开放端口。
 
-例如在 3.183 上创建 `xallor.local.yaml`，只处理指定仓库中的提及评论。App 必须已安装覆盖该仓库，配对用户必须有该仓库当前的 **admin** 权限，write 权限不足。
+## 3. 仓库管理员：绑定仓库
+
+设备配对的 GitHub 用户必须在目标仓库有当前 **admin** 权限。在该设备新建 `xallor.local.yaml`：
 
 ```yaml
 owner: xallor-ai
 repo: xallor
-expectedRevision: 0
-declaration:
-  enabled: true
-  requireMention: true
-  events: [issue_comment.created]
 ```
 
 ```sh
-npm run channel -- agent repo status xallor.local.yaml agent.local.yaml
 npm run channel -- agent repo apply xallor.local.yaml agent.local.yaml
-npm run channel -- agent repo status xallor.local.yaml agent.local.yaml
 ```
 
-`status` 仅读服务端；`apply` 只提交指定文件中的一个仓库。两者都返回本地期望 `desired` 和服务端结果 `binding`（首次未登记时为 null），包括实际修订 `binding.revision`。仓库操作无需模型令牌；接收任务时另行启动 `npm run channel -- agent run agent.local.yaml`。没有监听本地目录或按缺失项自动删除仓库的后台同步。
+例如设备配置为 `openclaw/github` 时，一次操作就会绑定并显示 `xallor-ai/xallor → openclaw/github`。省略 `declaration` 相当于启用，省略 `events` 表示跟随 Channel 支持的事件范围。服务端只会收到 App 已订阅、安装已获权且实际投递的活动。普通评论更新上下文；开放线程中直接提及 App 的评论、或创建 Issue 时明确提及 App，才会按默认策略委派。自己的评论记作回执，不会再次唤醒 Agent。推送不会单独启动评审。
 
-| 状态 | 含义 |
+在同一台已授权设备上更换负责 Agent：选用指向新 Agent 的本机配置并再次显式 `apply`。修改本地文件本身不改变远端绑定；领取任务或读取活动时身份须与绑定一致。当前不支持另一台设备接管已有绑定。
+
+**读取状态。** `npm run channel -- agent repo status xallor.local.yaml agent.local.yaml` 仅读取。返回本地 `desired`、本机 Agent、服务器保存的 `binding`（含修订；未登记则为 null）和 `effective`。状态 `active` 表示远端绑定与本地要求匹配；`disabled` 表示确认已停用；`local_pending` / `disable_pending` 表示本地启用或停用要求尚未达成。
+
+| 要核实什么 | 读哪些字段 |
 | --- | --- |
-| `local_pending` | 本地要求启用或修改，当前没有已确认匹配的有效规则。 |
-| `active` | 服务端确认启用，生效规则与本地期望一致。 |
-| `disable_pending` | 本地要求停用，尚未确认服务端存在已停用记录。 |
-| `disabled` | 服务端已确认该仓库停用。 |
+| 谁负责，设备是否在线 | `effective.responsibleAgent` 是当前绑定，`localAgent` 是本机当前选择。`effective.runtimePoll` 显示服务器最近收到该设备和 Agent 的有效领取轮询时间（`lastPolledAt`，Unix 毫秒）。两分钟内为 `recent`，更早为 `last_seen`；无记录为 `never_seen`，无有效绑定为 `unbound`，证据不可用为 `unknown`。执行长任务时轮询可暂停，这些状态不证明模型可用或设备离线。 |
+| 哪些事件可能收到 | `channelSupported` 是 Channel 支持的事件及动作，`channelEventFilter` 是此绑定选择。`eventCoverage` 逐项比较安装返回的订阅和读取权限；缺订阅或权限为 false，信息不全为 unknown。即使 eligible 为 true，也不证明 GitHub 已投递；实际收到的活动见下节。 |
+| 超出范围的事件 | `subscribedFamiliesOutsideChannel` 是 App 订阅但 Channel 不支持的事件类别。已支持类别中，未列在 `channelSupported` 的动作也不会受理。 |
+| 哪些自动执行 | 默认仅明确委派。`autoTriage`、`autoReview`、`triggerLabel` 显示仓库启用的附加规则；规则只作用于已选且收到的事件，执行仍检查发起人权限。 |
+| 能否深评、发原生 Review 或提交代码 | `reviewCapabilities` 是绑定授权与适配器声明的交集；`missingCapabilities` 列出已选但缺少的能力。普通评论与原生 Review 是不同回执。`serverWriteProfile` 仅表示服务器是否配置了该仓库的写入策略；执行、路径、验证、GitHub 权限及目标版本仍需逐项核对。 |
 
-**改规则：** 先 `status`，核对所有者、现有事件和修订；把 `expectedRevision` 改成刚读到的修订，再修改 `declaration` 并 `apply`。例如保留评论提及，同时增加 Issue 创建时的提及，可写 `events: [issue_comment.created, issues.opened]`。只有启用 `issues.labeled` 时才能并且必须设置 `triggerLabel`。仓库事件与写仓权限独立。
-
-**PR 评审：** 绑定声明可选 `deepReview: true` 和 `nativeReview: true`，分别允许读取任务源码快照和发布正文型原生 Review；使用对应 OpenClaw 配置并显式 apply。规则变化产生新修订，不能授予 draft PR 写权限。详见[配置、限制和回执](pr-review.md)。
-
-**停用：** 先查询最新修订，把文件改为下例后显式 `apply`（2 仅为示例）。停止进程、掉线、删除或损坏文件均不会停用仓库。
+**按需开启自动处理。** 以下是 OpenClaw 分析 Agent 的仓库配置示例。ACP 用于编码，绑定时会拒绝 `autoTriage: true` 或 `autoReview: true`；ACP 仍可接收明确提及或管理员配置的委派标签。只保留确实希望开启的规则。标签名精确匹配；不设标签也能观察 `issues.labeled`。深评及原生 Review 分别选择；详见 [PR 评审](pr-review.md)。
 
 ```yaml
-owner: xallor-ai
-repo: xallor
-expectedRevision: 2
 declaration:
-  enabled: false
-  events: []
+  enabled: true
+  autoTriage: true
+  autoReview: true
+  triggerLabel: agent
+  deepReview: true
+  nativeReview: true
 ```
 
-**错误与重试：** 网络中断或响应无效时进程返回非零，`unconfirmed` 表示服务端可能已经写入，先恢复连接并 `status`。409 冲突不会覆盖服务端或自动重试；比较服务端的新规则，决定是否基于其修订重新提交。`installation_scope` 检查 App 安装和选仓；`administrator_permission` 检查配对用户的仓库管理员权限；`device_unauthorized` 检查连接器凭据和撤销状态；`binding_owner` 表示该仓库已有其他设备归属。`github_unavailable` 表示此次无法核实 GitHub 状态。
+只有要缩窄观察面时才指定 `events`，例如 `events: [issue_comment.created, issues.opened]`；显式列表不会自动包含将来新增的事件。不使用 `events: all`。停用时保留仓库名，写入 `declaration: {enabled: false}` 并 `apply`。掉线、退出和删除文件都不会停用。修改规则或更换 Agent 将产生新修订，旧执行及发布由服务器按修订隔离。
 
-## 撤销丢失的设备
+**并发和失败。** `apply` 每次先读取服务器当前修订，再提交一次。仓库文件不接受 `expectedRevision`。读取之后若发生冲突，客户端重新读取已验证的当前绑定、显示 `current` 与 `desired`，不自动覆写；比较后由管理员决定下一次调整。网络中断、无法验证的响应会报告 `unconfirmed`；先 `status` 再决定。遇到 `installation_scope` 检查安装和选仓；`administrator_permission` 检查配对人的权限；`device_unauthorized` 检查设备凭据与撤销情况；`binding_owner` 检查设备归属与负责 Agent；`github_unavailable` 表示 GitHub 状态未核实。
 
-管理员在自己的机器执行 `npm run channel -- admin revoke http://127.0.0.1:18896 DEVICE_ID`。撤销后不能用旧设备令牌继续操作。已发往 GitHub 的请求仍需核对实际结果；停用记录保留归属，不支持靠删除文件、改名或普通登记抢占。以上步骤是操作指南，真实环境验收与本地测试的证据见[能力台账](capabilities.md)。
+## 读取已收到的活动
+
+```sh
+npm run channel -- agent repo activities xallor.local.yaml agent.local.yaml 0 25
+```
+
+最后两个参数分别为上次读取的游标（首次 0）及页大小（1–100，默认 25）。该命令不调用模型，也不领取执行任务。返回的每条活动包括投递 ID、来源、目标、接收时间、触发原因、短摘录及关联的任务 ID（未开工时为 null）。`taskId` 不代表任务成功；确认发布还要看任务及 GitHub 回执。
+
+由获授权的调用方保存每个仓库绑定的 `nextCursor`，有 `hasMore` 时继续翻页；换修订后可从 0 开始。活动页只暴露当前启用的绑定修订，最多保留最近 7 天、每仓库 1024 条；`truncated` 表示有记录已越过保留边界。它不是完整审计档案，也不会自动重放过期模型任务。摘录自身被裁短时有独立的 `truncated`。`agent run` 会为本机已成功 `apply` 的绑定自动分批读取活动页并保存游标。`status` 中的 `localActivityInbox` 展示本机与当前绑定修订匹配的收件进度；没有匹配记录为 null，本机收件库无法读取为 unavailable。收到活动仅表示连接器读到了这批记录，不会为此额外调用模型，也不代表模型会话已收到通知。没有成功 `apply` 的本地文件、单独执行 `status` 或有冲突的配置不会新增本机订阅。活动接口每页均返回 `bindingId`，包括空页；绑定修订变化时不得沿用旧修订的回执。生产环境哪些组合有实际回执，见[能力台账](capabilities.md)。
+
+后台轮询独立于任务领取与执行。每次读取一个仓库的一页（最多 25 条），结束后至少等 5 秒再读取下一仓；单次最多等待 15 秒。仅保存游标、已读条数、是否遇到保留缺口及最后确认时间，不保存摘录或发起人。`pollStatus` 为 `synced`、`not_yet_polled`、`denied` 或 `unconfirmed`；拒绝时不展示旧的进度计数。

@@ -64,7 +64,16 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "revision",
         "declaration",
       ],
+      threadClosures: ["repositoryId", "thread", "closedAt"],
       revokedDevices: ["deviceId"],
+      runtimePolls: [
+        "deviceId",
+        "runtimeType",
+        "runtimeId",
+        "deepReview",
+        "nativeReview",
+        "seenAt",
+      ],
       tasks: [
         "id",
         "deliveryId",
@@ -86,8 +95,29 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "outcome",
         "runtime",
         "publicationReceipt",
+        "publicationBlocked",
+        "githubTime",
       ],
-      deliveries: ["deliveryId", "taskId"],
+      deliveries: [
+        "deliveryId",
+        "eventKey",
+        "bindingId",
+        "cursor",
+        "taskId",
+        "reason",
+        "attempts",
+        "duplicate",
+      ],
+      activities: [
+        "cursor",
+        "deliveryId",
+        "installationId",
+        "repositoryId",
+        "bindingId",
+        "thread",
+        "receivedAt",
+        "data",
+      ],
       assignments: [
         "taskId",
         "workerId",
@@ -96,7 +126,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "resultDigest",
       ],
     },
-    4,
+    5,
   );
   db.exec(
     "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
@@ -110,11 +140,29 @@ export function initializeTaskSchema(db: DatabaseSync) {
     ) STRICT;
     CREATE INDEX binding_device ON bindings(deviceId);
     CREATE TABLE revokedDevices(deviceId TEXT PRIMARY KEY) STRICT;
-    CREATE TABLE tasks(id TEXT PRIMARY KEY,deliveryId TEXT NOT NULL UNIQUE,eventKey TEXT NOT NULL UNIQUE,bindingId TEXT NOT NULL,installationId INTEGER NOT NULL,repositoryId INTEGER NOT NULL,owner TEXT NOT NULL,repo TEXT NOT NULL,actorId INTEGER NOT NULL,actorLogin TEXT NOT NULL,prompt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','rejected','unknown')),deliveryStatus TEXT NOT NULL CHECK(deliveryStatus IN ('pending','sending','sent','skipped','failed','unknown')),createdAt INTEGER NOT NULL,error TEXT,target TEXT NOT NULL,source TEXT NOT NULL,outcome TEXT,runtime TEXT,publicationReceipt TEXT);
+    CREATE TABLE runtimePolls(deviceId TEXT NOT NULL,runtimeType TEXT NOT NULL,runtimeId TEXT NOT NULL,deepReview INTEGER NOT NULL,nativeReview INTEGER NOT NULL,seenAt INTEGER NOT NULL,
+      PRIMARY KEY(deviceId,runtimeType,runtimeId,deepReview,nativeReview)) STRICT;
+    CREATE TRIGGER prune_runtime_poll AFTER UPDATE OF deviceId,declaration ON bindings BEGIN
+      DELETE FROM runtimePolls WHERE deviceId=OLD.deviceId AND NOT EXISTS (
+        SELECT 1 FROM bindings b WHERE b.deviceId=runtimePolls.deviceId AND json_extract(b.declaration,'$.enabled')=1
+          AND json_extract(b.declaration,'$.responsibleAgent.type')=runtimePolls.runtimeType
+          AND json_extract(b.declaration,'$.responsibleAgent.id')=runtimePolls.runtimeId
+          AND json_extract(b.declaration,'$.responsibleAgent.deepReview')=runtimePolls.deepReview
+          AND json_extract(b.declaration,'$.responsibleAgent.nativeReview')=runtimePolls.nativeReview);
+    END;
+    CREATE TABLE threadClosures(repositoryId INTEGER NOT NULL,thread TEXT NOT NULL,closedAt INTEGER,PRIMARY KEY(repositoryId,thread)) STRICT;
+    CREATE TABLE tasks(id TEXT PRIMARY KEY,deliveryId TEXT NOT NULL UNIQUE,eventKey TEXT NOT NULL,bindingId TEXT NOT NULL,installationId INTEGER NOT NULL,repositoryId INTEGER NOT NULL,owner TEXT NOT NULL,repo TEXT NOT NULL,actorId INTEGER NOT NULL,actorLogin TEXT NOT NULL,prompt TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','rejected','unknown')),deliveryStatus TEXT NOT NULL CHECK(deliveryStatus IN ('pending','sending','sent','skipped','failed','unknown')),createdAt INTEGER NOT NULL,error TEXT,target TEXT NOT NULL,source TEXT NOT NULL,outcome TEXT,runtime TEXT,publicationReceipt TEXT,publicationBlocked INTEGER NOT NULL DEFAULT 0,githubTime INTEGER);
+    CREATE INDEX task_dedup_scope ON tasks(eventKey,githubTime);
     CREATE INDEX task_queue ON tasks(status,createdAt);
     CREATE INDEX task_scope ON tasks(installationId,repositoryId,status);
-    CREATE TABLE deliveries(deliveryId TEXT PRIMARY KEY,taskId TEXT NOT NULL REFERENCES tasks(id));
+    CREATE TABLE activities(cursor INTEGER PRIMARY KEY AUTOINCREMENT,deliveryId TEXT NOT NULL UNIQUE,installationId INTEGER NOT NULL,repositoryId INTEGER NOT NULL,bindingId TEXT NOT NULL,thread TEXT NOT NULL,receivedAt INTEGER NOT NULL,data TEXT NOT NULL) STRICT;
+    CREATE INDEX activity_thread ON activities(bindingId,thread,cursor);
+    CREATE INDEX activity_scope ON activities(installationId,repositoryId,cursor);
+    CREATE INDEX activity_age ON activities(receivedAt);
+    CREATE TABLE deliveries(deliveryId TEXT PRIMARY KEY,eventKey TEXT,bindingId TEXT NOT NULL,cursor INTEGER NOT NULL,taskId TEXT REFERENCES tasks(id),reason TEXT NOT NULL,attempts INTEGER NOT NULL,duplicate INTEGER NOT NULL) STRICT;
+    CREATE UNIQUE INDEX delivery_event ON deliveries(eventKey);
+    CREATE INDEX delivery_scope ON deliveries(bindingId,cursor);
     CREATE TABLE assignments(taskId TEXT PRIMARY KEY REFERENCES tasks(id),workerId TEXT NOT NULL,leaseHash TEXT NOT NULL,expiresAt INTEGER NOT NULL,resultDigest TEXT);
     CREATE INDEX assignment_worker ON assignments(workerId);
-    PRAGMA user_version=4; COMMIT;`);
+    PRAGMA user_version=5; COMMIT;`);
 }

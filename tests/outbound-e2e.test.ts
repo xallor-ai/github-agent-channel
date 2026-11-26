@@ -1,3 +1,4 @@
+import { fixtureAgent } from "./binding-fixture.js";
 import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -126,13 +127,17 @@ async function fixture(t: test.TestContext) {
       res.writeHead(200, { "content-type": "application/json" });
       if (modelRequests.length === 1) {
         assert.equal(data.previous_response_id, undefined);
-        assert.deepEqual(data.input, [
+        assert.deepEqual(data.input.slice(-1), [
           {
             type: "message",
             role: "user",
             content: "@fixture[bot] summarize this issue",
           },
         ]);
+        for (const background of data.input.slice(0, -1)) {
+          assert.equal(background.role, "user");
+          assert.match(background.content, /untrusted background/);
+        }
         assert.deepEqual(
           data.tools.map((x: { name: string }) => x.name),
           ["read_issue", "read_file"],
@@ -211,7 +216,7 @@ async function fixture(t: test.TestContext) {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  const event = JSON.stringify({
+  const payload = {
     action: "created",
     installation: { id: 1 },
     repository: {
@@ -225,16 +230,17 @@ async function fixture(t: test.TestContext) {
       body: "@fixture[bot] summarize this issue",
       user: { id: 5, login: "alice", type: "User" },
     },
-    issue: { number: 3 },
-  });
+    issue: { number: 3, state: "open" },
+  };
   const delivery = randomUUID();
-  const webhook = (valid = true) =>
-    fetch(cloudUrl + "/webhooks/github", {
+  const webhook = (valid = true, value = payload, deliveryId = delivery) => {
+    const event = JSON.stringify(value);
+    return fetch(cloudUrl + "/webhooks/github", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "x-github-event": "issue_comment",
-        "x-github-delivery": delivery,
+        "x-github-delivery": deliveryId,
         "x-hub-signature-256":
           "sha256=" +
           (valid
@@ -243,7 +249,9 @@ async function fixture(t: test.TestContext) {
       },
       body: event,
     });
+  };
   return {
+    payload,
     store,
     journal,
     agent,
@@ -259,6 +267,36 @@ async function fixture(t: test.TestContext) {
     runtimeError: () => runtimeError,
   };
 }
+
+test("ordinary discussion and the agent's reply are received without waking the model", async (t) => {
+  const f = await fixture(t);
+  for (const [sender, body, reason, id] of [
+    [f.payload.sender, "Here are some extra details", "observed", 123],
+    [
+      { id: 55, type: "Bot", login: "fixture[bot]" },
+      "@fixture done",
+      "self_receipt",
+      124,
+    ],
+  ] as const) {
+    const response = await f.webhook(
+      true,
+      { ...f.payload, sender, comment: { id, body, user: sender } },
+      randomUUID(),
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      observed: true,
+      duplicate: false,
+      taskId: null,
+      reason,
+    });
+    await f.agent.once();
+    assert.equal(f.modelRequests.length, 0);
+    assert.equal(await f.publisher.tick(), false);
+    assert.equal(f.publications.length, 0);
+  }
+});
 
 test("signed webhook travels through outbound Agent and local Responses tools to one cloud publication", async (t) => {
   const f = await fixture(t);
@@ -321,7 +359,7 @@ test("connector v2 rejects flat results and accepts only explicit structured out
       body: JSON.stringify(body),
     });
   assert.equal((await post("/connector/v1/claim", {})).status, 404);
-  const claimed = await post("/connector/v2/claim", {});
+  const claimed = await post("/connector/v2/claim", { runtime: fixtureAgent });
   assert.equal(claimed.status, 200);
   const assignment = (await claimed.json()) as { leaseToken: string };
   const path = "/connector/v2/tasks/" + receipt.taskId + "/result";

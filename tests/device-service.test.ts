@@ -1,3 +1,4 @@
+import { fixtureAgent } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -27,7 +28,9 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
   const repository = { id: 12, name: "project", owner: { login: "org" } };
   const user = { id: 99, login: "person" };
   const githubToken = "github_user_token_fixture";
+  let lastPoll: number | null = null;
   const options = {
+    runtimeLastSeen: () => lastPoll,
     registry: tasks.registry,
     dbPath,
     appId: "1",
@@ -39,7 +42,12 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
       assert.equal(origin, "https://api.github.com");
       const route: Record<string, unknown> = {
         "/user": { id: githubUserId },
-        "/repos/org/project/installation": { id: 56, suspended_at: null },
+        "/repos/org/project/installation": {
+          id: 56,
+          suspended_at: null,
+          events: ["issues"],
+          permissions: { issues: "read", metadata: "read" },
+        },
         "/app/installations/56/access_tokens": {
           token: "ghs_test",
           repository_selection: "selected",
@@ -128,14 +136,41 @@ test("pairing is bound to an expiring one-use invitation and a GitHub numeric id
   for (const secret of [githubToken, ownToken, ownInvite])
     assert.equal(readFileSync(dbPath).includes(Buffer.from(secret)), false);
   const read = () => post(base + "/bindings/read", ownToken, selection);
-  assert.deepEqual(await (await read()).json(), { binding: null });
+  assert.deepEqual(await (await read()).json(), {
+    binding: null,
+    coverage: {
+      runtimePoll: { status: "unbound", lastPolledAt: null },
+      subscriptions: ["issues"],
+      permissions: { issues: "read" },
+      serverWriteProfile: null,
+    },
+  });
   const write = () =>
     post(base + "/bindings/apply", ownToken, {
       ...selection,
       expectedRevision: 0,
-      declaration: { enabled: true, events: ["issues.opened"] },
+      declaration: {
+        enabled: true,
+        responsibleAgent: fixtureAgent,
+        events: ["issues.opened"],
+      },
     });
-  assert.equal((await write()).status, 200);
+  const applied = await write();
+  assert.equal(applied.status, 200);
+  assert.deepEqual((await applied.json()).coverage.runtimePoll, {
+    status: "never_seen",
+    lastPolledAt: null,
+  });
+  lastPoll = now;
+  assert.deepEqual((await (await read()).json()).coverage.runtimePoll, {
+    status: "recent",
+    lastPolledAt: lastPoll,
+  });
+  now += 120001;
+  assert.deepEqual((await (await read()).json()).coverage.runtimePoll, {
+    status: "last_seen",
+    lastPolledAt: lastPoll,
+  });
   const otherToken = random();
   await pair(await issue(), otherToken);
   assert.equal(

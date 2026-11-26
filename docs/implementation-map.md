@@ -2,6 +2,8 @@
 
 状态：本次实现纠偏后的源码地图，2026-11-25。目标是通用 GitHub Channel；目前实现 OpenClaw 分析适配器和 ACP 编码适配器。真实模型/仓库验收范围单列在[能力台账](capabilities.md)。
 
+仓库负责人、活动持久化、线程上下文与执行授权的区别见[产品边界对照](repository-owner-boundary.md)。
+
 ## 数据与调用链
 
 1. GitHub → server/webhook 验签与触发规则 → SQLite 保存 source、target、授权范围 → 202。
@@ -25,7 +27,7 @@
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
 | [config.ts](../src/config.ts)                         | 云端服务级配置与可选 writeProfiles；仓库和事件走设备登记 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
-| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 4、bridge journal schema 3；旧格式拒绝，绝不转换或删除旧数据                                                        |
+| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 5、bridge journal schema 3；旧格式拒绝，绝不转换或删除旧数据                                                        |
 | [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
 | [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
 | [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |
@@ -61,7 +63,7 @@
 | 旧数据/旧配置/旧协议         | 直接拒绝；无迁移、无别名、无 fallback。新版本使用新状态目录和卷                           |
 | 工作区安全                   | 原生 ACP 不是 OS sandbox，独立 clone 与专用账户由管理员准备；不支持多个 bridge 共享工作区 |
 
-Webhook 的 `requireMention` 只改变评论/Issue 创建事件的提及条件；签名、actor、事件和 PR 状态检查仍生效。
+Webhook 先分类观察，再判断行动；同一事务保存活动、线程关联及可选任务。设备活动接口和管理诊断不触发模型。
 
 ## 配置与验证入口
 

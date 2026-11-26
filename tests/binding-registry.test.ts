@@ -1,3 +1,5 @@
+import { fixtureAgent } from "./binding-fixture.js";
+import { bindingEvent } from "../src/binding-events.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -14,7 +16,11 @@ const proof = {
   deviceId: "bridge-A",
   administratorId: 44,
 };
-const enabled = { enabled: true, events: ["push", "issue_comment.created"] };
+const enabled = {
+  enabled: true,
+  responsibleAgent: fixtureAgent,
+  events: ["push", "issue_comment.created"],
+};
 const disabled = { enabled: false, events: [] };
 
 test("retries are idempotent; a stale enable cannot undo a disable, including after restart", (t) => {
@@ -74,7 +80,7 @@ test("invalid declarations and obsolete revisions cannot change the stored decis
     for (const value of [
       { enabled: true, events: [] },
       { enabled: true, events: ["unknown"] },
-      { enabled: true, events: ["issues.labeled"] },
+      { ...enabled, requireMention: true },
       { ...enabled, writePolicy: {} },
       { ...disabled, events: ["push"] },
     ])
@@ -84,12 +90,62 @@ test("invalid declarations and obsolete revisions cannot change the stored decis
     assert.throws(() => registry.apply(proof, 0, disabled));
     const first = registry.apply(proof, 0, {
       enabled: true,
+      responsibleAgent: fixtureAgent,
       events: ["issues.labeled"],
       triggerLabel: "work",
     });
     assert.equal(first.triggerLabel, "work");
     assert.throws(() => registry.apply(proof, 0, enabled), /revision/i);
     assert.deepEqual(registry.get(scope), first);
+  } finally {
+    db.close();
+  }
+});
+
+test("reject automatic analysis on an ACP coding agent without disturbing its explicit delegation rules", (t) => {
+  const db = new TaskStore(":memory:");
+  t.after(() => db.close());
+  const coding = {
+    enabled: true,
+    responsibleAgent: {
+      type: "acp",
+      id: "harness",
+      nativeReview: false,
+      deepReview: false,
+    },
+    triggerLabel: "start-coding",
+  };
+  const binding = db.registry.apply(proof, 0, coding);
+  for (const rule of ["autoReview", "autoTriage"]) {
+    assert.throws(
+      () => db.registry.apply(proof, 1, { ...coding, [rule]: true }),
+      /ACP coding agents/,
+    );
+    assert.deepEqual(db.registry.get(scope), binding);
+  }
+  const analysis = db.registry.apply(proof, 1, {
+    enabled: true,
+    responsibleAgent: fixtureAgent,
+    autoReview: true,
+    autoTriage: true,
+  });
+  assert.equal(analysis.revision, 2);
+});
+
+test("omitted filters stay dynamic and observation of labels is independent from delegation", () => {
+  const db = new TaskStore(":memory:");
+  try {
+    const d = { enabled: true, responsibleAgent: fixtureAgent };
+    const first = db.registry.apply(proof, 0, d);
+    assert.equal(first.events, undefined);
+    assert.deepEqual(db.activeBinding(11, 22)?.events, bindingEvent.options);
+    assert.equal(
+      db.registry.apply(proof, 1, { ...d, events: [...bindingEvent.options] })
+        .revision,
+      2,
+    );
+    db.registry.apply(proof, 2, { ...d, events: ["issues.labeled"] });
+    assert.equal(db.activeBinding(11, 22)?.triggerLabel, undefined);
   } finally {
     db.close();
   }

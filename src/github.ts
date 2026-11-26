@@ -36,6 +36,7 @@ export class OctokitGitHubClient implements GitHubClient {
     private readonly lookup: BindingLookup,
     private readonly verifyManager: (task: Task) => Promise<void>,
     fetchImpl: typeof fetch = fetch,
+    private readonly publicationAllowed: (id: string) => boolean = () => true,
   ) {
     this.#config = config;
     this.#fetch = fetchImpl;
@@ -51,6 +52,8 @@ export class OctokitGitHubClient implements GitHubClient {
   #binding(task: Task) {
     const found = this.lookup(task.installationId, task.repositoryId);
     if (
+      ((task.status === "succeeded" || task.status === "failed") &&
+        !this.publicationAllowed(task.id)) ||
       !found?.enabled ||
       found.id !== task.bindingId ||
       found.owner !== task.owner ||
@@ -126,7 +129,10 @@ export class OctokitGitHubClient implements GitHubClient {
     const client = await this.#authorized(task);
     if (task.target.kind === "pull_request") {
       await checkPull(client, task);
-    } else if (task.status === "failed" && task.target.kind === "issue") {
+    } else if (
+      (task.status === "failed" || task.status === "succeeded") &&
+      task.target.kind === "issue"
+    ) {
       const { data } = await client.request(
         "GET /repos/{owner}/{repo}/issues/{issue_number}",
         {
@@ -136,7 +142,7 @@ export class OctokitGitHubClient implements GitHubClient {
         },
       );
       if (data.state !== "open")
-        throw new AccessDenied("Failure notice target is not confirmed open");
+        throw new AccessDenied("Issue target is not confirmed open");
     }
     this.#binding(task);
     return client;

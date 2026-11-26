@@ -21,12 +21,13 @@
 | ID  | 能力                                 | 实现状态与限制                                                                | 证据                                                                         | 真实环境状态                       |
 | --- | ------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------- |
 | E01 | 接收签名 Webhook                     | 已实现；验签原始正文后解析                                                    | [webhook.ts](../src/webhook.ts)、[webhook.test.ts](../tests/webhook.test.ts) | v2真实投递/签名通过                |
-| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；默认要求提及，可按仓库关闭                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
+| E00 | 只观察与补领 | 签名活动与可选任务原子保存；按设备、负责人、绑定修订分页。自身回执不启动模型 | [活动库测试](../tests/activity-store.test.ts) | 新策略本地验证，未生产验收 |
+| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；明确提及时执行，普通评论只记活动                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
 | E03 | PR 会话区评论 @App | 按绑定触发；授权领取时固定 PR 版本，开放状态或版本不匹配即拒绝 | [pull.ts](../src/pull.ts)、[GitHub 测试](../tests/github.test.ts) | 旧版 PR #4 真实回帖；固定版本路径待验收 |
-| E04 | Issue 创建/标签触发                  | 显式启用 issues.opened（默认需提及）、issues.labeled（指定标签）；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
-| E05 | PR 创建/更新 | 显式启用 opened/synchronize；签名事件保留原始 base/head 身份 | [webhook.ts](../src/webhook.ts) | 旧版 PR #6 真实触发；H1/H2 版本验收待做 |
+| E04 | Issue 创建/标签触发                  | 新建时提及或显式 autoTriage；设置 triggerLabel 才按标签启动；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
+| E05 | PR 创建/更新 | 默认观察；显式 autoReview 才自动执行；签名事件保留原始 base/head 身份 | [webhook.ts](../src/webhook.ts) | 旧版 PR #6 真实触发；H1/H2 版本验收待做 |
 | E06 | PR review / 行内 review comment 触发 | 未实现；两个 review 事件被忽略                                                | 同上                                                                         | 待实现                             |
-| E07 | push 触发                            | 显式启用有效非删除分支 push，产生 repository target                           | generic-tasks/webhook 测试                                                   | 修复后 v2 真实 push succeeded/skipped，无评论 |
+| E07 | 非删除分支 push | 记录 ref/SHA，只观察不执行 | [Webhook 策略](../src/webhook.ts) | 本版待真实验收，旧版的 push 执行不是本版承诺 |
 | E08 | check_run / check_suite 触发         | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
 | E09 | workflow_run / workflow_job 触发     | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
 | E10 | discussion / discussion_comment 触发 | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
@@ -34,7 +35,7 @@
 | E12 | 防止机器人回复触发自身               | 已实现；忽略 Bot、自己的消息和不匹配的提及                                    | webhook.test.ts                                                              | v2两条机器人事件200 ignored        |
 | E13 | 重复投递只对应一个任务               | 已实现；delivery 和 scoped comment 去重                                       | [store.test.ts](../tests/store.test.ts)                                      | v2 GitHub Redeliver 同任务、单回帖 |
 
-GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明非空 `events`；仅接收提及评论时选 `[issue_comment.created]` 并保持 `requireMention: true`。可显式启用已实现的 `issues.opened/labeled`、`pull_request.opened/synchronize` 和 `push`，并满足对应触发规则。未启用或未实现的事件会被忽略，通常返回 `200 {ignored:true}`；这个 HTTP 200 不代表任务执行成功。
+默认关注支持范围与当前安装、订阅的交集；`events` 仅收窄观察范围。观察不等于委派：默认明确提及才执行，自动分诊/评审另行选择。当前新策略的真实 GitHub 验收未完成。详见[绑定指南](agent-self-service.md)。
 
 ## 2. 上下文、模型和执行环境
 

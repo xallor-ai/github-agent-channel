@@ -1,3 +1,4 @@
+import { fixtureAgent } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -70,6 +71,8 @@ async function fixture(
     0,
     {
       enabled: true,
+      responsibleAgent: fixtureAgent,
+      autoReview: true,
       nativeReview: true,
       deepReview,
       events: [
@@ -249,7 +252,6 @@ async function fixture(
       runtime: {
         type: "openclaw",
         agentId: "github",
-        publishReview: true,
         baseUrl: "http://127.0.0.1:1",
         tokenEnv: "R",
         timeoutMs: 10_000,
@@ -295,7 +297,7 @@ test("opened H1 returning after synchronize H2 cannot publish; only H2 produces 
   const evidenceSeen: string[] = [];
   const agent = f.agentWith(async (_input, init) => {
     const request = JSON.parse(String(init?.body));
-    const evidence = JSON.parse(request.input[1].content);
+    const evidence = JSON.parse(request.input.at(-1).content);
     evidenceSeen.push(evidence.revision.headSha);
     const marker = evidence.files[0].patch.split("\n+")[1];
     if (evidence.revision.headSha === h1) {
@@ -364,7 +366,7 @@ test("PR comment resolves once at claim, persists the pin and lease hash, and ca
     number: 7,
   });
   f.setHead(h2);
-  const claim = await f.post("claim", {});
+  const claim = await f.post("claim", { runtime: fixtureAgent });
   assert.equal(claim.status, 200);
   const { leaseToken, task } = await claim.json();
   const target = { kind: "pull_request", number: 7, revision: revision(h2) };
@@ -400,7 +402,7 @@ test("PR comment resolves once at claim, persists the pin and lease hash, and ca
   assert.equal((await tool("read_pull_diff")).status, 403);
   assert.deepEqual(f.store.get(taskId)?.target, target);
   assert.equal(f.resolver.mock.callCount(), 1);
-  assert.equal((await f.post("claim", {})).status, 204);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
 });
 
 test("only the dedicated grant route releases a credential and never after the assignment expires", async (t) => {
@@ -409,7 +411,9 @@ test("only the dedicated grant route releases a credential and never after the a
       if (expire) store.expireTasks(Date.now() + 60000);
     });
     const { taskId } = await f.comment();
-    const { leaseToken } = await (await f.post("claim", {})).json();
+    const { leaseToken } = await (
+      await f.post("claim", { runtime: fixtureAgent })
+    ).json();
     const path = "tasks/" + taskId + "/source-grant";
     assert.equal(
       (await f.post(path, { leaseToken: "z".repeat(64) })).status,

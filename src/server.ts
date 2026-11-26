@@ -6,6 +6,7 @@ import {
 import { timingSafeEqual } from "node:crypto";
 import type {
   ChannelConfig,
+  BindingLookup,
   GitHubClient,
   PublicationReceipt,
 } from "./contracts.js";
@@ -35,7 +36,7 @@ export function createChannelServer(
   coordinator?: {
     handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   },
-  lookup = store.activeBinding.bind(store),
+  lookup: BindingLookup = store.activeBinding.bind(store),
   reconcileReview?: GitHubClient["reconcileReview"],
 ) {
   const server = createServer(async (req, res) => {
@@ -76,13 +77,47 @@ export function createChannelServer(
         }
         let accepted;
         try {
-          accepted = store.accept(task);
+          accepted = store.observe(task);
         } catch (e) {
           if (!(e instanceof StaleBinding)) throw e;
           send(200, { ignored: true });
           return;
         }
-        send(202, { taskId: accepted.task.id, duplicate: accepted.duplicate });
+        if (accepted.taskId)
+          send(202, { taskId: accepted.taskId, duplicate: accepted.duplicate });
+        else
+          send(200, {
+            observed: true,
+            reason: accepted.reason,
+            taskId: null,
+            duplicate: accepted.duplicate,
+          });
+        return;
+      }
+      if (path.startsWith("/activities/")) {
+        if (!authorized(req.headers.authorization, adminToken)) {
+          send(401, { error: "Unauthorized" });
+          return;
+        }
+        const match = /^\/activities\/([0-9a-f-]{36})(\/thread)?$/i.exec(path);
+        const receipt =
+          req.method === "GET" && match && store.activityReceipt(match[1]);
+        if (!receipt) {
+          send(404, { error: "Not found" });
+          return;
+        }
+        if (match[2]) {
+          if (!receipt.activity) {
+            send(410, { error: "Activity details expired" });
+            return;
+          }
+          send(200, {
+            activities: store.recentThread({
+              ...receipt.activity,
+              deliveryId: "",
+            }),
+          });
+        } else send(200, receipt);
         return;
       }
       if (path.startsWith("/tasks/")) {
@@ -91,7 +126,7 @@ export function createChannelServer(
           return;
         }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -100,6 +135,10 @@ export function createChannelServer(
         const task = store.get(match[1]);
         if (!task) {
           send(404, { error: "Not found" });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/thread") {
+          send(200, { activities: store.recentThread(task) });
           return;
         }
         if (req.method === "GET" && !match[2]) {

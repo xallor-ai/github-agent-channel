@@ -1,3 +1,4 @@
+import { fixtureAgent } from "./binding-fixture.js";
 import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -110,15 +111,61 @@ async function fixture(t: test.TestContext, timeoutMs = 60000) {
     counts: () => ({ authorizations, reads, publications }),
   };
 }
+test("only successful authenticated claim polls report last seen for an active runtime", async (t) => {
+  const f = await fixture(t);
+  const last = () => f.store.runtimeLastSeen("only-worker", fixtureAgent);
+  assert.equal(last(), null);
+  assert.equal(
+    (await f.post("claim", { runtime: fixtureAgent }, "no-token")).status,
+    401,
+  );
+  assert.equal((await f.post("claim", {})).status, 400);
+  assert.equal(
+    (await f.post("claim", { runtime: { ...fixtureAgent, id: "unused" } }))
+      .status,
+    204,
+  );
+  assert.equal(last(), null);
+  assert.equal(
+    f.store.runtimeLastSeen("only-worker", { ...fixtureAgent, id: "unused" }),
+    null,
+  );
+  const before = Date.now();
+  const clock = t.mock.method(Date, "now", () => before);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
+  const seen = last();
+  assert.ok(seen !== null && seen >= before && seen <= Date.now());
+  f.store.accept(input);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 200);
+  assert.equal(last(), seen);
+  clock.mock.mockImplementation(() => before + 31_000);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
+  assert.equal(last(), before + 31_000);
+  assert.equal(f.store.runtimeLastSeen("other", fixtureAgent), null);
+  const scope = {
+    installationId: 1,
+    repositoryId: 2,
+    owner: "org",
+    repo: "repo",
+    administratorId: 44,
+    deviceId: "only-worker",
+  };
+  f.store.registry.apply(scope, 1, { enabled: false });
+  f.store.registry.apply(scope, 2, {
+    enabled: true,
+    responsibleAgent: fixtureAgent,
+  });
+  assert.equal(last(), null);
+});
 test("connector auth precedes claim and caller auth precedes prompt disclosure", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  let r = await f.post("claim", {}, "admin-token");
+  let r = await f.post("claim", { runtime: fixtureAgent }, "admin-token");
   assert.equal(r.status, 401);
   assert.equal(f.store.get(task.id)?.status, "queued");
   assert.equal(f.counts().authorizations, 0);
   f.setAuthorized(false);
-  r = await f.post("claim", {});
+  r = await f.post("claim", { runtime: fixtureAgent });
   assert.equal(r.status, 204);
   assert.doesNotMatch(await r.text(), /secret issue prompt/);
   assert.equal(f.store.get(task.id)?.status, "rejected");
@@ -128,7 +175,7 @@ test("connector auth precedes claim and caller auth precedes prompt disclosure",
     deliveryId: "d2",
     source: { ...input.source, commentId: 2 },
   }).task;
-  const response = await f.post("claim", {});
+  const response = await f.post("claim", { runtime: fixtureAgent });
   assert.equal(response.status, 200);
   assert.equal(
     ((await response.json()) as { task: { id: string } }).task.id,
@@ -138,12 +185,12 @@ test("connector auth precedes claim and caller auth precedes prompt disclosure",
 test("claim one assignment, authorize scoped tools, persist idempotent result and publish once", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  const r = await f.post("claim", {});
+  const r = await f.post("claim", { runtime: fixtureAgent });
   assert.equal(r.status, 200);
   const lease = (await r.json()) as any;
   assert.equal(lease.task.id, task.id);
   assert.ok(lease.leaseToken.length >= 32);
-  assert.equal((await f.post("claim", {})).status, 204);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
   let tool = await f.post(`tasks/${task.id}/tool`, {
     leaseToken: lease.leaseToken,
     name: "read_issue",
@@ -209,7 +256,9 @@ test("claim one assignment, authorize scoped tools, persist idempotent result an
 test("expiry fences tools and late result without automatic reissue", async (t) => {
   const f = await fixture(t, 100);
   const task = f.store.accept(input).task;
-  const lease = (await (await f.post("claim", {})).json()) as any;
+  const lease = (await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json()) as any;
   await new Promise((r) => setTimeout(r, 150));
   assert.equal(
     (
@@ -236,14 +285,16 @@ test("expiry fences tools and late result without automatic reissue", async (t) 
     409,
   );
   assert.equal(f.store.get(task.id)?.status, "unknown");
-  assert.equal((await f.post("claim", {})).status, 204);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
 });
 test("strict and bounded bodies never invoke tools or accept a malformed result", async (t) => {
   const f = await fixture(t);
   assert.equal((await f.post("claim", { workerId: "override" })).status, 400);
   assert.equal((await f.post("claim", { x: "a".repeat(5000) })).status, 413);
   const task = f.store.accept(input).task;
-  const lease = (await (await f.post("claim", {})).json()) as any;
+  const lease = (await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json()) as any;
   assert.equal(
     (
       await f.post(`tasks/${task.id}/result`, {
@@ -285,7 +336,9 @@ test("delivery-only worker never claims queued task", async (t) => {
 test("returned result cannot publish after actor loses permission", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  const lease = (await (await f.post("claim", {})).json()) as {
+  const lease = (await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json()) as {
     leaseToken: string;
   };
   const body = {
@@ -307,7 +360,9 @@ test("returned result cannot publish after actor loses permission", async (t) =>
 test("lease token scopes every tool and result; canonical retry ignores JSON key order", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  const lease = (await (await f.post("claim", {})).json()) as {
+  const lease = (await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json()) as {
     leaseToken: string;
   };
   const wrong = "a".repeat(64);
@@ -364,7 +419,9 @@ test("lease token scopes every tool and result; canonical retry ignores JSON key
 test("storage failure returns retryable 503 and same result is persisted once on retry", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  const lease = (await (await f.post("claim", {})).json()) as {
+  const lease = (await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json()) as {
     leaseToken: string;
   };
   const finish = f.store.finishAssignment.bind(f.store);
@@ -405,8 +462,11 @@ test("storage failure returns retryable 503 and same result is persisted once on
 test("another authenticated device cannot claim, read, or submit a result with the actual owner's lease", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  assert.equal((await f.post("claim", {}, "other-token")).status, 204);
-  const r = await f.post("claim", {});
+  assert.equal(
+    (await f.post("claim", { runtime: fixtureAgent }, "other-token")).status,
+    204,
+  );
+  const r = await f.post("claim", { runtime: fixtureAgent });
   assert.equal(r.status, 200);
   const { leaseToken } = (await r.json()) as { leaseToken: string };
   for (const [action, data] of [
@@ -437,7 +497,9 @@ test("only a verified lease holder receives target-specific outcome validation",
     target: { kind: "repository" },
     source: { event: "push" },
   }).task;
-  const lease = (await (await f.post("claim", {})).json()) as {
+  const lease = (await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json()) as {
     leaseToken: string;
   };
   const body = {
@@ -498,15 +560,20 @@ test("denial fencing a reserved but undisclosed claim never freezes healthy work
       throw new AccessDenied();
     }
   };
-  assert.equal((await f.post("claim", {})).status, 204);
+  assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
   assert.equal(store.get(denied.id)?.status, "rejected");
-  assert.equal((await (await f.post("claim", {})).json()).task.id, healthy.id);
+  assert.equal(
+    (await (await f.post("claim", { runtime: fixtureAgent })).json()).task.id,
+    healthy.id,
+  );
 });
 
 test("failure codes survive result acknowledgement and never admit arbitrary diagnostics", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;
-  const { leaseToken } = await (await f.post("claim", {})).json();
+  const { leaseToken } = await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json();
   const url = "tasks/" + task.id + "/result";
   const result = { leaseToken, status: "failed", failure: "tool_call_failed" };
   assert.equal(

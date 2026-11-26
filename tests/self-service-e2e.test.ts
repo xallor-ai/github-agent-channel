@@ -1,3 +1,4 @@
+import { fixtureAgent } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -98,6 +99,8 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
           user,
         });
       }
+      if (pathname === prefix + "/issues/1")
+        return Response.json({ number: 1, state: "open" });
       if (pathname === prefix + "/issues/1/comments") {
         if (init?.method === "POST") {
           publication.push(r.name + ":" + JSON.parse(String(init.body)).body);
@@ -121,6 +124,8 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
       dbPath: config.dataFile + ".devices",
       adminToken: "admin",
       registry: store.registry,
+      runtimeLastSeen: store.runtimeLastSeen.bind(store),
+      recentActivities: store.activitiesForDevice.bind(store),
       appId: "1",
       privateKey: key,
       fetchImpl: gitFetch,
@@ -148,7 +153,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
           who.githubUserId !== b.administratorId
         )
           throw new AccessDenied("binding unavailable");
-        const checked = await verifier.verifyPaired(who, {
+        const { who: checked } = await verifier.verifyPaired(who, {
           owner: task.owner,
           repo: task.repo,
         });
@@ -225,18 +230,21 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
       expectedRevision: revision,
       declaration: {
         enabled,
-        requireMention: false,
+        ...(enabled
+          ? { responsibleAgent: fixtureAgent, autoTriage: true }
+          : {}),
         events: enabled ? ["issues.opened"] : [],
       },
     });
-  const claim = (i: number) => post(v + "/claim", tokens[i], {});
+  const claim = (i: number) =>
+    post(v + "/claim", tokens[i], { runtime: fixtureAgent });
   const hook = (i: number, delivery = randomUUID(), signature = true) => {
     const body = JSON.stringify({
       installation: { id: 700 + i },
       repository: repos[i],
       sender: actor,
       action: "opened",
-      issue: { number: 1, title: "inspect", body: "hello" },
+      issue: { number: 1, title: "inspect", body: "hello", state: "open" },
     });
     return fetch(cloud.url + "/webhooks/github", {
       method: "POST",
@@ -289,8 +297,49 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const second = await accept(1);
   await cloud.close();
   cloud = await start();
+  const feed = (
+    user: number,
+    repository: number,
+    after = 0,
+    agent = fixtureAgent.id as string,
+  ) =>
+    post(v + "/activities", tokens[user], {
+      owner: "example",
+      repo: repos[repository].name,
+      runtime: { ...fixtureAgent, id: agent },
+      after,
+      limit: 1,
+    });
+  const pageResponse = await feed(0, 0);
+  assert.equal(pageResponse.status, 200);
+  const page = await pageResponse.json();
+  assert.equal(page.bindingId, cloud.store.get(id)?.bindingId);
+  assert.equal(page.activities.length, 1);
+  assert.equal(page.activities[0].deliveryId, delivery);
+  assert.equal(page.activities[0].taskId, id);
+  assert.equal(page.activities[0].reason, "triage");
+  const emptyPage = await (await feed(0, 0, page.nextCursor)).json();
+  assert.equal(emptyPage.bindingId, page.bindingId);
+  assert.deepEqual(emptyPage.activities, []);
+  assert.equal((await feed(0, 0, 0, "different-agent")).status, 403);
+  assert.equal((await feed(1, 0)).status, 403);
+  const pollEvidence = async (i: number) =>
+    (
+      await (
+        await post(v + "/bindings/read", tokens[i], {
+          owner: "example",
+          repo: repos[i].name,
+        })
+      ).json()
+    ).coverage.runtimePoll;
+  assert.deepEqual(await pollEvidence(0), {
+    status: "never_seen",
+    lastPolledAt: null,
+  });
+  assert.equal((await pollEvidence(1)).status, "recent");
   const alpha = await claim(0);
   assert.equal(alpha.status, 200);
+  assert.equal((await pollEvidence(0)).status, "recent");
   const firstAssignment = await alpha.json();
   assert.equal(firstAssignment.task.id, id);
   assert.equal((await result(1, id, firstAssignment.leaseToken)).status, 409);
@@ -324,6 +373,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const active = await (await claim(1)).json();
   assert.equal(active.task.id, old);
   assert.equal((await declare(1, 1, 1, false)).status, 200);
+  assert.equal((await feed(1, 1)).status, 403);
   assert.equal(cloud.store.get(queued)?.status, "rejected");
   assert.equal((await result(1, old, active.leaseToken)).status, 409);
   assert.equal(cloud.store.get(old)?.status, "unknown");

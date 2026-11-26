@@ -321,7 +321,7 @@ test("signed HTTP delivery is persisted and independently completed; task query 
         body: "@channel[bot] review this",
         user: { id: 3, login: "alice", type: "User" },
       },
-      issue: { number: 5 },
+      issue: { number: 5, state: "open" },
     });
     const headers = {
       "content-type": "application/json",

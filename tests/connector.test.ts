@@ -551,7 +551,7 @@ test("deep review searches then reads an unchanged file locally under fresh auth
   const calls: string[] = [];
   let turn = 0;
   const connector = new OpenClawConnector(
-    { ...settings, timeoutMs: 5000, deepReview: true, publishReview: true },
+    { ...settings, timeoutMs: 5000 },
     "secret",
     async (_url, init) => {
       const req = JSON.parse(String(init?.body));
@@ -578,12 +578,15 @@ test("deep review searches then reads an unchanged file locally under fresh auth
   );
   const result = await connector
     .withReviewSource(prepareView)
-    .run(pr, async (name) => {
-      calls.push(name);
-      if (name === "read_pull_diff") return diff;
-      assert.equal(name, "review_access");
-      return { authorized: true };
-    });
+    .run(
+      { ...pr, reviewPolicy: { deepReview: true, nativeReview: true } },
+      async (name) => {
+        calls.push(name);
+        if (name === "read_pull_diff") return diff;
+        assert.equal(name, "review_access");
+        return { authorized: true };
+      },
+    );
   assert.deepEqual(calls, [
     "read_pull_diff",
     "review_access",
@@ -601,7 +604,7 @@ test("revocation after local search withholds results and prevents another model
   let grants = 0,
     requests = 0;
   const connector = new OpenClawConnector(
-    { ...settings, timeoutMs: 5000, deepReview: true },
+    { ...settings, timeoutMs: 5000 },
     "secret",
     async () => {
       requests++;
@@ -609,10 +612,15 @@ test("revocation after local search withholds results and prevents another model
     },
   );
   await assert.rejects(
-    connector.withReviewSource(prepareView).run(pr, async (name) => {
-      if (name === "read_pull_diff") return diff;
-      return { authorized: ++grants < 4 };
-    }),
+    connector
+      .withReviewSource(prepareView)
+      .run(
+        { ...pr, reviewPolicy: { deepReview: true, nativeReview: true } },
+        async (name) => {
+          if (name === "read_pull_diff") return diff;
+          return { authorized: ++grants < 4 };
+        },
+      ),
     /access not confirmed/,
   );
   assert.equal(grants, 4);
@@ -630,16 +638,21 @@ test("invalid local snapshot calls are classified as model tool errors", async (
     ["read_file", { path: "ok", ref: "HEAD" }],
   ] as const) {
     const c = new OpenClawConnector(
-      { ...settings, deepReview: true, timeoutMs: 5000 },
+      { ...settings, timeoutMs: 5000 },
       "secret",
       async () => Response.json(call(name, args)),
     );
     await assert.rejects(
-      c.withReviewSource(prepareView).run(pr, async (name) => {
-        if (name === "read_pull_diff") return diff;
-        assert.equal(name, "review_access");
-        return { authorized: true };
-      }),
+      c
+        .withReviewSource(prepareView)
+        .run(
+          { ...pr, reviewPolicy: { deepReview: true, nativeReview: true } },
+          async (name) => {
+            if (name === "read_pull_diff") return diff;
+            assert.equal(name, "review_access");
+            return { authorized: true };
+          },
+        ),
       { code: "tool_call_invalid" },
     );
   }

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { agentName } from "./runtime-profile.js";
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 const origin = (value: string, channel: boolean) => {
@@ -33,6 +34,7 @@ const commandSchema = z.strictObject({
 });
 const acpSchema = z.strictObject({
   type: z.literal("acp"),
+  agentId: agentName,
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
   timeoutMs: z.number().int().min(1).max(3600000),
@@ -52,11 +54,9 @@ const openclawSchema = z.strictObject({
   type: z.literal("openclaw"),
   baseUrl: z.string().refine((v) => origin(v, false)),
   ...ref,
-  agentId: z.string().min(1),
+  agentId: agentName,
   timeoutMs: z.number().int().min(1).max(3600000),
   maxToolRounds: z.number().int().min(1).max(100),
-  deepReview: z.boolean().optional(),
-  publishReview: z.boolean().optional(),
 });
 export type OpenClawRuntimeConfig = z.infer<typeof openclawSchema>;
 const schema = z.strictObject({

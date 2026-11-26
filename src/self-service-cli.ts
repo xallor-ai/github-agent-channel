@@ -9,9 +9,18 @@ import {
   readAgentSettings,
 } from "./agent-config.js";
 import {
+  desiredPolicySchema,
   bindingDeclarationSchema,
+  effectiveEvents,
+  sameDeclaration,
   bindingRecordSchema as record,
 } from "./binding-registry.js";
+
+import { activityPageSchema, paginationSchema } from "./activity-feed.js";
+import { activityInboxStatus, rememberActivityBinding } from "./agent-inbox.js";
+import { bindingEvent } from "./binding-events.js";
+import { coverageSchema, eventCoverage } from "./binding-coverage.js";
+import { runtimeProfile } from "./runtime-profile.js";
 
 const repo = z.strictObject({
   owner: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
@@ -23,8 +32,7 @@ const repo = z.strictObject({
 const id = z.number().int().positive();
 const device = z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/);
 const desiredFile = repo.extend({
-  expectedRevision: z.number().int().nonnegative(),
-  declaration: bindingDeclarationSchema,
+  declaration: desiredPolicySchema.default({ enabled: true }),
 });
 type Connection = { baseUrl: string; timeout: number; token: string };
 
@@ -50,6 +58,9 @@ const errorCode = z.enum([
   "device_not_found",
   "service_error",
 ]);
+class BindingConflict extends Error {}
+class ConfirmedConflict extends Error {}
+class LocalInboxFailure extends Error {}
 async function post<T>(
   connection: Connection,
   path: string,
@@ -76,6 +87,12 @@ async function post<T>(
     const parsed = z
       .object({ error: errorCode })
       .safeParse(await response.json().catch(() => null));
+    if (
+      response.status === 409 &&
+      parsed.success &&
+      parsed.data.error === "binding_conflict"
+    )
+      throw new BindingConflict("Binding revision conflict");
     throw Error(
       "HTTP " +
         response.status +
@@ -96,54 +113,147 @@ async function post<T>(
   return parsed.data;
 }
 
+function readDesired(file: string) {
+  try {
+    return desiredFile.parse(parse(readFileSync(file, "utf8")));
+  } catch {
+    throw Error(
+      "Invalid or unreadable repository declaration; no request sent",
+    );
+  }
+}
+
+export async function activitiesCommand(
+  file: string,
+  configPath: string,
+  after = 0,
+  limit = 25,
+  fetcher: typeof fetch = fetch,
+) {
+  const { owner, repo } = readDesired(file);
+  const config = readAgentSettings(configPath);
+  const page = paginationSchema.parse({ after, limit });
+  const receipt = await post(
+    loadChannelClient(configPath, config),
+    "/connector/v2/activities",
+    { owner, repo, runtime: runtimeProfile(config.runtime), ...page },
+    activityPageSchema,
+    fetcher,
+  );
+  if (
+    receipt.activities.some(
+      (a) =>
+        a.owner.toLowerCase() !== owner.toLowerCase() ||
+        a.repo.toLowerCase() !== repo.toLowerCase(),
+    ) ||
+    receipt.activities.length > limit ||
+    (receipt.hasMore && receipt.activities.length !== limit) ||
+    (!receipt.truncated &&
+      receipt.nextCursor !== (receipt.activities.at(-1)?.cursor ?? after)) ||
+    receipt.nextCursor < after ||
+    receipt.activities.some(
+      (a, i) =>
+        a.cursor <= (receipt.activities[i - 1]?.cursor ?? after) ||
+        a.cursor > receipt.nextCursor,
+    )
+  )
+    throw Error("Invalid activity receipt for this repository or cursor");
+  return receipt;
+}
 export async function repoCommand(
   action: "apply" | "status",
   file: string,
   configPath: string,
   fetcher: typeof fetch = fetch,
 ) {
-  let settings: z.infer<typeof desiredFile>;
-  try {
-    settings = desiredFile.parse(parse(readFileSync(file, "utf8")));
-  } catch {
-    throw Error(
-      "Invalid or unreadable repository declaration; no request sent",
-    );
+  const settings = readDesired(file);
+  const { owner, repo, declaration: policy } = settings;
+  const config = readAgentSettings(configPath);
+  const localAgent = runtimeProfile(config.runtime);
+  const desired = policy.enabled
+    ? { ...policy, responsibleAgent: localAgent }
+    : policy;
+  if (action === "apply") {
+    const parsed = bindingDeclarationSchema.safeParse(desired);
+    if (!parsed.success)
+      throw Error(parsed.error.issues[0].message + "; no request sent");
   }
-  const { owner, repo, expectedRevision, declaration: desired } = settings;
   try {
-    const client = loadChannelClient(configPath);
-    const { binding } =
-      action === "apply"
-        ? await post(
+    const client = loadChannelClient(configPath, config);
+    const verifyTarget = <T extends { binding: z.infer<typeof record> | null }>(
+      receipt: T,
+    ) => {
+      const { binding } = receipt;
+      if (
+        binding &&
+        (binding.owner.toLowerCase() !== owner.toLowerCase() ||
+          binding.repo.toLowerCase() !== repo.toLowerCase())
+      )
+        throw Error("Response identifies a different repository");
+      return receipt;
+    };
+    const read = async () =>
+      verifyTarget(
+        await post(
+          client,
+          "/connector/v2/bindings/read",
+          { owner, repo },
+          z.object({ binding: record.nullable(), coverage: coverageSchema }),
+          fetcher,
+        ),
+      );
+    let { binding, coverage } = await read();
+    if (action === "apply") {
+      const previous = binding;
+      try {
+        ({ binding, coverage } = verifyTarget(
+          await post(
             client,
             "/connector/v2/bindings/apply",
-            settings,
-            z.object({ binding: record }),
+            {
+              owner,
+              repo,
+              expectedRevision: binding?.revision ?? 0,
+              declaration: desired,
+            },
+            z.object({ binding: record, coverage: coverageSchema }),
             fetcher,
-          )
-        : await post(
-            client,
-            "/connector/v2/bindings/read",
-            { owner, repo },
-            z.object({ binding: record.nullable() }),
-            fetcher,
+          ),
+        ));
+        if (
+          !sameDeclaration(binding, desired) ||
+          binding.revision !==
+            (previous
+              ? previous.revision + Number(!sameDeclaration(previous, desired))
+              : 1) ||
+          (previous &&
+            (previous.installationId !== binding.installationId ||
+              previous.repositoryId !== binding.repositoryId ||
+              previous.deviceId !== binding.deviceId ||
+              previous.administratorId !== binding.administratorId))
+        )
+          throw Error("Apply receipt does not confirm the requested binding");
+        try {
+          rememberActivityBinding(
+            config.stateFile,
+            client.baseUrl,
+            localAgent,
+            binding,
           );
-    if (
-      binding &&
-      (binding.owner.toLowerCase() !== owner.toLowerCase() ||
-        binding.repo.toLowerCase() !== repo.toLowerCase())
-    )
-      throw Error("Response identifies a different repository");
-    const matches =
-      binding &&
-      binding.enabled === desired.enabled &&
-      binding.requireMention === desired.requireMention &&
-      !!binding.nativeReview === !!desired.nativeReview &&
-      !!binding.deepReview === !!desired.deepReview &&
-      binding.triggerLabel === desired.triggerLabel &&
-      JSON.stringify([...binding.events].sort()) ===
-        JSON.stringify(desired.events);
+        } catch {
+          throw new LocalInboxFailure(
+            "Server binding confirmed, but saving the local activity subscription failed; check the state file, then apply again",
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof BindingConflict)) throw error;
+        const { binding: current } = await read();
+        throw new ConfirmedConflict(
+          "Binding conflict; no retry. " + JSON.stringify({ current, desired }),
+        );
+      }
+    }
+    const matches = binding && sameDeclaration(binding, desired);
     const state = desired.enabled
       ? matches
         ? "active"
@@ -151,14 +261,73 @@ export async function repoCommand(
       : binding?.enabled === false
         ? "disabled"
         : "disable_pending";
+    const agent = binding?.responsibleAgent;
+    const filter = binding ? effectiveEvents(binding) : [];
+    const capabilities = ["deepReview", "nativeReview"] as const;
+    let localActivityInbox:
+      | ReturnType<typeof activityInboxStatus>
+      | "unavailable" = null;
+    if (binding?.enabled) {
+      try {
+        const inbox = activityInboxStatus(
+          config.stateFile,
+          client.baseUrl,
+          localAgent,
+          owner,
+          repo,
+        );
+        if (
+          inbox?.bindingId ===
+          [
+            binding.installationId,
+            binding.repositoryId,
+            binding.deviceId,
+            binding.revision,
+          ].join(":")
+        )
+          localActivityInbox = inbox;
+      } catch {
+        localActivityInbox = "unavailable";
+      }
+    }
     return {
       repository: owner + "/" + repo,
-      expectedRevision,
+      localAgent,
+      localActivityInbox,
       desired,
       state,
       binding,
+      effective: {
+        responsibleAgent: agent ? agent.type + "/" + agent.id : null,
+        channelEventFilter: filter,
+        eventCoverage: eventCoverage(filter, coverage),
+        channelSupported: bindingEvent.options,
+        subscribedFamiliesOutsideChannel:
+          coverage.subscriptions?.filter(
+            (f) => !bindingEvent.options.some((e) => e.split(".")[0] === f),
+          ) ?? "unknown",
+        appSubscriptions: coverage.subscriptions ?? "unknown",
+        installationEventPermissions: coverage.permissions ?? "unknown",
+        runtimePoll: coverage.runtimePoll,
+        explicitDelegation: !!binding?.enabled,
+        autoTriage: !!(binding?.enabled && binding.autoTriage),
+        autoReview: !!(binding?.enabled && binding.autoReview),
+        triggerLabel: binding?.enabled ? (binding.triggerLabel ?? null) : null,
+        reviewCapabilities: capabilities.filter(
+          (k) => binding?.enabled && binding[k] && agent?.[k],
+        ),
+        missingCapabilities: capabilities.filter(
+          (k) => binding?.enabled && binding[k] && !agent?.[k],
+        ),
+        serverWriteProfile: coverage.serverWriteProfile ?? "unknown",
+      },
     };
   } catch (error) {
+    if (
+      error instanceof ConfirmedConflict ||
+      error instanceof LocalInboxFailure
+    )
+      throw error;
     throw Error(
       (desired.enabled ? "local_pending" : "disable_pending") +
         " (unconfirmed): " +

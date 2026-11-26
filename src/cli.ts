@@ -7,7 +7,12 @@ import { renderAgentDeployment } from "./agent-deploy.js";
 import { loadConfig } from "./config.js";
 import { renderDeployment } from "./deploy.js";
 import { buildDoctorReport, runComposeLifecycle } from "./lifecycle.js";
-import { adminCommand, pairCommand, repoCommand } from "./self-service-cli.js";
+import {
+  activitiesCommand,
+  adminCommand,
+  pairCommand,
+  repoCommand,
+} from "./self-service-cli.js";
 
 const sample = cloudExample;
 function help() {
@@ -15,7 +20,7 @@ function help() {
     "github-agent-channel\n  init [directory] (ECS configuration)\n  agent init [directory]\n  agent check|run [agent-config]\n  agent deploy render [agent-config] [output-dir]\n  agent deploy up|down|status [output-dir]\n  config check [path]\n  config print-public [path]\n  doctor [path] (offline configuration and Compose checks)\n  deploy render [path] [output-dir]\n  deploy up|down|status [output-dir]\n",
   );
   console.log(
-    "  admin invite <channel-url> <github-user-id> <new-invite-file>\n  admin revoke <channel-url> <device-id>\n  agent pair <invite-file> [agent-config]\n  agent repo status|apply <declaration.yaml> [agent-config]",
+    "  admin invite <channel-url> <github-user-id> <new-invite-file>\n  admin revoke <channel-url> <device-id>\n  agent pair <invite-file> [agent-config]\n  agent repo status|apply <declaration.yaml> [agent-config]\n  agent repo activities <declaration.yaml> [agent-config] [after] [limit]",
   );
 }
 async function main(argv: string[]) {
@@ -63,6 +68,29 @@ async function main(argv: string[]) {
     }
     if (action === "repo") {
       const op = argv[2];
+      if (op === "activities") {
+        if (
+          !argv[3] ||
+          argv.length > 7 ||
+          argv.slice(5).some((s) => !/^\d+$/.test(s))
+        )
+          throw Error(
+            "Use: agent repo activities <declaration.yaml> [agent-config] [after] [limit]",
+          );
+        console.log(
+          JSON.stringify(
+            await activitiesCommand(
+              argv[3],
+              resolve(argv[4] ?? "agent.local.yaml"),
+              Number(argv[5] ?? 0),
+              Number(argv[6] ?? 25),
+            ),
+            null,
+            2,
+          ),
+        );
+        return;
+      }
       if ((op !== "status" && op !== "apply") || !argv[3] || argv.length > 5)
         throw Error(
           "Use: agent repo status|apply <declaration.yaml> [agent-config]",

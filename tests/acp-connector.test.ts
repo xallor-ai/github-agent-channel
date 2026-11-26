@@ -294,6 +294,7 @@ function fixture(mode = "edit") {
   git("commit", "-m", "initial");
   const config: any = {
     type: "acp",
+    agentId: "coding",
     command: process.execPath,
     args: [peer, mode],
     workspaces: { "2": dir },

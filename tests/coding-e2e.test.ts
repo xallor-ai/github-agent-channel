@@ -96,6 +96,7 @@ async function fixture(
     else if (method === "GET" && path === "/repos/org/repo/issues/5")
       data = {
         number: 5,
+        state: "open",
         title: "Implement file change",
         body: "Change file.txt to after.",
       };
@@ -145,6 +146,8 @@ async function fixture(
     store,
     { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
     "coding-worker",
+    ["issue_comment.created"],
+    { type: "acp", id: "coding", deepReview: false, nativeReview: false },
   );
   const github = new OctokitGitHubClient(
     config,
@@ -196,6 +199,7 @@ async function fixture(
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const runtimeConfig: AcpRuntimeConfig = {
     type: "acp",
+    agentId: "coding",
     command: process.execPath,
     args: [
       resolve("tests/fixtures/acp-peer.mjs"),
@@ -247,7 +251,7 @@ async function fixture(
       body: "@helper[bot] implement this issue",
       user: { id: 3, login: "alice", type: "User" },
     },
-    issue: { number: 5 },
+    issue: { number: 5, state: "open" },
   });
   const delivery = randomUUID();
   const webhook = () =>

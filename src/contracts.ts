@@ -22,7 +22,9 @@ export interface Binding {
   events: string[];
   nativeReview?: boolean;
   deepReview?: boolean;
-  requireMention?: boolean;
+  autoTriage?: boolean;
+  autoReview?: boolean;
+  responsibleAgent?: import("./runtime-profile.js").RuntimeProfile;
   triggerLabel?: string;
   writePolicy?: {
     baseBranch: string;
@@ -123,6 +125,14 @@ export type PublicationReceipt = {
   url: string;
 };
 export interface Task extends NewTask {
+  // Attached by the server only after authorizing the claim.
+  reviewPolicy?: { deepReview: boolean; nativeReview: boolean };
+  threadContext?: Array<{
+    actor: string;
+    event: string;
+    excerpt: string;
+    truncated: boolean;
+  }>;
   id: string;
   status: TaskState;
   deliveryStatus: DeliveryState;
