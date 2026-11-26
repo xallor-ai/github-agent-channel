@@ -50,6 +50,10 @@ const activity = z.strictObject({
   source: sourceSchema,
   reason: z.enum([
     "mention",
+    "clarification_reply",
+    "clarification_ambiguous",
+    "clarification_unmatched",
+    "clarification_pending",
     "triage",
     "label",
     "review",

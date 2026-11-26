@@ -600,6 +600,7 @@ test("pinned review grants stay in the cache preparer, outside model requests, j
         "read_file",
         "read_merge_facts",
         "search_repo",
+        "request_clarification",
       ]);
       return respond(res, { accepted: true });
     }

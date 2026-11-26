@@ -86,8 +86,8 @@ export class OwnerReceipts {
       const comment =
         a.source.event === "issue_comment" ? a.source.commentId : undefined;
       const eligible =
-        a.reason === "mention" &&
-        d.reason === "mention" &&
+        (a.reason === "mention" || a.reason === "clarification_reply") &&
+        d.reason === a.reason &&
         a.taskId !== null &&
         a.taskId === d.taskId &&
         a.source.event === "issue_comment" &&
@@ -101,7 +101,7 @@ export class OwnerReceipts {
           .get(a.repositoryId, comment);
       this.db
         .prepare(
-          "INSERT INTO ownerReceipts(cursor,deliveryId,bindingId,deviceId,runtime,confirmedAt,repositoryId,commentId,taskId,reactionStatus) VALUES(?,?,?,?,?,?,?,?,?,?)",
+          "INSERT INTO ownerReceipts(cursor,deliveryId,bindingId,deviceId,runtime,confirmedAt,repositoryId,commentId,taskId,reactionStatus,decision) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         )
         .run(
           entry.cursor,
@@ -114,6 +114,9 @@ export class OwnerReceipts {
           comment ?? null,
           eligible ? a.taskId : null,
           eligible ? "pending" : null,
+          a.reason === "observed" && comment !== undefined && !a.taskId
+            ? "silent_by_policy"
+            : null,
         );
     }
     if (expired.length) throw new ExpiredActivities(expired);
@@ -136,6 +139,7 @@ export class OwnerReceipts {
       deviceId: String(r.deviceId),
       runtime: JSON.parse(String(r.runtime)) as RuntimeProfile,
       confirmedAt: Number(r.confirmedAt),
+      decision: r.decision === null ? null : String(r.decision),
       reaction:
         r.reactionStatus === null
           ? null

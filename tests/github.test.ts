@@ -99,6 +99,7 @@ function fixture(
               repository_selection: "selected",
               repositories: [{ id: 2 }],
             };
+    else if (url.pathname === "/app") data = { id: 123, slug: "helper" };
     else if (url.pathname === "/repos/org/repo") {
       if (options.failRead) throw new Error("network failed");
       data = { id: options.repoId ?? 2, name: "repo", owner: { login: "org" } };
@@ -205,6 +206,52 @@ test("authorization rejects repository drift and weak actor role", async () => {
   await assert.rejects(
     fixture().client.authorize({ ...task, repo: "other" }),
     AccessDenied,
+  );
+});
+test("historical question audit is bound to a persisted unknown and the original installation; never writes a comment", async () => {
+  const question: Task = {
+    ...task,
+    id: "12345678-1234-4123-8123-123456789abc",
+    deliveryStatus: "unknown",
+    outcome: {
+      text: "Which version?",
+      artifacts: [],
+      publication: { kind: "clarification" },
+    },
+  };
+  const row = {
+    id: 123,
+    body: `Which version?\n\n请在本线程回答。如需指定这个问题，请以 \`/answer ${question.id} 你的答复\` 开头。\n\n<!-- github-agent-channel:${question.id} -->`,
+    created_at: "2026-11-26T04:00:00Z",
+    user: { type: "Bot", login: "helper[bot]" },
+    issue_url: "https://api.github.com/repos/org/repo/issues/5",
+    html_url: "https://github.com/org/repo/issues/5#issuecomment-123",
+  };
+  const f = fixture({ bindingEnabled: () => false, comments: [row] });
+  await assert.rejects(
+    f.client.reconcileClarification({ ...question, deliveryStatus: "sent" }),
+    AccessDenied,
+  );
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(await f.client.reconcileClarification(question), {
+    id: 123,
+    url: row.html_url,
+    createdAt: Date.parse(row.created_at),
+  });
+  const mutations = f.calls.filter((call) => call.method === "POST");
+  assert.equal(mutations.length, 1);
+  assert.deepEqual(mutations[0].body.permissions, {
+    metadata: "read",
+    issues: "read",
+  });
+  assert.deepEqual(mutations[0].body.repository_ids, [2]);
+  await assert.rejects(
+    fixture({
+      comments: [
+        { ...row, issue_url: "https://api.github.com/repos/org/repo/issues/6" },
+      ],
+    }).client.reconcileClarification(question),
+    AmbiguousExecution,
   );
 });
 test("reads are scoped, marked untrusted and bounded", async () => {

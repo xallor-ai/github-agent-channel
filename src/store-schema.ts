@@ -122,6 +122,25 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "data",
       ],
       reactionCooldowns: ["installationId", "until"],
+      clarifications: [
+        "questionTaskId",
+        "rootTaskId",
+        "bindingId",
+        "thread",
+        "actorId",
+        "askedAt",
+        "expiresAt",
+        "answerTaskId",
+        "closed",
+      ],
+      clarificationSelections: ["taskId", "choices"],
+      clarificationCandidates: [
+        "cursor",
+        "questionTaskId",
+        "input",
+        "githubTime",
+        "receivedAt",
+      ],
       ownerReceipts: [
         "cursor",
         "deliveryId",
@@ -135,6 +154,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "reactionStatus",
         "reason",
         "reactionId",
+        "decision",
       ],
       assignments: [
         "taskId",
@@ -144,7 +164,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "resultDigest",
       ],
     },
-    6,
+    7,
   );
   db.exec(
     "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
@@ -187,12 +207,19 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX delivery_scope ON deliveries(bindingId,cursor);
     CREATE TABLE assignments(taskId TEXT PRIMARY KEY REFERENCES tasks(id),workerId TEXT NOT NULL,leaseHash TEXT NOT NULL,expiresAt INTEGER NOT NULL,resultDigest TEXT);
     CREATE INDEX assignment_worker ON assignments(workerId);
-    CREATE TABLE ownerReceipts(cursor INTEGER PRIMARY KEY,deliveryId TEXT NOT NULL UNIQUE REFERENCES deliveries(deliveryId),bindingId TEXT NOT NULL,deviceId TEXT NOT NULL,runtime TEXT NOT NULL,confirmedAt INTEGER NOT NULL,repositoryId INTEGER NOT NULL,commentId INTEGER,taskId TEXT UNIQUE REFERENCES tasks(id),reactionStatus TEXT CHECK(reactionStatus IN ('pending','sending','sent','failed','unknown')),reason TEXT CHECK(reason IN ('unconfirmed','lookup_rate_limited','scope','forbidden','rate_limited','comment_unavailable','unavailable')),reactionId INTEGER) STRICT;
+    CREATE TABLE ownerReceipts(cursor INTEGER PRIMARY KEY,deliveryId TEXT NOT NULL UNIQUE REFERENCES deliveries(deliveryId),bindingId TEXT NOT NULL,deviceId TEXT NOT NULL,runtime TEXT NOT NULL,confirmedAt INTEGER NOT NULL,repositoryId INTEGER NOT NULL,commentId INTEGER,taskId TEXT UNIQUE REFERENCES tasks(id),reactionStatus TEXT CHECK(reactionStatus IN ('pending','sending','sent','failed','unknown')),reason TEXT CHECK(reason IN ('unconfirmed','lookup_rate_limited','scope','forbidden','rate_limited','comment_unavailable','unavailable')),reactionId INTEGER,decision TEXT CHECK(decision='silent_by_policy')) STRICT;
     CREATE TABLE reactionCooldowns(installationId INTEGER PRIMARY KEY,until INTEGER NOT NULL) STRICT;
     CREATE INDEX receipt_source ON ownerReceipts(repositoryId,commentId,cursor) WHERE commentId IS NOT NULL;
     CREATE UNIQUE INDEX reaction_source ON ownerReceipts(repositoryId,commentId) WHERE reactionStatus IS NOT NULL;
     CREATE INDEX pending_reactions ON ownerReceipts(cursor) WHERE reactionStatus='pending';
-    PRAGMA user_version=6; COMMIT;`);
+    CREATE TABLE clarifications(questionTaskId TEXT PRIMARY KEY REFERENCES tasks(id),rootTaskId TEXT NOT NULL REFERENCES tasks(id),bindingId TEXT NOT NULL,thread TEXT NOT NULL,actorId INTEGER NOT NULL,askedAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,answerTaskId TEXT UNIQUE REFERENCES tasks(id),closed INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE INDEX clarification_match ON clarifications(bindingId,thread,actorId,askedAt) WHERE answerTaskId IS NULL AND closed=0;
+    CREATE TABLE clarificationSelections(taskId TEXT PRIMARY KEY REFERENCES tasks(id),choices TEXT NOT NULL) STRICT;
+    CREATE TABLE clarificationCandidates(cursor INTEGER PRIMARY KEY,questionTaskId TEXT NOT NULL REFERENCES tasks(id),input TEXT NOT NULL,githubTime INTEGER NOT NULL,receivedAt INTEGER NOT NULL) STRICT;
+    CREATE INDEX clarification_inflight ON clarificationCandidates(questionTaskId,githubTime,cursor);
+    CREATE INDEX clarification_candidate_age ON clarificationCandidates(receivedAt,cursor);
+    CREATE INDEX clarification_sending ON tasks(bindingId,actorId,json_extract(target,'$.kind'),json_extract(target,'$.number')) WHERE deliveryStatus IN ('sending','unknown') AND json_extract(outcome,'$.publication.kind')='clarification';
+    PRAGMA user_version=7; COMMIT;`);
 }
 
 // The task database rejects extra tables; keep the cloud tool ledger independent

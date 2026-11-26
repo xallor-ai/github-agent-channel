@@ -54,6 +54,16 @@ export class DeliveryWorker {
         const publication = delivery.outcome.publication;
         let result: { id: number; url: string };
         switch (publication.kind) {
+          case "clarification": {
+            if (!this.github.publishClarification)
+              throw new AccessDenied("Clarification publication unavailable");
+            const receipt = await this.github.publishClarification(delivery);
+            this.store.markDelivery(delivery.id, "sent", {
+              kind: "comment",
+              ...receipt,
+            });
+            return true;
+          }
           case "none":
             throw new AccessDenied("No publication requested");
           case "review":

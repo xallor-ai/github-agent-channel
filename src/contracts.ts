@@ -111,6 +111,7 @@ export type Artifact =
     }
   | { kind: "change_set"; name: string; baseSha: string; files: ChangedFile[] };
 export type PublicationRequest =
+  | { kind: "clarification" }
   | { kind: "comment"; expectedBaseRef?: string }
   | { kind: "review"; expectedBaseRef?: string }
   | { kind: "none" }
@@ -127,8 +128,17 @@ export type PublicationReceipt = {
   kind: "comment" | "pull_request" | "review";
   id?: number;
   url: string;
+  createdAt?: number;
 };
 export interface Task extends NewTask {
+  continuation?: {
+    rootTaskId: string;
+    questionTaskId: string;
+    originalPrompt: string;
+    history: { question: string; answer: string }[];
+    question: string;
+  };
+  questionChoices?: string[];
   // Attached by the server only after authorizing the claim.
   reviewPolicy?: { deepReview: boolean; nativeReview: boolean };
   threadContext?: Array<{
@@ -162,6 +172,12 @@ export interface RuntimeConnector {
   ): Promise<RuntimeResult>;
 }
 export interface GitHubClient {
+  publishClarification?(
+    task: Task,
+  ): Promise<{ id: number; url: string; createdAt: number }>;
+  reconcileClarification?(
+    task: Task,
+  ): Promise<{ id: number; url: string; createdAt: number }>;
   publishOwnerReaction?(task: Task, check: () => void): Promise<number>;
   lookupOwnerReaction?(task: Task): Promise<number | null>;
   reconcileOwnerReaction?(task: Task): Promise<number | null>;

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenClawConnector } from "../src/connector.js";
+import { validateTaskOutcome } from "../src/outcomes.js";
 import { AmbiguousExecution, type Task } from "../src/contracts.js";
 import {
   renderMergeAssessment,
@@ -35,6 +36,155 @@ const settings = {
   timeoutMs: 100,
   maxToolRounds: 3,
 };
+const continuation = {
+  rootTaskId: "a0000000-0000-4000-8000-000000000001",
+  questionTaskId: "a0000000-0000-4000-8000-000000000002",
+  originalPrompt: "Diagnose the component",
+  history: [],
+  question: "Which platform?",
+};
+test("final clarification round retains all earlier answers and cannot ask again", async () => {
+  const history = [
+    { question: "Component?", answer: "Renderer only." },
+    { question: "Version?", answer: "2.0." },
+    { question: "Constraint?", answer: "Offline." },
+  ];
+  const resumed = {
+    ...task,
+    continuation: { ...continuation, history },
+    prompt: "Linux",
+  };
+  const c = new OpenClawConnector(settings, "secret", async (_url, init) => {
+    const req = JSON.parse(String(init?.body));
+    assert.ok(req.input[0].content.includes(JSON.stringify(history)));
+    assert.equal(req.input[1].content, "Linux");
+    assert.match(req.instructions, /final clarification round/);
+    assert.ok(
+      !req.tools.some(
+        (t: { name: string }) => t.name === "request_clarification",
+      ),
+    );
+    return Response.json(summary);
+  });
+  assert.equal(
+    (await c.run(resumed, async () => null)).publication.kind,
+    "comment",
+  );
+  assert.throws(() =>
+    validateTaskOutcome(resumed, {
+      text: "One more?",
+      artifacts: [],
+      publication: { kind: "clarification" },
+    }),
+  );
+});
+test("scoped clarification is a single terminal proposal, not a GitHub write or a second model dispatch", async () => {
+  const q = "Which platform?";
+  let requests = 0;
+  const connector = new OpenClawConnector(
+    settings,
+    "secret",
+    async (_url, opts) => {
+      const req = JSON.parse(String(opts?.body));
+      requests++;
+      assert.ok(
+        req.tools.some(
+          (t: { name: string }) => t.name === "request_clarification",
+        ),
+      );
+      return Response.json(call("request_clarification", { question: q }));
+    },
+  );
+  const result = await connector.run(task, async () =>
+    assert.fail("local proposal invoked cloud tool"),
+  );
+  assert.equal(requests, 1);
+  assert.deepEqual(result, {
+    text: q,
+    artifacts: [],
+    publication: { kind: "clarification" },
+    responseId: "tool",
+  });
+  validateTaskOutcome(task, result);
+  assert.throws(() =>
+    validateTaskOutcome(
+      { ...task, source: { event: "issues", action: "opened" } },
+      result,
+    ),
+  );
+  for (const question of [" ", "a".repeat(2001)]) {
+    const bad = new OpenClawConnector(settings, "secret", async () =>
+      Response.json(call("request_clarification", { question })),
+    );
+    await assert.rejects(
+      bad.run(task, async () => null),
+      /Invalid scoped tool arguments/,
+    );
+  }
+});
+test("clarification rejects mixed calls, destination overrides and unsolicited requests before any cloud call", async () => {
+  const ask = call("request_clarification", { question: "Which platform?" });
+  const mixed = {
+    ...ask,
+    output: [...call("read_issue", {}).output, ...ask.output],
+  };
+  for (const [scope, output] of [
+    [task, mixed],
+    [
+      task,
+      call("request_clarification", {
+        question: "Which?",
+        repository: "elsewhere",
+      }),
+    ],
+    [{ ...task, source: { event: "issues", action: "opened" } }, ask],
+  ] as const) {
+    let cloud = 0;
+    await assert.rejects(
+      new OpenClawConnector(settings, "secret", async () =>
+        Response.json(output),
+      ).run(scope, async () => {
+        cloud++;
+        return null;
+      }),
+      /sole tool call|Invalid .*tool/,
+    );
+    assert.equal(cloud, 0);
+  }
+});
+test("resume supplies the bounded original request and question to a fresh model session; selection dispatches no model", async () => {
+  const resumed = { ...task, continuation, prompt: "Linux" };
+  const connector = new OpenClawConnector(
+    settings,
+    "secret",
+    async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      assert.ok(req.input[0].content.includes(continuation.question));
+      assert.ok(req.input[0].content.includes(continuation.originalPrompt));
+      assert.equal(req.input[1].content, "Linux");
+      return Response.json(summary);
+    },
+  );
+  const answer = await connector.run(resumed, async () => null);
+  assert.equal(answer.publication.kind, "comment");
+  assert.throws(() =>
+    validateTaskOutcome(resumed, { ...answer, publication: { kind: "none" } }),
+  );
+  const choice = {
+    ...task,
+    questionChoices: [continuation.rootTaskId, continuation.questionTaskId],
+  };
+  const result = await new OpenClawConnector(settings, "secret", async () =>
+    assert.fail("selection dispatched a model"),
+  ).run(choice, async () => assert.fail("selection read GitHub"));
+  validateTaskOutcome(choice, result);
+  assert.ok(
+    result.text.includes("/answer " + continuation.questionTaskId + " "),
+  );
+  assert.throws(() =>
+    validateTaskOutcome(choice, { ...result, text: "Something else" }),
+  );
+});
 test("repository tasks expose only file reads and retain analysis without a comment", async () => {
   const requests: Array<{
     tools: Array<{ name: string }>;
@@ -662,7 +812,12 @@ test("PR first input contains the assigned diff and exposes only scoped public t
         assert.deepEqual(JSON.parse(req.input[1].content), diff);
         assert.deepEqual(
           req.tools.map((t: { name: string }) => t.name),
-          ["read_issue", "read_file", "read_merge_facts"],
+          [
+            "read_issue",
+            "read_file",
+            "read_merge_facts",
+            "request_clarification",
+          ],
         );
         assert.match(req.tools[1].description, /PR head/);
         return Response.json(call("read_file", { path: "impl.ts" }));
@@ -732,7 +887,13 @@ test("deep review searches then reads an unchanged file locally under fresh auth
       if (turn++ === 0) {
         assert.deepEqual(
           req.tools.map((t: { name: string }) => t.name),
-          ["read_issue", "read_file", "read_merge_facts", "search_repo"],
+          [
+            "read_issue",
+            "read_file",
+            "read_merge_facts",
+            "search_repo",
+            "request_clarification",
+          ],
         );
         assert.ok(!JSON.stringify(req.input).includes("unchanged.ts"));
         return Response.json(call("search_repo", { query: "impl()" }));

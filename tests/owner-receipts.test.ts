@@ -87,8 +87,13 @@ test("receipt follows the exact bound activity, not a delivery alias, cursor alo
   assert.equal(f.store.ownerReceipt(a.entry.deliveryId), null);
   assert.equal(f.store.reserveReaction(), undefined);
   confirm([a.entry, m.entry]);
+  assert.equal(
+    f.store.ownerReceipt(a.entry.deliveryId)?.decision,
+    "silent_by_policy",
+  );
   assert.equal(f.store.ownerReceipt(a.entry.deliveryId)?.reaction, null);
   const first = f.store.ownerReceipt("d2");
+  assert.equal(first?.decision, null);
   assert.equal(first?.reaction?.status, "pending");
   assert.deepEqual(f.store.ownerReceipt("alias"), first);
   assert.equal(f.store.reserveReaction()?.id, m.taskId);
