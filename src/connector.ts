@@ -231,6 +231,38 @@ export class OpenClawConnector implements RuntimeConnector {
               },
             };
           }
+          if (
+            evidence.changedFiles > 0 &&
+            evidence.files.length === evidence.changedFiles &&
+            !evidence.limitations.length &&
+            evidence.files.every((f) => {
+              if (
+                f.status !== "modified" ||
+                f.patchStatus !== "provided" ||
+                !f.patch ||
+                !f.patch.startsWith("@@ ")
+              )
+                return false;
+              const lines = f.patch.split("\n");
+              const adds = lines.filter((l) => l.startsWith("+")),
+                dels = lines.filter((l) => l.startsWith("-"));
+              return (
+                adds.length === f.additions &&
+                dels.length === f.deletions &&
+                adds.length + dels.length > 0 &&
+                [...adds, ...dels].every(
+                  (l) => l.slice(1).replace(/\r$/, "") === "",
+                )
+              );
+            })
+          ) {
+            // Empty source lines can affect literal data: report the observation, not approval.
+            return {
+              text: `固定版本 ${pin.baseSha} → ${pin.headSha}：已取得完整补丁，可见文本增删均为空行。未执行语义评审，不能据此判定无影响或可合并。`,
+              artifacts: [],
+              publication: { kind: "comment" },
+            };
+          }
           if (!evidence.files.some(hasVisibleChange))
             throw new RuntimeFailure(
               "review_diff_unavailable",

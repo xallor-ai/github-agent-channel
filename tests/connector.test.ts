@@ -782,3 +782,19 @@ test("a changed line of spaces is substantive source data even without another c
   }));
   assert.equal(called, 1);
 });
+
+test("verified empty-line changes are reported as observed, not missing evidence or a clean code review", async () => {
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    throw Error("Unexpected model call");
+  });
+  const r = await c.run(
+    { ...pr, source: { event: "pull_request", action: "opened" } },
+    async () => ({
+      ...diff,
+      files: [{ ...diff.files[0], patch: "@@ -1,0 +1 @@\n+\n" }],
+    }),
+  );
+  assert.match(r.text, /已取得完整补丁/);
+  assert.match(r.text, /未执行语义评审/);
+  assert.equal(r.publication.kind, "comment");
+});
