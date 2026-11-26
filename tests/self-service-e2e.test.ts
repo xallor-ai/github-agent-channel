@@ -44,6 +44,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const actor = { id: 99, login: "author", type: "User" };
   const publication: string[] = [];
   const eyes: string[] = [];
+  let revealHistoricalReaction = false;
   let actorAllowed = true,
     secondAdmin = true;
   // Only external GitHub transport is synthetic. Octokit authenticates managers,
@@ -87,12 +88,32 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
         });
       }
       if (pathname === prefix) return Response.json(r);
-      if (pathname === prefix + "/issues/comments/501")
+      if ([501, 503].some((n) => pathname === prefix + "/issues/comments/" + n))
         return Response.json({
-          id: 501,
+          id: Number(pathname.split("/").at(-1)),
           user: actor,
           issue_url: origin + prefix + "/issues/1",
         });
+      if (pathname === prefix + "/issues/comments/503/reactions") {
+        if (init?.method === "POST") {
+          eyes.push(pathname);
+          return Response.json(
+            { message: "response unavailable" },
+            { status: 502 },
+          );
+        }
+        return Response.json(
+          revealHistoricalReaction
+            ? [
+                {
+                  id: 779,
+                  content: "eyes",
+                  user: { type: "Bot", login: "robot[bot]" },
+                },
+              ]
+            : [],
+        );
+      }
       if (
         pathname === prefix + "/issues/comments/501/reactions" &&
         init?.method === "POST"
@@ -212,6 +233,9 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
         },
       },
       lookup,
+      undefined,
+      undefined,
+      github.reconcileOwnerReaction.bind(github),
     );
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -511,6 +535,12 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
         inbox.close();
       }
       assert.equal((await receipt(ordinary)).reaction, null);
+      const ordinaryUrl = cloud.url + "/repositories/11/comments/502/receipts";
+      assert.equal((await fetch(ordinaryUrl)).status, 401);
+      const ordinaryRecords = await (
+        await fetch(ordinaryUrl, { headers: { authorization: "Bearer admin" } })
+      ).json();
+      assert.deepEqual(ordinaryRecords.receipts, [await receipt(ordinary)]);
       assert.equal((await receipt(mention)).reaction.status, "pending");
       assert.equal(await cloud.reactions.tick(), true);
       assert.deepEqual((await receipt(mention)).reaction, {
@@ -540,6 +570,38 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
       assert.equal(await cloud.reactions.tick(), false);
       assert.equal(await cloud.worker.tick(), false);
       assert.equal(eyes.length, 1);
+      const additional = randomUUID();
+      const { taskId: unknownId } = await (
+        await sendComment(503, "@robot inspect this too", additional)
+      ).json();
+      const nextInbox = new ActivityInbox(path);
+      try {
+        nextInbox.remember(cloud.url, fixtureAgent, binding);
+        const link = { ...connection, baseUrl: cloud.url };
+        await nextInbox.pollOne(
+          link,
+          fixtureAgent,
+          new AbortController().signal,
+        );
+        await nextInbox.pollOne(
+          link,
+          fixtureAgent,
+          new AbortController().signal,
+        );
+      } finally {
+        nextInbox.close();
+      }
+      assert.equal(await cloud.reactions.tick(), true);
+      assert.equal((await receipt(additional)).reaction.status, "unknown");
+      assert.equal((await declare(0, 0, binding.revision, false)).status, 200);
+      const auditPath = "/tasks/" + unknownId + "/reconcile-reaction";
+      assert.equal((await post(auditPath, tokens[0], {})).status, 401);
+      assert.equal((await post(auditPath, "admin", {})).status, 409);
+      revealHistoricalReaction = true;
+      const fixed = await post(auditPath, "admin", {});
+      assert.equal(fixed.status, 200);
+      assert.equal((await fixed.json()).ownerReceipt.reaction.reactionId, 779);
+      assert.equal(eyes.filter((p) => p.endsWith("/503/reactions")).length, 1);
     },
   );
 });

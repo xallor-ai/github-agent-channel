@@ -667,6 +667,9 @@ export class TaskStore {
   ownerReceipt(deliveryId: string) {
     return this.ownerReceipts.get(deliveryId);
   }
+  ownerReceiptForComment(repositoryId: number, commentId: number) {
+    return this.ownerReceipts.forComment(repositoryId, commentId);
+  }
   reserveReaction() {
     return this.transaction(() => {
       const id = this.ownerReceipts.reserve();
@@ -677,7 +680,7 @@ export class TaskStore {
     return this.ownerReceipts.allowed(id);
   }
   finishReaction(taskId: string, result: ReactionResult) {
-    this.ownerReceipts.finish(taskId, result);
+    this.transaction(() => this.ownerReceipts.finish(taskId, result));
   }
   reactionUnknown(taskId: string) {
     return this.ownerReceipts.unknown(taskId);

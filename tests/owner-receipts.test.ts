@@ -167,3 +167,108 @@ test("rebinding or close fences pending eyes even if the primary task was alread
     ReceiptScopeDenied,
   );
 });
+test("two offline days expire execution, not the receipt of the original comment", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const f = open(t),
+    item = f.observe(1);
+  now += 2 * 24 * 3600_000;
+  f.store.expireTasks();
+  assert.equal(f.store.get(item.taskId!)?.status, "rejected");
+  f.store.confirmActivities("phone", fixtureAgent, f.b.id, [item.entry]);
+  assert.equal(f.store.reserveReaction()?.id, item.taskId);
+  f.store.registry.revokeDevice("phone");
+  assert.equal(f.store.reactionAllowed(item.taskId!), false);
+  assert.equal(f.store.get(item.taskId!)?.deliveryStatus, "skipped");
+});
+
+test("rate limit fences only pending eyes of this installation across restart until the advertised deadline", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const f = open(t),
+    first = f.observe(1),
+    second = f.observe(2);
+  const other = {
+    installationId: 9,
+    repositoryId: 80,
+    owner: "org9",
+    repo: "repo9",
+  };
+  const b = seedBinding(f.store, other, "phone");
+  const task = f.store.observe({
+    execute: true,
+    reason: "mention",
+    input: { ...first.input, ...other, bindingId: b.id, deliveryId: "foreign" },
+  });
+  f.store.confirmActivities("phone", fixtureAgent, f.b.id, [
+    first.entry,
+    second.entry,
+  ]);
+  f.store.confirmActivities("phone", fixtureAgent, b.id, [
+    { deliveryId: "foreign", cursor: task.cursor },
+  ]);
+  assert.equal(f.store.reserveReaction()?.id, first.taskId);
+  const retryAt = now + 3600_000;
+  f.store.finishReaction(first.taskId!, {
+    status: "failed",
+    reason: "rate_limited",
+    retryAt,
+  });
+  f.restart();
+  assert.equal(f.store.reserveReaction()?.id, task.taskId);
+  f.store.finishReaction(task.taskId!, { status: "sent", reactionId: 77 });
+  now = retryAt - 1;
+  assert.equal(f.store.reserveReaction(), undefined);
+  now++;
+  assert.equal(f.store.reserveReaction()?.id, second.taskId);
+  assert.equal(
+    f.store.ownerReceipt(first.entry.deliveryId)?.reaction?.status,
+    "failed",
+  );
+  assert.equal(f.store.reserveReaction(), undefined);
+});
+
+test("ordinary comments remain traceable after retention and repeated installations cannot schedule duplicate writes", (t) => {
+  const f = open(t),
+    ordinary = f.observe(1, false),
+    first = f.observe(2);
+  f.store.confirmActivities("phone", fixtureAgent, f.b.id, [
+    ordinary.entry,
+    first.entry,
+  ]);
+  const next = { ...scope, installationId: 72 };
+  const b = seedBinding(f.store, next, "phone");
+  const later = f.store.observe({
+    execute: true,
+    reason: "mention",
+    input: {
+      ...first.input,
+      ...next,
+      bindingId: b.id,
+      deliveryId: "new-installation",
+    },
+  });
+  f.store.confirmActivities("phone", fixtureAgent, b.id, [
+    { deliveryId: "new-installation", cursor: later.cursor },
+  ]);
+  const db = new DatabaseSync(f.path);
+  try {
+    db.exec("DELETE FROM activities");
+  } finally {
+    db.close();
+  }
+  assert.deepEqual(f.store.ownerReceiptForComment(99, 1), []);
+  const [one] = f.store.ownerReceiptForComment(scope.repositoryId, 1);
+  assert.deepEqual(
+    [one.bindingId, one.commentId, one.reaction],
+    [f.b.id, 1, null],
+  );
+  const history = f.store.ownerReceiptForComment(scope.repositoryId, 2);
+  assert.deepEqual(
+    history.map((h) => [h.bindingId, h.reaction?.status]),
+    [
+      [b.id, undefined],
+      [f.b.id, "pending"],
+    ],
+  );
+});

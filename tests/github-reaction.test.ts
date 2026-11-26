@@ -41,12 +41,17 @@ const other = {
 function fixture(
   options: {
     commentAuthor?: string;
+    authorLogin?: string;
+    authorId?: number;
+    repoId?: number;
+    retired?: boolean;
     commentTarget?: number;
     fork?: boolean;
     closed?: boolean;
     app?: string;
     denyAfterRead?: boolean;
     postStatus?: number;
+    postHeaders?: Record<string, string>;
     postReply?: unknown;
     listed?: unknown[];
     commentDeleted?: boolean;
@@ -71,7 +76,11 @@ function fixture(
     if (path === "/app")
       return json({ id: 123, slug: options.app ?? "helper" });
     if (path === "/repos/org/repo")
-      return json({ id: 2, name: "repo", owner: { login: "org" } });
+      return json({
+        id: options.repoId ?? 2,
+        name: "repo",
+        owner: { login: "org" },
+      });
     if (path.endsWith("/permission"))
       return json({
         permission: options.denyAfterRead && checks++ > 0 ? "read" : "write",
@@ -81,7 +90,11 @@ function fixture(
       if (options.commentDeleted) return json({}, 404);
       return json({
         id: 4,
-        user: { id: 3, login: "alice", type: options.commentAuthor ?? "User" },
+        user: {
+          id: options.authorId ?? 3,
+          login: options.authorLogin ?? "alice",
+          type: options.commentAuthor ?? "User",
+        },
         issue_url:
           "https://api.github.com/repos/org/repo/issues/" +
           (options.commentTarget ?? 5),
@@ -101,7 +114,10 @@ function fixture(
       if (init?.method === "POST") {
         posts++;
         assert.deepEqual(body, { content: "eyes" });
-        return json(options.postReply ?? mine, options.postStatus ?? 201);
+        return Response.json(options.postReply ?? mine, {
+          status: options.postStatus ?? 201,
+          headers: options.postHeaders,
+        });
       }
       return json(options.listed ?? [other]);
     }
@@ -110,15 +126,18 @@ function fixture(
   const github = new OctokitGitHubClient(
     config,
     key,
-    () => ({
-      id: "b",
-      installationId: 1,
-      repositoryId: 2,
-      owner: "org",
-      repo: "repo",
-      enabled: true,
-      events: ["issue_comment.created"],
-    }),
+    () =>
+      options.retired
+        ? undefined
+        : {
+            id: "b",
+            installationId: 1,
+            repositoryId: 2,
+            owner: "org",
+            repo: "repo",
+            enabled: true,
+            events: ["issue_comment.created"],
+          },
     async () => {},
     fetcher,
   );
@@ -194,8 +213,115 @@ test("reconciliation only finds exact bot eyes; identity or incomplete writes do
   ] as const) {
     await assert.rejects(
       fixture(scenario).github.publishOwnerReaction(task, () => {}),
-      (e) => reactionFailure(e) === reason,
+      (e) => reactionFailure(e).reason === reason,
     );
+  }
+});
+test("only historical admin reconciliation confirms matching eyes after binding retirement and author rename", async () => {
+  const retired = {
+    retired: true,
+    closed: true,
+    authorLogin: "renamed",
+    listed: [mine],
+  };
+  const f = fixture(retired);
+  await assert.rejects(f.github.lookupOwnerReaction(task), AccessDenied);
+  await assert.rejects(
+    f.github.publishOwnerReaction(task, () => {}),
+    AccessDenied,
+  );
+  assert.equal(await f.github.reconcileOwnerReaction(task), 6);
+  assert.deepEqual(f.scopes, [{ metadata: "read", issues: "read" }]);
+  assert.equal(f.posts(), 0);
+  for (const mismatch of [
+    { repoId: 90 },
+    { app: "different" },
+    { authorId: 10 },
+    { commentTarget: 8 },
+  ]) {
+    const bad = fixture({ ...retired, ...mismatch });
+    await assert.rejects(bad.github.reconcileOwnerReaction(task), AccessDenied);
+    assert.equal(bad.posts(), 0);
+  }
+  assert.equal(
+    await fixture({
+      ...retired,
+      listed: [other],
+    }).github.reconcileOwnerReaction(task),
+    null,
+  );
+});
+test("only GitHub rate-limit signals set an installation delay; response bodies never enter the receipt", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 3500;
+  const cases = [
+    {
+      headers: { "x-ratelimit-remaining": "17" },
+      body: {
+        message:
+          "You have exceeded a secondary rate limit. Please wait before trying again.",
+      },
+      delay: 60,
+    },
+    { headers: { "retry-after": "120" }, body: {}, delay: 120 },
+    {
+      headers: {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(reset),
+      },
+      body: {},
+      delay: 3400,
+    },
+    {
+      headers: {},
+      body: {
+        documentation_url:
+          "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits",
+      },
+      delay: 60,
+    },
+    {
+      headers: {},
+      body: { message: "Resource not accessible by integration" },
+      delay: 0,
+    },
+  ] satisfies {
+    headers: Record<string, string>;
+    body: unknown;
+    delay: number;
+  }[];
+  for (const { headers, body, delay } of cases) {
+    const f = fixture({
+      postStatus: 403,
+      postHeaders: headers,
+      postReply: body,
+    });
+    const before = Date.now();
+    let visited = false;
+    const worker = new ReactionWorker(
+      {
+        reserveReaction: () => task,
+        reactionAllowed: () => true,
+        finishReaction(_id, r) {
+          visited = true;
+          assert.equal(r.status, "failed");
+          if (r.status !== "failed") assert.fail();
+          assert.equal(r.reason, delay ? "rate_limited" : "forbidden");
+          if (delay)
+            assert.ok(
+              r.retryAt !== undefined && r.retryAt >= before + delay * 1000,
+            );
+          else assert.equal(r.retryAt, undefined);
+          assert.deepEqual(
+            Object.keys(r).sort(),
+            delay ? ["reason", "retryAt", "status"] : ["reason", "status"],
+          );
+        },
+      },
+      f.github,
+    );
+    await worker.tick();
+    assert.equal(visited, true);
+    assert.equal(f.posts(), 1);
   }
 });
 test("worker never repeats a lost POST; lookup can confirm only a matching reaction", async () => {

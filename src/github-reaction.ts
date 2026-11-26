@@ -9,7 +9,10 @@ export type ReactionFailure =
   | "unavailable"
   | "unconfirmed";
 export class ReactionRejected extends Error {
-  constructor(readonly reason: ReactionFailure) {
+  constructor(
+    readonly reason: ReactionFailure,
+    readonly retryAt?: number,
+  ) {
     super(reason);
   }
 }
@@ -18,31 +21,47 @@ function status(error: unknown) {
     ? error.status
     : null;
 }
-export function reactionFailure(error: unknown): ReactionFailure {
-  if (error instanceof ReactionRejected) return error.reason;
-  if (error instanceof AccessDenied) return "scope";
-  if (error instanceof AmbiguousExecution) return "unconfirmed";
+function record(v: unknown): Record<string, unknown> {
+  return v !== null && typeof v === "object"
+    ? (v as Record<string, unknown>)
+    : {};
+}
+export function reactionFailure(error: unknown): ReactionRejected {
+  if (error instanceof ReactionRejected) return error;
+  if (error instanceof AccessDenied) return new ReactionRejected("scope");
+  if (error instanceof AmbiguousExecution)
+    return new ReactionRejected("unconfirmed");
   const code = status(error);
-  const response =
-    error && typeof error === "object" && "response" in error
-      ? error.response
-      : null;
-  const headers =
-    response && typeof response === "object" && "headers" in response
-      ? response.headers
-      : null;
-  if (
-    code === 429 ||
-    (code === 403 &&
-      headers &&
-      typeof headers === "object" &&
-      ("retry-after" in headers ||
-        ("x-ratelimit-remaining" in headers &&
-          headers["x-ratelimit-remaining"] === "0")))
-  )
-    return "rate_limited";
-  if (code === 403 || code === 401) return "forbidden";
-  return "unavailable";
+  const response = record(record(error).response);
+  const headers = record(response.headers),
+    data = record(response.data);
+  const secondary =
+    (typeof data.message === "string" &&
+      /^(?:you have (?:exceeded|triggered) (?:a |the )?secondary rate limit)\b/i.test(
+        data.message,
+      )) ||
+    (typeof data.documentation_url === "string" &&
+      /^https:\/\/docs\.github\.com\/(?:en\/)?rest\/(?:using-the-rest-api\/rate-limits-for-the-rest-api|overview\/resources-in-the-rest-api)#(?:about-)?secondary-rate-limits$/.test(
+        data.documentation_url,
+      ));
+  const seconds = (n: unknown) =>
+    typeof n === "string" && /^\d{1,12}$/.test(n) ? Number(n) : 0;
+  const retry = seconds(headers["retry-after"]),
+    exhausted = headers["x-ratelimit-remaining"] === "0";
+  if (code === 429 || (code === 403 && (secondary || exhausted || retry > 0))) {
+    const now = Date.now();
+    return new ReactionRejected(
+      "rate_limited",
+      Math.max(
+        now + 60000,
+        now + retry * 1000,
+        exhausted ? seconds(headers["x-ratelimit-reset"]) * 1000 : 0,
+      ),
+    );
+  }
+  return new ReactionRejected(
+    code === 403 || code === 401 ? "forbidden" : "unavailable",
+  );
 }
 const validId = (id: unknown): id is number =>
   typeof id === "number" && Number.isSafeInteger(id) && id > 0;
@@ -59,6 +78,7 @@ export async function ownerReaction(
     target.kind === "repository" ||
     !validId(target.number) ||
     !validId(comment_id) ||
+    !validId(task.actorId) ||
     task.source.event !== "issue_comment" ||
     task.source.action !== "created" ||
     task.actorLogin === botLogin
@@ -87,7 +107,6 @@ export async function ownerReaction(
       c.id !== comment_id ||
       c.user?.type !== "User" ||
       c.user.id !== task.actorId ||
-      c.user.login !== task.actorLogin ||
       c.issue_url !==
         "https://api.github.com/repos/" +
           scope.owner +
@@ -162,7 +181,7 @@ export async function ownerReaction(
     const code = status(e);
     if (code === 404) throw new ReactionRejected("comment_unavailable");
     if (typeof code === "number" && code >= 400 && code < 500 && code !== 408)
-      throw new ReactionRejected(reactionFailure(e));
+      throw reactionFailure(e);
     throw new AmbiguousExecution("Reaction dispatch unconfirmed");
   }
 }

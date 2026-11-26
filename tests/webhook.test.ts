@@ -72,6 +72,12 @@ test("accepts bot slug mentions while rejecting lookalike names", async () => {
   for (const body of [
     "@helper please analyze",
     "@HELPER[bot] please analyze",
+    "Please ask @helper to take a look.",
+    "@helper review the diff\n\n```\n" + "[]".repeat(1000) + "\n```",
+    "<!-- instructions -->\n\n@helper please review",
+    "- **@helper** please review",
+    "1. _@helper_ please review",
+    "> old request @helper\n\n@helper please answer the new one",
   ]) {
     const payload = event();
     payload.comment.body = body;
@@ -82,6 +88,24 @@ test("accepts bot slug mentions while rejecting lookalike names", async () => {
     "@helper[bot]-other",
     "mail@helper",
     "@helper_name",
+    "the example was `@helper please review`",
+    "```text\n@helper please review\n```",
+    "    @helper please review",
+    "> @helper please review",
+    "- > @helper please review",
+    "<!-- @helper -->",
+    "<span>@helper</span>",
+    "<kbd>**@helper**</kbd>",
+    "<details>\n\n@helper\n\n</details>",
+    "~~please ask @helper to do this~~",
+    "> " + "> ".repeat(3000) + "@helper",
+    "[ping @helper](https://example.test)",
+    "https://example.test/@helper",
+    "https://example.test/?to=@helper",
+    "\\@helper please review",
+    "&#64;helper please review",
+    "@helper/team",
+    "mail**@helper**",
   ]) {
     const payload = event();
     payload.comment.body = body;

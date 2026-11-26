@@ -17,6 +17,7 @@ export type ReactionResult =
   | { status: "sent"; reactionId: number }
   | {
       status: "unknown" | "failed";
+      retryAt?: number;
       reason:
         | "unconfirmed"
         | "scope"
@@ -80,7 +81,8 @@ export class OwnerReceipts {
         a.repositoryId !== scope.repositoryId
       )
         throw new ReceiptScopeDenied();
-      const comment = a.source.commentId;
+      const comment =
+        a.source.event === "issue_comment" ? a.source.commentId : undefined;
       const eligible =
         a.reason === "mention" &&
         d.reason === "mention" &&
@@ -89,7 +91,12 @@ export class OwnerReceipts {
         a.source.event === "issue_comment" &&
         a.source.action === "created" &&
         a.target.kind !== "repository" &&
-        comment !== undefined;
+        comment !== undefined &&
+        !this.db
+          .prepare(
+            "SELECT 1 FROM ownerReceipts WHERE repositoryId=? AND commentId=? AND reactionStatus IS NOT NULL",
+          )
+          .get(a.repositoryId, comment);
       this.db
         .prepare(
           "INSERT INTO ownerReceipts(cursor,deliveryId,bindingId,deviceId,runtime,confirmedAt,repositoryId,commentId,taskId,reactionStatus) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -102,7 +109,7 @@ export class OwnerReceipts {
           JSON.stringify(profile),
           Date.now(),
           a.repositoryId,
-          eligible ? comment : null,
+          comment ?? null,
           eligible ? a.taskId : null,
           eligible ? "pending" : null,
         );
@@ -115,41 +122,51 @@ export class OwnerReceipts {
         "SELECT r.* FROM ownerReceipts r JOIN deliveries d ON d.cursor=r.cursor AND d.bindingId=r.bindingId WHERE d.deliveryId=?",
       )
       .get(deliveryId);
-    return r
-      ? {
-          deliveryId: String(r.deliveryId),
-          cursor: Number(r.cursor),
-          bindingId: String(r.bindingId),
-          deviceId: String(r.deviceId),
-          runtime: JSON.parse(String(r.runtime)) as RuntimeProfile,
-          confirmedAt: Number(r.confirmedAt),
-          reaction:
-            r.reactionStatus === null
-              ? null
-              : {
-                  status: String(r.reactionStatus),
-                  reason: r.reason === null ? null : String(r.reason),
-                  reactionId:
-                    r.reactionId === null ? null : Number(r.reactionId),
-                },
-        }
-      : null;
+    return r ? this.decode(r) : null;
+  }
+  private decode(r: Record<string, unknown>) {
+    return {
+      deliveryId: String(r.deliveryId),
+      cursor: Number(r.cursor),
+      repositoryId: Number(r.repositoryId),
+      commentId: r.commentId === null ? null : Number(r.commentId),
+      bindingId: String(r.bindingId),
+      deviceId: String(r.deviceId),
+      runtime: JSON.parse(String(r.runtime)) as RuntimeProfile,
+      confirmedAt: Number(r.confirmedAt),
+      reaction:
+        r.reactionStatus === null
+          ? null
+          : {
+              status: String(r.reactionStatus),
+              reason: r.reason === null ? null : String(r.reason),
+              reactionId: r.reactionId === null ? null : Number(r.reactionId),
+            },
+    };
+  }
+  forComment(repositoryId: number, commentId: number) {
+    return this.db
+      .prepare(
+        "SELECT * FROM ownerReceipts WHERE repositoryId=? AND commentId=? ORDER BY cursor DESC",
+      )
+      .all(repositoryId, commentId)
+      .map((row) => this.decode(row));
   }
   allowed(taskId: string) {
     return !!this.db
       .prepare(
         "SELECT 1 FROM ownerReceipts r JOIN tasks t ON t.id=r.taskId JOIN bindings b ON b.repositoryId=t.repositoryId AND b.installationId=t.installationId LEFT JOIN threadClosures c ON c.repositoryId=t.repositoryId AND c.thread=json_extract(t.target,'$.kind')||':'||json_extract(t.target,'$.number') WHERE r.taskId=? AND r.bindingId=t.bindingId AND t.bindingId=" +
           currentBinding +
-          " AND json_extract(b.declaration,'$.enabled')=1 AND t.publicationBlocked=0 AND t.status!='rejected' AND (c.thread IS NULL OR t.githubTime>c.closedAt)",
+          " AND json_extract(b.declaration,'$.enabled')=1 AND t.publicationBlocked=0 AND (c.thread IS NULL OR t.githubTime>c.closedAt)",
       )
       .get(taskId);
   }
   reserve() {
     const r = this.db
       .prepare(
-        "SELECT taskId FROM ownerReceipts WHERE reactionStatus='pending' ORDER BY cursor LIMIT 1",
+        "SELECT r.taskId FROM ownerReceipts r JOIN tasks t ON t.id=r.taskId LEFT JOIN reactionCooldowns c ON c.installationId=t.installationId WHERE r.reactionStatus='pending' AND (c.until IS NULL OR c.until<=?) ORDER BY r.cursor LIMIT 1",
       )
-      .get();
+      .get(Date.now());
     if (!r) return;
     const id = String(r.taskId);
     if (!this.allowed(id)) {
@@ -185,6 +202,17 @@ export class OwnerReceipts {
         reconcile ? "unknown" : "sending",
       );
     if (!changes.changes) throw Error("Reaction state changed");
+    if (result.status === "failed" && result.reason === "rate_limited") {
+      const until = Math.max(
+        Date.now() + 60_000,
+        Number.isSafeInteger(result.retryAt) ? result.retryAt! : 0,
+      );
+      this.db
+        .prepare(
+          "INSERT INTO reactionCooldowns(installationId,until) SELECT installationId,? FROM tasks WHERE id=? ON CONFLICT(installationId) DO UPDATE SET until=MAX(reactionCooldowns.until,excluded.until)",
+        )
+        .run(until, id);
+    }
   }
   unknown(id: string) {
     return !!this.db

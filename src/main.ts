@@ -111,7 +111,7 @@ try {
     lookup,
     github.reconcileReview.bind(github),
     github.readMergeFacts.bind(github),
-    github.lookupOwnerReaction.bind(github),
+    github.reconcileOwnerReaction.bind(github),
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(

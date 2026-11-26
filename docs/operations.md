@@ -44,12 +44,12 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 ## v2 内部升级与回滚
 
-以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 5、连接器 journal 3）。不兼容的旧库须保留，改用新路径/卷。
+以下复用卷步骤仅适用于相同 schema 的版本（云端任务库 6、连接器执行 journal 3、活动收件箱 2）。不兼容的旧库须保留，改用新路径/卷。
 
 生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
 1. 等待运行任务结束；先停止Agent，再停止Cloud（down不带-v）。
-2. 在服务停止后一起备份任务库、独立设备身份库（`<dataFile>.devices`）、云端工具审计库（`<dataFile>.tool-audit.sqlite`）、连接器 journal 及各库存在的 SQLite journal/WAL/SHM 文件、secret 引用和生成配置。
+2. 在服务停止后一起备份任务库、独立设备身份库（`<dataFile>.devices`）、云端工具审计库（`<dataFile>.tool-audit.sqlite`）、连接器执行 journal（`<stateFile>`）、本机活动收件箱（`<stateFile>.inbox`）及各库存在的 SQLite journal/WAL/SHM 文件、secret 引用和生成配置。遗漏收件箱会丢失本机订阅、已存摘要和待确认清单。
 3. 生成新bundle，用相同projectName启动Cloud，再启动Agent。
 4. 检查两端日志/状态、私网health、授权评论回帖。
 
@@ -91,11 +91,15 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 
 隔离冒烟不调用真实GitHub或生产模型；公网ACME、真实GitHub事件和真实OpenClaw回帖需单独记录。旧直接调用架构和相关验证仅作为历史资料，不是当前部署说明。
 
-## 预构建镜像
+## 负责人收件与原评论对账
 
 每套服务及其任务库只对应一个 GitHub App；更换 App 时新建库，不沿用其他身份的回执。升级本版本需保留旧云任务库和旧本机 `.inbox`，选用全新状态文件或卷，再用授权身份重新登记。不要重新投递旧事件来制造收件历史。本机收件箱含最多 1,024 字符的原评论摘要及登录名，备份须限制读权限。
 
 管理员查 `GET /activities/<deliveryId>` 的 `ownerReceipt`；未确认时为 null。已确认的记录给出接收者、时间及该事件的独立 reaction 状态。若外部写入返回不明，使用 `POST /tasks/<taskId>/reconcile-reaction`：它只读取 GitHub 原评论上该 Bot 的 eyes，查到唯一匹配才补记 ID；找不到、无权或目标不符均不自动再写。不得重跑模型或改发评论代替。最终回复仍看任务的 `publicationReceipt`。
+
+同一原评论重复投递时，`requestedDeliveryId` 是所查投递，`ownerReceipt.deliveryId` 是接收端实际确认的原始事件，两者可能不同。只有原评论 ID 时使用 `GET /repositories/<repositoryId>/comments/<commentId>/receipts`，普通讨论没有执行任务也能查。GitHub 限流只暂停相应安装后续未发的收件表情；当前失败条目不自动重投。执行排队过期与负责人收到评论是两件事；关闭、改绑或失权仍拦截新写入。
+
+## 预构建镜像
 
 用一次性容器生成部署 bundle 时，生成用户应与后续执行 Compose 的部署账号一致，并确保它能读到引用的 secret。否则生成器创建的700目录可能属于root，普通账号运行 Compose 时会报 `.env: permission denied`。确需由root生成时，只修正该次输出目录和配置的归属，不放宽所有 secret 权限；本次实际遇到并解决的情况见[真实评审闭环](channel-review-validation-20261123.md)。
 

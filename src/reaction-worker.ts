@@ -43,7 +43,14 @@ export class ReactionWorker {
           result = id
             ? { status: "sent", reactionId: id }
             : { status: "unknown", reason: "unconfirmed" };
-        } else result = { status: "failed", reason: reactionFailure(e) };
+        } else {
+          const { reason, retryAt } = reactionFailure(e);
+          result = {
+            status: "failed",
+            reason,
+            ...(retryAt !== undefined && { retryAt }),
+          };
+        }
       }
       this.store.finishReaction(task.id, result);
       return true;

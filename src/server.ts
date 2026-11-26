@@ -41,7 +41,7 @@ export function createChannelServer(
   lookup: BindingLookup = store.activeBinding.bind(store),
   reconcileReview?: GitHubClient["reconcileReview"],
   readMergeFacts?: GitHubClient["readMergeFacts"],
-  lookupOwnerReaction?: GitHubClient["lookupOwnerReaction"],
+  reconcileOwnerReaction?: GitHubClient["reconcileOwnerReaction"],
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -129,12 +129,13 @@ export function createChannelServer(
         } else
           send(200, {
             ...receipt,
+            requestedDeliveryId: match![1],
             ownerReceipt: store.ownerReceipt(match![1]),
           });
         return;
       }
       const byComment =
-        /^\/repositories\/([1-9]\d{0,15})\/comments\/([1-9]\d{0,15})\/task$/.exec(
+        /^\/repositories\/([1-9]\d{0,15})\/comments\/([1-9]\d{0,15})\/(task|receipts)$/.exec(
           path,
         );
       if (byComment || path.startsWith("/tasks/")) {
@@ -145,6 +146,19 @@ export function createChannelServer(
         if (byComment) {
           const repo = Number(byComment[1]),
             comment = Number(byComment[2]);
+          if (byComment[3] === "receipts") {
+            if (
+              req.method !== "GET" ||
+              !Number.isSafeInteger(repo) ||
+              !Number.isSafeInteger(comment)
+            )
+              send(404, { error: "Not found" });
+            else
+              send(200, {
+                receipts: store.ownerReceiptForComment(repo, comment),
+              });
+            return;
+          }
           const task =
             req.method === "GET" &&
             Number.isSafeInteger(repo) &&
@@ -182,12 +196,12 @@ export function createChannelServer(
           return;
         }
         if (req.method === "POST" && match[2] === "/reconcile-reaction") {
-          if (!lookupOwnerReaction || !store.reactionUnknown(task.id)) {
+          if (!reconcileOwnerReaction || !store.reactionUnknown(task.id)) {
             send(409, { error: "No unknown owner reaction to reconcile" });
             return;
           }
           try {
-            const reactionId = await lookupOwnerReaction(task);
+            const reactionId = await reconcileOwnerReaction(task);
             if (!reactionId) {
               send(409, {
                 error: "No verified bot reaction; receipt remains unknown",

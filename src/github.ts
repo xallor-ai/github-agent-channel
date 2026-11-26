@@ -80,7 +80,7 @@ export class OctokitGitHubClient implements GitHubClient {
     task: Task,
     scope: {
       metadata: "read";
-      pull_requests: "read" | "write";
+      pull_requests?: "read" | "write";
       contents?: "read" | "write";
       issues?: "read" | "write";
       administration?: "read";
@@ -132,16 +132,7 @@ export class OctokitGitHubClient implements GitHubClient {
             true,
           )
         : await this.#client(task);
-    const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
-      owner: task.owner,
-      repo: task.repo,
-    });
-    if (
-      repo.id !== task.repositoryId ||
-      repo.name !== task.repo ||
-      repo.owner.login !== task.owner
-    )
-      throw new AccessDenied("Repository identity changed");
+    await this.#verifyRepository(client, task);
     const { data } = await client.request(
       "GET /repos/{owner}/{repo}/collaborators/{username}/permission",
       { owner: task.owner, repo: task.repo, username: task.actorLogin },
@@ -187,11 +178,19 @@ export class OctokitGitHubClient implements GitHubClient {
   async authorize(task: Task): Promise<void> {
     await this.#checkedClient(task);
   }
-  async #ownerReaction(task: Task, check?: () => void) {
-    // Read-only lookups are permitted on closed threads, but never after a
-    // binding/manager/actor change. They can only confirm an existing receipt.
-    const mode = check ? "write" : "read";
-    const client = await this.#authorized(task, true, mode);
+  async #verifyRepository(client: Octokit, task: Task) {
+    const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
+      owner: task.owner,
+      repo: task.repo,
+    });
+    if (
+      repo.id !== task.repositoryId ||
+      repo.name !== task.repo ||
+      repo.owner.login !== task.owner
+    )
+      throw new AccessDenied("Repository identity changed");
+  }
+  async #verifyReactionApp() {
     const { data: app } = await this.#app.octokit.request("GET /app");
     if (
       !app ||
@@ -200,6 +199,11 @@ export class OctokitGitHubClient implements GitHubClient {
       app.slug + "[bot]" !== this.#config.github.botLogin
     )
       throw new AccessDenied("App identity mismatch");
+  }
+  async #ownerReaction(task: Task, check?: () => void) {
+    const mode = check ? "write" : "read";
+    const client = await this.#authorized(task, true, mode);
+    await this.#verifyReactionApp();
     const reactionId = await ownerReaction(
       client,
       task,
@@ -224,6 +228,30 @@ export class OctokitGitHubClient implements GitHubClient {
   }
   lookupOwnerReaction(task: Task) {
     return this.#ownerReaction(task);
+  }
+  // Only the admin resolver calls this for an ambiguous, persisted reaction.
+  // Retiring its binding or renaming its author cannot erase a prior write.
+  async reconcileOwnerReaction(task: Task) {
+    if (
+      ![task.installationId, task.repositoryId].every(
+        (id) => Number.isSafeInteger(id) && id > 0,
+      )
+    )
+      throw new AccessDenied("Invalid persisted reaction scope");
+    const client = await this.#installationClient(
+      task,
+      { metadata: "read", issues: "read" },
+      true,
+    );
+    await this.#verifyRepository(client, task);
+    await this.#verifyReactionApp();
+    return ownerReaction(
+      client,
+      task,
+      this.#config.github.botLogin,
+      undefined,
+      () => {},
+    );
   }
   async readMergeFacts(task: Task) {
     const client = await this.#authorized(task, true);
@@ -438,18 +466,7 @@ export class OctokitGitHubClient implements GitHubClient {
       metadata: "read",
       pull_requests: "read",
     });
-    const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
-      owner: task.owner,
-      repo: task.repo,
-    });
-    if (
-      repo.id !== task.repositoryId ||
-      repo.name !== task.repo ||
-      repo.owner.login !== task.owner
-    )
-      throw new AccessDenied(
-        "Original repository identity cannot be confirmed",
-      );
+    await this.#verifyRepository(client, task);
     return reconcileNativeReview(
       task,
       id,
