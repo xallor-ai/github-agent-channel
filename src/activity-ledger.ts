@@ -221,7 +221,7 @@ export class ActivityLedger {
       "SELECT id FROM tasks WHERE repositoryId=? AND json_extract(target,'$.kind')='pull_request' AND json_extract(target,'$.number')=?";
     const stale = `duplicate=1 AND reason='review' AND (
       ((githubTime IS NULL OR githubTime<=?) AND taskId IN (${representative} AND githubTime>?))
-      OR (githubTime>? AND githubTime<=? AND taskId IN (${representative} AND githubTime<=?)))`;
+      OR (githubTime>? AND githubTime<=? AND taskId IN (${representative} AND (githubTime IS NULL OR githubTime<=?))))`;
     const scope = [
       closedAt,
       repositoryId,
