@@ -760,3 +760,25 @@ test("automatic review with verified empty comparison reports scope without a mo
   assert.ok(result.text.includes(revision.headSha));
   assert.equal(result.publication.kind, "comment");
 });
+
+test("a changed line of spaces is substantive source data even without another changed token", async () => {
+  let called = 0;
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    called++;
+    return Response.json(summary);
+  });
+  const auto = {
+    ...pr,
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  await c.run(auto, async () => ({
+    ...diff,
+    files: [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,3 +1,3 @@\n const value = `head\n-  \n+    \n tail`;",
+      },
+    ],
+  }));
+  assert.equal(called, 1);
+});

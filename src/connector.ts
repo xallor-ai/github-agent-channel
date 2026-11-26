@@ -79,7 +79,7 @@ function hasVisibleChange(file: z.infer<typeof diffSchema>["files"][number]) {
     if (
       inHunk &&
       (line.startsWith("+") || line.startsWith("-")) &&
-      line.slice(1).trim()
+      line.slice(1).replace(/\r$/, "").length > 0
     )
       return true;
   }
