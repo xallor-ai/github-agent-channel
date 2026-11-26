@@ -389,6 +389,7 @@ export class TaskStore {
         input.repositoryId,
         input.target.number,
         githubTime,
+        cutoff == null ? null : Number(cutoff),
       );
   }
   recordRuntime(id: string, event: RuntimeEvent): void {

@@ -704,3 +704,51 @@ test("late close detaches stale receipts from a newer running review without rep
   );
   assert.equal(store.publicationAllowed(fresh.taskId!), true);
 });
+
+test("a delayed intermediate closure detaches a later alias even when both lifetimes have since closed", (t) => {
+  const store = new TaskStore(":memory:");
+  t.after(() => store.close());
+  const scope = { installationId: 1, repositoryId: 2, owner: "org", repo: "r" };
+  const binding = seedBinding(store, scope, "device", [
+    "pull_request.synchronize",
+    "pull_request.closed",
+  ]);
+  const target = {
+    kind: "pull_request" as const,
+    number: 2,
+    revision: {
+      baseRepoId: 2,
+      headRepoId: 2,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+    },
+  };
+  const review = (deliveryId: string, githubTime?: number) =>
+    store.observe({
+      input: {
+        ...scope,
+        bindingId: binding.id,
+        deliveryId,
+        actorId: 42,
+        actorLogin: "alice",
+        prompt: "review",
+        target,
+        source: { event: "pull_request", action: "synchronize" },
+      },
+      execute: true,
+      reason: "review",
+      githubTime,
+    });
+  const first = review("old", 10);
+  assert.equal(review("after", 30).taskId, first.taskId);
+  for (const githubTime of [40, 20])
+    store.closeThread({ ...scope, bindingId: binding.id, target, githubTime });
+  assert.equal(store.get(first.taskId!)?.status, "rejected");
+  assert.equal(store.activityReceipt("after")?.taskId, null);
+  assert.equal(store.activityReceipt("after")?.activity?.reason, "closed");
+  assert.equal(review("after", 30).taskId, null);
+  assert.equal(
+    store.claimAssignment("device", "lease", Date.now() + 60000),
+    undefined,
+  );
+});

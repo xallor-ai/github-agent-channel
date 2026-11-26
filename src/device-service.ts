@@ -423,7 +423,7 @@ export class DeviceService {
         const { who, installation } = await this.#verify(
           credential,
           selection,
-          before,
+          owned,
         );
         const coverage = {
           ...installation,
