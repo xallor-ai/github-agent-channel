@@ -121,6 +121,20 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "receivedAt",
         "data",
       ],
+      ownerReceipts: [
+        "cursor",
+        "deliveryId",
+        "bindingId",
+        "deviceId",
+        "runtime",
+        "confirmedAt",
+        "repositoryId",
+        "commentId",
+        "taskId",
+        "reactionStatus",
+        "reason",
+        "reactionId",
+      ],
       assignments: [
         "taskId",
         "workerId",
@@ -129,7 +143,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "resultDigest",
       ],
     },
-    5,
+    6,
   );
   db.exec(
     "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
@@ -172,7 +186,9 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX delivery_scope ON deliveries(bindingId,cursor);
     CREATE TABLE assignments(taskId TEXT PRIMARY KEY REFERENCES tasks(id),workerId TEXT NOT NULL,leaseHash TEXT NOT NULL,expiresAt INTEGER NOT NULL,resultDigest TEXT);
     CREATE INDEX assignment_worker ON assignments(workerId);
-    PRAGMA user_version=5; COMMIT;`);
+    CREATE TABLE ownerReceipts(cursor INTEGER PRIMARY KEY,deliveryId TEXT NOT NULL UNIQUE REFERENCES deliveries(deliveryId),bindingId TEXT NOT NULL,deviceId TEXT NOT NULL,runtime TEXT NOT NULL,confirmedAt INTEGER NOT NULL,repositoryId INTEGER NOT NULL,commentId INTEGER,taskId TEXT UNIQUE REFERENCES tasks(id),reactionStatus TEXT CHECK(reactionStatus IN ('pending','sending','sent','failed','unknown')),reason TEXT CHECK(reason IN ('unconfirmed','scope','forbidden','rate_limited','comment_unavailable','unavailable')),reactionId INTEGER,UNIQUE(repositoryId,commentId)) STRICT;
+    CREATE INDEX pending_reactions ON ownerReceipts(cursor) WHERE reactionStatus='pending';
+    PRAGMA user_version=6; COMMIT;`);
 }
 
 // The task database rejects extra tables; keep the cloud tool ledger independent

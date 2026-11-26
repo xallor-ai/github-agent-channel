@@ -9,6 +9,7 @@ import { TaskStore } from "./store.js";
 import { OctokitGitHubClient } from "./github.js";
 import { PullCoordinator } from "./pull.js";
 import { DeliveryWorker } from "./worker.js";
+import { ReactionWorker } from "./reaction-worker.js";
 import { createChannelServer } from "./server.js";
 import { resolveSecrets } from "./secrets.js";
 import { StorageSchemaError } from "./store-schema.js";
@@ -25,6 +26,7 @@ try {
     registry: store.registry,
     runtimeLastSeen: store.runtimeLastSeen.bind(store),
     recentActivities: store.activitiesForDevice.bind(store),
+    confirmActivities: store.confirmActivities.bind(store),
     hasWriteProfile: (i, r) =>
       !!config.writeProfiles?.some(
         (p) => p.installationId === i && p.repositoryId === r,
@@ -92,6 +94,7 @@ try {
     (credential) => devices.authenticate(credential),
   );
   const worker = new DeliveryWorker(store, github);
+  const reactions = new ReactionWorker(store, github);
   const server = createChannelServer(
     config,
     store,
@@ -108,6 +111,7 @@ try {
     lookup,
     github.reconcileReview.bind(github),
     github.readMergeFacts.bind(github),
+    github.lookupOwnerReaction.bind(github),
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(
@@ -123,6 +127,11 @@ try {
     void worker
       .tick()
       .catch(() => console.error(JSON.stringify({ event: "worker_failure" })));
+    void reactions
+      .tick()
+      .catch(() =>
+        console.error(JSON.stringify({ event: "reaction_worker_failure" })),
+      );
   }, 500);
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.on(signal, () => {

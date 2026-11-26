@@ -1,6 +1,6 @@
 # 让 Agent 评审一个 PR
 
-在已配对设备的仓库声明中启用 `pull_request.opened` 和 `pull_request.synchronize`，或在开放 PR 会话中按该绑定的规则发起评论任务。GitHub App 必须有该仓库的访问权限，发起人须有 write、maintain 或 admin 权限。使用同一修订的服务端和 bridge，准备新的云任务库（schema 5）与本地 journal（schema 3）；切换步骤见[协议说明](protocol-v2.md)。旧库不会迁移。
+在已配对设备的仓库声明中启用 `pull_request.opened` 和 `pull_request.synchronize`，或在开放 PR 会话中按该绑定的规则发起评论任务。GitHub App 必须有该仓库的访问权限，发起人须有 write、maintain 或 admin 权限。使用同一修订的服务端和 bridge，准备新的云任务库（schema 6）与本地 journal（schema 3）；切换步骤见[协议说明](protocol-v2.md)。旧库不会迁移。
 
 | 想得到什么 | 配置 | 能核对什么 |
 | --- | --- | --- |

@@ -23,7 +23,11 @@ import {
 } from "./binding-registry.js";
 
 import { activityPageSchema, paginationSchema } from "./activity-feed.js";
-import { activityInboxStatus, rememberActivityBinding } from "./agent-inbox.js";
+import {
+  activityInboxStatus,
+  rememberActivityBinding,
+  readActivityInbox,
+} from "./agent-inbox.js";
 import { bindingEvent } from "./binding-events.js";
 import { coverageSchema, eventCoverage } from "./binding-coverage.js";
 import { runtimeProfile } from "./runtime-profile.js";
@@ -150,6 +154,71 @@ function readDesired(file: string) {
   }
 }
 
+// Always resolve the current server identity before exposing a local inbox.
+async function currentBinding(
+  client: Connection,
+  owner: string,
+  repo: string,
+  fetcher: typeof fetch,
+) {
+  const receipt = await post(
+    client,
+    "/connector/v2/bindings/read",
+    { owner, repo },
+    z.object({ binding: record.nullable(), coverage: coverageSchema }),
+    fetcher,
+  );
+  verifyTarget(receipt.binding, owner, repo);
+  return receipt;
+}
+function verifyTarget(
+  binding: z.infer<typeof record> | null,
+  owner: string,
+  repo: string,
+) {
+  if (
+    binding &&
+    (binding.owner.toLowerCase() !== owner.toLowerCase() ||
+      binding.repo.toLowerCase() !== repo.toLowerCase())
+  )
+    throw Error("Response identifies a different repository");
+}
+export async function inboxCommand(
+  file: string,
+  configPath: string,
+  after = 0,
+  limit = 25,
+  fetcher: typeof fetch = fetch,
+) {
+  const { owner, repo } = readDesired(file);
+  const { after: cursor, limit: size } = paginationSchema.parse({
+    after,
+    limit,
+  });
+  const config = readAgentSettings(configPath),
+    profile = runtimeProfile(config.runtime);
+  const client = loadChannelClient(configPath, config);
+  const { binding } = await currentBinding(client, owner, repo, fetcher);
+  const agent = binding?.responsibleAgent;
+  if (
+    !binding?.enabled ||
+    !agent ||
+    agent.type !== profile.type ||
+    agent.id !== profile.id ||
+    agent.deepReview !== profile.deepReview ||
+    agent.nativeReview !== profile.nativeReview
+  )
+    throw Error("No active inbox for this runtime");
+  return readActivityInbox(
+    config.stateFile,
+    client.baseUrl,
+    profile,
+    binding,
+    cursor,
+    size,
+  );
+}
+
 export async function activitiesCommand(
   file: string,
   configPath: string,
@@ -207,46 +276,24 @@ export async function repoCommand(
   }
   try {
     const client = loadChannelClient(configPath, config);
-    const verifyTarget = <T extends { binding: z.infer<typeof record> | null }>(
-      receipt: T,
-    ) => {
-      const { binding } = receipt;
-      if (
-        binding &&
-        (binding.owner.toLowerCase() !== owner.toLowerCase() ||
-          binding.repo.toLowerCase() !== repo.toLowerCase())
-      )
-        throw Error("Response identifies a different repository");
-      return receipt;
-    };
-    const read = async () =>
-      verifyTarget(
-        await post(
-          client,
-          "/connector/v2/bindings/read",
-          { owner, repo },
-          z.object({ binding: record.nullable(), coverage: coverageSchema }),
-          fetcher,
-        ),
-      );
+    const read = () => currentBinding(client, owner, repo, fetcher);
     let { binding, coverage } = await read();
     if (action === "apply") {
       const previous = binding;
       try {
-        ({ binding, coverage } = verifyTarget(
-          await post(
-            client,
-            "/connector/v2/bindings/apply",
-            {
-              owner,
-              repo,
-              expectedRevision: binding?.revision ?? 0,
-              declaration: desired,
-            },
-            z.object({ binding: record, coverage: coverageSchema }),
-            fetcher,
-          ),
+        ({ binding, coverage } = await post(
+          client,
+          "/connector/v2/bindings/apply",
+          {
+            owner,
+            repo,
+            expectedRevision: binding?.revision ?? 0,
+            declaration: desired,
+          },
+          z.object({ binding: record, coverage: coverageSchema }),
+          fetcher,
         ));
+        verifyTarget(binding, owner, repo);
         if (
           !sameDeclaration(binding, desired) ||
           binding.revision !==

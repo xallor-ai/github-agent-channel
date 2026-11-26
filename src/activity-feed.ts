@@ -22,6 +22,20 @@ const target = z.union([
 const bindingId = z
   .string()
   .regex(/^[1-9]\d{0,15}:[1-9]\d{0,15}:[a-zA-Z0-9_-]{1,64}:[1-9]\d{0,15}$/);
+export const receivedPageSchema = z.strictObject({
+  bindingId,
+  entries: z
+    .array(
+      z.strictObject({ cursor: id, deliveryId: z.string().min(1).max(100) }),
+    )
+    .min(1)
+    .max(25)
+    .refine(
+      (rows) =>
+        rows.every((row, i) => i === 0 || rows[i - 1].cursor < row.cursor) &&
+        new Set(rows.map((row) => row.deliveryId)).size === rows.length,
+    ),
+});
 const activity = z.strictObject({
   cursor: id,
   receivedAt: id,

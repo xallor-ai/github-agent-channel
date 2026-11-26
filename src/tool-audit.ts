@@ -34,7 +34,7 @@ export interface CloudToolAudit {
   buildSha: string | null;
 }
 
-// This file is separate from the immutable v5 tasks schema. Only cloud-side
+// This file is separate from the task database layout. Only cloud-side
 // observations enter it; no argument, result, failure text or runtime event.
 export class ToolAuditStore {
   private readonly db: DatabaseSync;

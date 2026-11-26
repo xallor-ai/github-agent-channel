@@ -1,3 +1,8 @@
+import {
+  OwnerReceipts,
+  type ReceiptEntry,
+  type ReactionResult,
+} from "./owner-receipts.js";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
@@ -56,6 +61,7 @@ export class InvalidAssignmentOutcome extends Error {}
 
 export class TaskStore {
   private readonly db: DatabaseSync;
+  private readonly ownerReceipts: OwnerReceipts;
   private readonly ledger: ActivityLedger;
   private readonly audit: ToolAuditStore;
   readonly registry: BindingRegistry;
@@ -66,6 +72,7 @@ export class TaskStore {
     try {
       initializeTaskSchema(this.db);
       this.ledger = new ActivityLedger(this.db);
+      this.ownerReceipts = new OwnerReceipts(this.db, this.ledger);
       this.registry = new BindingRegistry(this.db);
       this.audit = new ToolAuditStore(
         dbPath === ":memory:" ? dbPath : dbPath + ".tool-audit.sqlite",
@@ -647,6 +654,37 @@ export class TaskStore {
       .run(status, error, id, workerId, leaseHash);
     if (!changed.changes) throw new AssignmentConflict("Task is not running");
   }
+  confirmActivities(
+    deviceId: string,
+    profile: RuntimeProfile,
+    bindingId: string,
+    entries: ReceiptEntry[],
+  ) {
+    this.transaction(() =>
+      this.ownerReceipts.confirm(deviceId, profile, bindingId, entries),
+    );
+  }
+  ownerReceipt(deliveryId: string) {
+    return this.ownerReceipts.get(deliveryId);
+  }
+  reserveReaction() {
+    return this.transaction(() => {
+      const id = this.ownerReceipts.reserve();
+      return id ? this.get(id) : undefined;
+    });
+  }
+  reactionAllowed(id: string) {
+    return this.ownerReceipts.allowed(id);
+  }
+  finishReaction(taskId: string, result: ReactionResult) {
+    this.ownerReceipts.finish(taskId, result);
+  }
+  reactionUnknown(taskId: string) {
+    return this.ownerReceipts.unknown(taskId);
+  }
+  reconcileReaction(taskId: string, reactionId: number) {
+    this.ownerReceipts.finish(taskId, { status: "sent", reactionId }, true);
+  }
   publicationAllowed(taskId: string) {
     return !!this.db
       .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
@@ -689,7 +727,7 @@ export class TaskStore {
   recover(): void {
     this.transaction(() => {
       this.db.exec(
-        "UPDATE tasks SET status='unknown' WHERE status='running'; UPDATE tasks SET deliveryStatus='unknown' WHERE deliveryStatus='sending';",
+        "UPDATE ownerReceipts SET reactionStatus='unknown',reason='unconfirmed' WHERE reactionStatus='sending'; UPDATE tasks SET status='unknown' WHERE status='running'; UPDATE tasks SET deliveryStatus='unknown' WHERE deliveryStatus='sending';",
       );
     });
   }

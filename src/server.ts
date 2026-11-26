@@ -41,6 +41,7 @@ export function createChannelServer(
   lookup: BindingLookup = store.activeBinding.bind(store),
   reconcileReview?: GitHubClient["reconcileReview"],
   readMergeFacts?: GitHubClient["readMergeFacts"],
+  lookupOwnerReaction?: GitHubClient["lookupOwnerReaction"],
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -125,7 +126,11 @@ export function createChannelServer(
               deliveryId: "",
             }),
           });
-        } else send(200, receipt);
+        } else
+          send(200, {
+            ...receipt,
+            ownerReceipt: store.ownerReceipt(match![1]),
+          });
         return;
       }
       const byComment =
@@ -156,11 +161,12 @@ export function createChannelServer(
               deliveryStatus: task.deliveryStatus,
               publicationReceipt: task.publicationReceipt,
               toolAudit: store.toolAudit(task.id),
+              ownerReceipt: store.ownerReceipt(task.deliveryId),
             });
           return;
         }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/lookup-review|\/merge-facts)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/lookup-review|\/merge-facts|\/reconcile-reaction)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -173,6 +179,28 @@ export function createChannelServer(
         }
         if (req.method === "GET" && match[2] === "/thread") {
           send(200, { activities: store.recentThread(task) });
+          return;
+        }
+        if (req.method === "POST" && match[2] === "/reconcile-reaction") {
+          if (!lookupOwnerReaction || !store.reactionUnknown(task.id)) {
+            send(409, { error: "No unknown owner reaction to reconcile" });
+            return;
+          }
+          try {
+            const reactionId = await lookupOwnerReaction(task);
+            if (!reactionId) {
+              send(409, {
+                error: "No verified bot reaction; receipt remains unknown",
+              });
+            } else {
+              store.reconcileReaction(task.id, reactionId);
+              send(200, { ownerReceipt: store.ownerReceipt(task.deliveryId) });
+            }
+          } catch {
+            send(409, {
+              error: "Cannot confirm bot reaction; inspect the current receipt",
+            });
+          }
           return;
         }
         if (req.method === "GET" && match[2] === "/merge-facts") {
@@ -206,6 +234,7 @@ export function createChannelServer(
             source: task.source,
             runtime: task.runtime,
             toolAudit: store.toolAudit(task.id),
+            ownerReceipt: store.ownerReceipt(task.deliveryId),
             outcome: task.outcome,
           });
           return;

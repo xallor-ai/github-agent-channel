@@ -6,6 +6,8 @@
 
 ## 数据与调用链
 
+收件独立于执行和最终发布：[本机 inbox](../src/agent-inbox.ts) 与游标一起落盘后发送逐条确认；[云端账本](../src/owner-receipts.ts)校验绑定并为合格的原评论登记待发表情；[独立 worker](../src/reaction-worker.ts)通过 [GitHub Reactions](../src/github-reaction.ts) 写入及对账。收件过程不会调用模型。
+
 1. GitHub → server/webhook 验签与触发规则 → SQLite 保存 source、target、授权范围 → 202。
 2. 用户执行环境中的 agent 主动调用 v2 claim；服务端持久化 assignment 并校验 actor 后下发。
 3. agent 写本地 journal，通过 runtime-factory 调用选定 Runtime；运行标识先落盘并回传 execution。
@@ -31,7 +33,7 @@
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
 | [config.ts](../src/config.ts)                         | 云端服务级配置与可选 writeProfiles；仓库和事件走设备登记 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
-| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 5、bridge journal schema 3；旧格式拒绝，绝不转换或删除旧数据                                                        |
+| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 6、本机活动收件箱 schema 2、bridge journal schema 3；旧格式拒绝，绝不转换或删除旧数据                                                        |
 | [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
 | [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
 | [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |

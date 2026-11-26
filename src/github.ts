@@ -8,6 +8,7 @@ import {
 } from "./github-publication.js";
 import { checkPull, collectPullDiff } from "./github-pull-context.js";
 import { App } from "@octokit/app";
+import { ownerReaction } from "./github-reaction.js";
 import { Octokit } from "@octokit/core";
 import {
   AccessDenied,
@@ -81,7 +82,7 @@ export class OctokitGitHubClient implements GitHubClient {
       metadata: "read";
       pull_requests: "read" | "write";
       contents?: "read" | "write";
-      issues?: "write";
+      issues?: "read" | "write";
       administration?: "read";
       checks?: "read";
       statuses?: "read";
@@ -107,20 +108,30 @@ export class OctokitGitHubClient implements GitHubClient {
       log: { debug() {}, info() {}, warn() {}, error() {} },
     });
   }
-  async #authorized(task: Task, evidenceRead = false): Promise<Octokit> {
+  async #authorized(
+    task: Task,
+    evidenceRead = false,
+    reaction?: "read" | "write",
+  ): Promise<Octokit> {
     this.#binding(task, evidenceRead);
     await this.verifyManager(task);
-    const client = evidenceRead
+    const client = reaction
       ? await this.#installationClient(
           task,
-          {
-            metadata: "read",
-            contents: "read",
-            pull_requests: "read",
-          },
+          { metadata: "read", pull_requests: "read", issues: reaction },
           true,
         )
-      : await this.#client(task);
+      : evidenceRead
+        ? await this.#installationClient(
+            task,
+            {
+              metadata: "read",
+              contents: "read",
+              pull_requests: "read",
+            },
+            true,
+          )
+        : await this.#client(task);
     const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
       owner: task.owner,
       repo: task.repo,
@@ -175,6 +186,44 @@ export class OctokitGitHubClient implements GitHubClient {
   }
   async authorize(task: Task): Promise<void> {
     await this.#checkedClient(task);
+  }
+  async #ownerReaction(task: Task, check?: () => void) {
+    // Read-only lookups are permitted on closed threads, but never after a
+    // binding/manager/actor change. They can only confirm an existing receipt.
+    const mode = check ? "write" : "read";
+    const client = await this.#authorized(task, true, mode);
+    const { data: app } = await this.#app.octokit.request("GET /app");
+    if (
+      !app ||
+      String(app.id) !== this.#config.github.appId ||
+      !app.slug ||
+      app.slug + "[bot]" !== this.#config.github.botLogin
+    )
+      throw new AccessDenied("App identity mismatch");
+    const reactionId = await ownerReaction(
+      client,
+      task,
+      this.#config.github.botLogin,
+      check &&
+        (async () => {
+          await this.#authorized(task, true, mode);
+          check();
+        }),
+      () => {
+        this.#binding(task, true);
+        check?.();
+      },
+    );
+    if (!check) await this.#authorized(task, true, mode);
+    return reactionId;
+  }
+  async publishOwnerReaction(task: Task, check: () => void) {
+    const id = await this.#ownerReaction(task, check);
+    if (!id) throw new AmbiguousExecution("Reaction not confirmed");
+    return id;
+  }
+  lookupOwnerReaction(task: Task) {
+    return this.#ownerReaction(task);
   }
   async readMergeFacts(task: Task) {
     const client = await this.#authorized(task, true);

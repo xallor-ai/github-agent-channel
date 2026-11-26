@@ -8,6 +8,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import {
   ActivityInbox,
   activityInboxStatus,
+  readActivityInbox,
   rememberActivityBinding,
 } from "../src/agent-inbox.js";
 import { runAgent } from "../src/agent.js";
@@ -51,12 +52,12 @@ function feedNext(revision: number, bindingId = `1:2:worker:${revision}`) {
         repositoryId: 2,
         owner: "org",
         repo: "repo",
-        actorLogin: "do-not-persist-user",
+        actorLogin: "comment-author",
         target: { kind: "issue", number: 1 },
-        source: { event: "issue_comment", action: "created" },
+        source: { event: "issue_comment", action: "created", commentId: 77 },
         reason: "observed",
         taskId: null,
-        excerpt: "do-not-persist-private-text",
+        excerpt: "bounded comment excerpt",
         truncated: false,
       },
     ],
@@ -66,7 +67,7 @@ function feedNext(revision: number, bindingId = `1:2:worker:${revision}`) {
   });
 }
 
-test("activity polling resumes a durable cursor and persists no private event data", async (t) => {
+test("local receipt survives restart and a lost acknowledgement is retried before consuming another page", async (t) => {
   const stateFile = fixture(t);
   rememberActivityBinding(stateFile, connection.baseUrl, profile, binding);
   const inbox = new ActivityInbox(stateFile);
@@ -90,15 +91,49 @@ test("activity polling resumes a durable cursor and persists no private event da
     { received: 1, truncated: false },
   );
   inbox.close();
-  const db = new DatabaseSync(stateFile + ".inbox");
+  const local = () =>
+    readActivityInbox(stateFile, connection.baseUrl, profile, binding)!;
+  assert.equal(
+    local().activities[0].activity.excerpt,
+    "bounded comment excerpt",
+  );
+  assert.equal(local().activities[0].activity.source.commentId, 77);
+  assert.equal(local().activities[0].ack, "pending");
+  assert.doesNotMatch(JSON.stringify(local()), /local-token/);
+  const failed = new ActivityInbox(stateFile);
+  const calls: unknown[] = [];
   try {
-    const rows = db.prepare("SELECT * FROM bindings").all();
-    assert.doesNotMatch(JSON.stringify(rows), /do-not-persist|local-token/);
+    await assert.rejects(
+      failed.pollOne(connection, profile, signal, async (url, init) => {
+        assert.equal(
+          new URL(String(url)).pathname,
+          "/connector/v2/activities/received",
+        );
+        calls.push(JSON.parse(String(init?.body)));
+        throw Error("ack reply lost");
+      }),
+      /lost/,
+    );
   } finally {
-    db.close();
+    failed.close();
   }
   const reopened = new ActivityInbox(stateFile);
   try {
+    await reopened.pollOne(connection, profile, signal, async (url, init) => {
+      assert.equal(
+        new URL(String(url)).pathname,
+        "/connector/v2/activities/received",
+      );
+      const body = JSON.parse(String(init?.body));
+      assert.deepEqual(body, calls[0]);
+      assert.deepEqual(body.entries, [{ cursor: 10, deliveryId: "a" }]);
+      return Response.json({
+        bindingId: body.bindingId,
+        entries: body.entries,
+      });
+    });
+    assert.equal(local().activities[0].ack, "confirmed");
+    assert.equal(local().activities.length, 1);
     await reopened.pollOne(connection, profile, signal, async (_url, init) => {
       assert.equal(JSON.parse(String(init?.body)).after, 10);
       return Response.json({
@@ -356,3 +391,148 @@ test(
     }
   },
 );
+
+test("a forged expiry or acknowledgement is rejected; only scoped expired entries release a pending page", async (t) => {
+  const file = fixture(t);
+  const signal = new AbortController().signal;
+  rememberActivityBinding(file, connection.baseUrl, profile, binding);
+  const poll = async (fn: typeof fetch) => {
+    const inbox = new ActivityInbox(file);
+    try {
+      return await inbox.pollOne(connection, profile, signal, fn);
+    } finally {
+      inbox.close();
+    }
+  };
+  await poll(async () => {
+    const p = await feedNext(1).json();
+    p.activities.push({ ...p.activities[0], deliveryId: "b", cursor: 11 });
+    p.nextCursor = 11;
+    return Response.json(p);
+  });
+  const id = "1:2:worker:1";
+  await assert.rejects(
+    poll(async () =>
+      Response.json(
+        { bindingId: id, expired: [{ cursor: 10, deliveryId: "wrong" }] },
+        { status: 410 },
+      ),
+    ),
+    /differs/,
+  );
+  await assert.rejects(
+    poll(async () =>
+      Response.json({
+        bindingId: id,
+        entries: [{ cursor: 10, deliveryId: "a" }],
+      }),
+    ),
+    /differs/,
+  );
+  const rows = () =>
+    readActivityInbox(file, connection.baseUrl, profile, binding)!;
+  assert.deepEqual(
+    rows().activities.map((a) => a.ack),
+    ["pending", "pending"],
+  );
+  await poll(async () =>
+    Response.json(
+      { bindingId: id, expired: [{ cursor: 10, deliveryId: "a" }] },
+      { status: 410 },
+    ),
+  );
+  assert.equal(rows().retentionTruncated, true);
+  assert.deepEqual(
+    rows().activities.map((a) => a.ack),
+    ["expired", "pending"],
+  );
+  await poll(async (_, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.entries, [{ cursor: 11, deliveryId: "b" }]);
+    return Response.json({ bindingId: id, entries: body.entries });
+  });
+  assert.deepEqual(
+    rows().activities.map((a) => a.ack),
+    ["expired", "confirmed"],
+  );
+  const changed = { ...binding, revision: 2 };
+  rememberActivityBinding(file, connection.baseUrl, profile, changed);
+  assert.equal(
+    readActivityInbox(file, connection.baseUrl, profile, binding),
+    null,
+  );
+  assert.deepEqual(
+    readActivityInbox(file, connection.baseUrl, profile, changed)?.activities,
+    [],
+  );
+});
+test("old cursor-only stores are rejected intact without inventing receipts", (t) => {
+  const file = fixture(t);
+  const old = new DatabaseSync(file + ".inbox");
+  try {
+    old.exec(
+      "CREATE TABLE bindings(cursor INTEGER); INSERT INTO bindings VALUES(19); PRAGMA user_version=1",
+    );
+  } finally {
+    old.close();
+  }
+  assert.throws(() => new ActivityInbox(file), /version 2 required/);
+  const check = new DatabaseSync(file + ".inbox", { readOnly: true });
+  try {
+    assert.equal(
+      check.prepare("SELECT cursor FROM bindings").get()?.cursor,
+      19,
+    );
+    assert.equal(check.prepare("PRAGMA user_version").get()?.user_version, 1);
+  } finally {
+    check.close();
+  }
+});
+
+test("bounded receipt history evicts confirmed entries, exposes the gap, and paginates the local evidence", async (t) => {
+  const file = fixture(t);
+  const inbox = new ActivityInbox(file);
+  const signal = new AbortController().signal;
+  const sample = (await feedNext(1).json()).activities[0];
+  try {
+    inbox.remember(connection.baseUrl, profile, binding);
+    for (let i = 0; i < 22; i++) {
+      await inbox.pollOne(connection, profile, signal, async (url, init) => {
+        const req = JSON.parse(String(init?.body));
+        if (String(url).endsWith("/received"))
+          return Response.json({
+            bindingId: req.bindingId,
+            entries: req.entries,
+          });
+        const activities = Array.from({ length: 25 }, (_, j) => ({
+          ...sample,
+          deliveryId: "d" + (req.after + j + 1),
+          cursor: req.after + j + 1,
+        }));
+        return Response.json({
+          bindingId: sample.bindingId,
+          activities,
+          nextCursor: req.after + 25,
+          hasMore: true,
+          truncated: false,
+        });
+      });
+    }
+    const page = inbox.records(connection.baseUrl, profile, binding, 0, 100)!;
+    assert.equal(page.retentionTruncated, true);
+    assert.equal(page.activities[0].activity.cursor, 20);
+    assert.equal(page.nextCursor, 119);
+    assert.equal(page.hasMore, true);
+    assert.equal(
+      page.activities.every((a) => a.ack === "confirmed"),
+      true,
+    );
+    assert.equal(
+      inbox.records(connection.baseUrl, profile, binding, 219, 100)!.activities
+        .length,
+      56,
+    );
+  } finally {
+    inbox.close();
+  }
+});
