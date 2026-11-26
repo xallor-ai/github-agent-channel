@@ -27,7 +27,16 @@ if (!store.activeBinding(1, 2))
       repo: "fixture",
     },
     0,
-    { enabled: true, events: ["issue_comment.created"] },
+    {
+      enabled: true,
+      responsibleAgent: {
+        type: "openclaw",
+        id: "github",
+        deepReview: true,
+        nativeReview: true,
+      },
+      events: ["issue_comment.created"],
+    },
   );
 store.recover();
 // Synthetic observation tables live outside the production task database.

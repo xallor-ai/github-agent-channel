@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
+import { runtimeProfileSchema } from "./runtime-profile.js";
 import { bindingEvent } from "./binding-events.js";
 
 const id = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -13,24 +14,55 @@ const principalSchema = scopeSchema.extend({
     .regex(/^[a-zA-Z0-9_.-]{1,100}$/)
     .refine((v) => v !== "." && v !== ".."),
 });
-export const bindingDeclarationSchema = z
-  .strictObject({
-    enabled: z.boolean(),
-    requireMention: z.boolean().default(true),
-    nativeReview: z.boolean().optional(),
-    deepReview: z.boolean().optional(),
-    events: z
-      .array(bindingEvent)
-      .max(bindingEvent.options.length)
-      .transform((events) => [...new Set(events)].sort()),
-    triggerLabel: z.string().trim().min(1).max(100).optional(),
+const declaration = z.strictObject({
+  enabled: z.boolean(),
+  autoTriage: z.boolean().optional(),
+  autoReview: z.boolean().optional(),
+  nativeReview: z.boolean().optional(),
+  deepReview: z.boolean().optional(),
+  events: z
+    .array(bindingEvent)
+    .max(bindingEvent.options.length)
+    .transform((events) => [...new Set(events)].sort())
+    .optional(),
+  triggerLabel: z.string().trim().min(1).max(100).optional(),
+});
+const validFilter = (v: { events?: string[]; enabled: boolean }) =>
+  v.events === undefined || v.enabled === v.events.length > 0;
+export const desiredPolicySchema = declaration.refine(validFilter);
+export const bindingDeclarationSchema = declaration
+  .extend({
+    responsibleAgent: runtimeProfileSchema.optional(),
   })
+  .refine(validFilter)
+  .refine(
+    (v) => v.enabled === (v.responsibleAgent !== undefined),
+    "An enabled binding must identify its responsible agent",
+  )
   .refine(
     (v) =>
-      v.enabled === v.events.length > 0 &&
-      v.events.includes("issues.labeled") === (v.triggerLabel !== undefined),
-    "Enabled bindings need events; only labeled events take a label",
+      !v.enabled ||
+      v.responsibleAgent?.type !== "acp" ||
+      (!v.autoTriage && !v.autoReview),
+    "ACP coding agents cannot enable autoTriage or autoReview; choose an analysis agent for automatic analysis",
   );
+
+type Declaration = z.infer<typeof bindingDeclarationSchema>;
+export function effectiveEvents(d: Declaration) {
+  return d.enabled ? (d.events ?? [...bindingEvent.options]) : [];
+}
+export function sameDeclaration(a: Declaration, b: Declaration) {
+  return (
+    a.enabled === b.enabled &&
+    !!a.autoTriage === !!b.autoTriage &&
+    !!a.autoReview === !!b.autoReview &&
+    !!a.deepReview === !!b.deepReview &&
+    !!a.nativeReview === !!b.nativeReview &&
+    a.triggerLabel === b.triggerLabel &&
+    JSON.stringify(a.responsibleAgent) === JSON.stringify(b.responsibleAgent) &&
+    JSON.stringify(a.events) === JSON.stringify(b.events)
+  );
+}
 
 export const bindingRecordSchema = bindingDeclarationSchema.safeExtend({
   ...principalSchema.shape,
@@ -193,12 +225,7 @@ export class BindingRegistry {
         current.administratorId === administratorId &&
         current.owner === who.owner &&
         current.repo === who.repo &&
-        current.enabled === next.enabled &&
-        current.requireMention === next.requireMention &&
-        !!current.nativeReview === !!next.nativeReview &&
-        !!current.deepReview === !!next.deepReview &&
-        current.triggerLabel === next.triggerLabel &&
-        JSON.stringify(current.events) === JSON.stringify(next.events);
+        sameDeclaration(current, next);
       if (expectedRevision !== rev && !(same && expectedRevision === rev - 1))
         throw Error("Binding revision conflict");
       if (!current && !next.enabled) throw Error("No binding to disable");

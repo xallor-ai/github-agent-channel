@@ -23,6 +23,12 @@ try {
     dbPath: config.dataFile + ".devices",
     adminToken: secrets.adminToken,
     registry: store.registry,
+    runtimeLastSeen: store.runtimeLastSeen.bind(store),
+    recentActivities: store.activitiesForDevice.bind(store),
+    hasWriteProfile: (i, r) =>
+      !!config.writeProfiles?.some(
+        (p) => p.installationId === i && p.repositoryId === r,
+      ),
     appId: config.github.appId,
     privateKey: secrets.privateKey,
   });
@@ -55,7 +61,7 @@ try {
       )
         throw new AccessDenied("Binding is no longer active");
       try {
-        const verified = await verifier.verifyPaired(device, {
+        const { who: verified } = await verifier.verifyPaired(device, {
           owner: task.owner,
           repo: task.repo,
         });
@@ -76,6 +82,8 @@ try {
         throw error;
       }
     },
+    fetch,
+    (id) => store.publicationAllowed(id),
   );
   const coordinator = new PullCoordinator(
     store,

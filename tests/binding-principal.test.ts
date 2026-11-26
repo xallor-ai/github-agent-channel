@@ -65,7 +65,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 test("binding principal uses App installation and metadata-only repo token, resolves a paired user by immutable id", async () => {
   const { verify, calls } = fixture();
-  assert.deepEqual(await verify(), {
+  assert.deepEqual((await verify()).who, {
     deviceId: "laptop",
     administratorId: 34,
     owner: repo.owner.login,

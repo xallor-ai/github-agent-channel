@@ -89,7 +89,10 @@ const outcome = (text: string): RuntimeResult => ({
   publication: { kind: "comment" },
 });
 const assignment = () => ({
-  task,
+  task: {
+    ...task,
+    threadContext: [],
+  },
   leaseToken: "lease-value",
   expiresAt: Date.now() + 10000,
 });
@@ -471,7 +474,8 @@ test("pinned review grants stay in the cache preparer, outside model requests, j
         expiresAt: Date.now() + 60000,
         task: {
           ...task,
-          reviewPolicy: { deepReview: true, nativeReview: false },
+          threadContext: [],
+          reviewPolicy: { nativeReview: false, deepReview: true },
           target: { kind: "pull_request", number: 4, revision: revision() },
         },
       });
@@ -530,7 +534,7 @@ test("pinned review grants stay in the cache preparer, outside model requests, j
   const cfg = config(f.base);
   assert.ok(cfg.runtime.type === "openclaw");
   cfg.stateFile = f.path;
-  cfg.runtime.deepReview = true;
+
   cfg.runtime.timeoutMs = 60000;
   const runtime = new OpenClawConnector(
     cfg.runtime,

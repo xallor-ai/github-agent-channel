@@ -26,6 +26,7 @@ channel:
   tokenFile: secrets/connector-token
 runtime:
   type: acp
+  agentId: coding
   command: /absolute/path/to/acp-harness
   args: ["--acp"] # replace with the installed harness's actual ACP invocation
   timeoutMs: 600000

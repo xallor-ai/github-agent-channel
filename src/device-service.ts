@@ -17,6 +17,9 @@ import {
   bindingDeclarationSchema,
   type BindingRegistry,
 } from "./binding-registry.js";
+import type { TaskStore } from "./store.js";
+import { feedQueryFields } from "./activity-feed.js";
+import { sameRuntimeIdentity } from "./runtime-profile.js";
 import { AccessDenied } from "./contracts.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -30,6 +33,7 @@ const target = z.strictObject({
     .regex(/^[A-Za-z0-9_.-]{1,100}$/)
     .refine((s) => s !== "." && s !== ".."),
 });
+const feedQuery = target.extend(feedQueryFields);
 const update = target.extend({
   expectedRevision: z
     .number()
@@ -44,6 +48,7 @@ const paths = {
   pair: "/connector/v2/devices/pair",
   read: "/connector/v2/bindings/read",
   apply: "/connector/v2/bindings/apply",
+  activities: "/connector/v2/activities",
 };
 const layout = [
   "CREATE TABLE devices(deviceId TEXT PRIMARY KEY, githubUserId INTEGER NOT NULL, credential BLOB NOT NULL UNIQUE, revoked INTEGER NOT NULL CHECK(revoked IN(0,1,2))) STRICT",
@@ -74,11 +79,14 @@ async function jsonBody(req: IncomingMessage): Promise<unknown> {
 }
 
 type Options = {
+  runtimeLastSeen?: TaskStore["runtimeLastSeen"];
+  recentActivities?: TaskStore["activitiesForDevice"];
   dbPath: string;
   adminToken: string;
   appId: string;
   privateKey: string;
   registry: BindingRegistry;
+  hasWriteProfile?: (installationId: number, repositoryId: number) => boolean;
   fetchImpl?: typeof fetch;
   now?: () => number;
 };
@@ -89,8 +97,14 @@ export class DeviceService {
   readonly #verifier: BindingPrincipalVerifier;
   readonly #registry: BindingRegistry;
   readonly #fetch: typeof fetch;
+  readonly #runtimeLastSeen: Options["runtimeLastSeen"];
+  readonly #recentActivities: Options["recentActivities"];
+  readonly #hasWriteProfile: Options["hasWriteProfile"];
   readonly #now: () => number;
   constructor(options: Options) {
+    this.#runtimeLastSeen = options.runtimeLastSeen;
+    this.#recentActivities = options.recentActivities;
+    this.#hasWriteProfile = options.hasWriteProfile;
     this.#admin = digest(options.adminToken);
     this.#fetch = options.fetchImpl ?? fetch;
     this.#now = options.now ?? Date.now;
@@ -300,6 +314,22 @@ export class DeviceService {
       throw new Rejection(502, "github_unavailable");
     }
   }
+  #runtimePoll(binding: ReturnType<BindingRegistry["get"]>) {
+    if (!binding?.enabled || !binding.responsibleAgent)
+      return { status: "unbound", lastPolledAt: null };
+    if (!this.#runtimeLastSeen)
+      return { status: "unknown", lastPolledAt: null };
+    const lastPolledAt = this.#runtimeLastSeen(
+      binding.deviceId,
+      binding.responsibleAgent,
+    );
+    if (lastPolledAt === null) return { status: "never_seen", lastPolledAt };
+    const age = this.#now() - lastPolledAt;
+    return {
+      status: age >= 0 && age <= 120_000 ? "recent" : "last_seen",
+      lastPolledAt,
+    };
+  }
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const path = req.url;
     if (!path || !Object.values(paths).includes(path)) return false;
@@ -344,10 +374,28 @@ export class DeviceService {
           throw new Rejection(401, "device_unauthorized");
         const body = await jsonBody(req);
         const change = path === paths.apply ? update.parse(body) : undefined;
-        const selection = change
-          ? { owner: change.owner, repo: change.repo }
+        const feed =
+          path === paths.activities ? feedQuery.parse(body) : undefined;
+        const selector = change ?? feed;
+        const selection = selector
+          ? { owner: selector.owner, repo: selector.repo }
           : target.parse(body);
-        const who = await this.#verify(credential, selection);
+        const paired = this.authenticate(credential);
+        if (!paired) throw new Rejection(401, "device_unauthorized");
+        const before = feed
+          ? this.#registry.ownedSelection(
+              paired.deviceId,
+              selection.owner,
+              selection.repo,
+            )
+          : undefined;
+        const { who, installation } = await this.#verify(credential, selection);
+        const coverage = {
+          ...installation,
+          serverWriteProfile:
+            this.#hasWriteProfile?.(who.installationId, who.repositoryId) ??
+            null,
+        };
         // No await between the last credential/ownership checks and the registry operation.
         const device = this.authenticate(credential);
         if (
@@ -365,14 +413,53 @@ export class DeviceService {
             binding.administratorId !== who.administratorId)
         )
           throw new Rejection(403, "binding_owner");
-        if (change) {
+        if (feed) {
+          if (
+            !binding?.enabled ||
+            !binding.responsibleAgent ||
+            !sameRuntimeIdentity(binding.responsibleAgent, feed.runtime) ||
+            binding.responsibleAgent.deepReview !== feed.runtime.deepReview ||
+            binding.responsibleAgent.nativeReview !== feed.runtime.nativeReview
+          )
+            throw new Rejection(403, "binding_owner");
+          if (
+            !before ||
+            before.revision !== binding.revision ||
+            before.installationId !== binding.installationId ||
+            before.repositoryId !== binding.repositoryId
+          )
+            throw new Rejection(409, "binding_conflict");
+          if (!this.#recentActivities)
+            throw new Rejection(503, "service_error");
+          const bindingId = [
+            binding.installationId,
+            binding.repositoryId,
+            binding.deviceId,
+            binding.revision,
+          ].join(":");
+          send(200, {
+            bindingId,
+            ...this.#recentActivities(
+              binding.deviceId,
+              feed.after,
+              feed.limit,
+              feed.runtime,
+              bindingId,
+            ),
+          });
+        } else if (change) {
           try {
+            const updated = this.#registry.apply(
+              who,
+              change.expectedRevision,
+              change.declaration,
+            );
             send(200, {
-              binding: this.#registry.apply(
-                who,
-                change.expectedRevision,
-                change.declaration,
-              ),
+              binding: updated,
+              coverage: {
+                ...coverage,
+                runtimePoll: this.#runtimePoll(updated),
+              },
             });
           } catch (e) {
             if (
@@ -384,7 +471,11 @@ export class DeviceService {
               throw new Rejection(409, "binding_conflict");
             throw e;
           }
-        } else send(200, { binding: binding ?? null });
+        } else
+          send(200, {
+            binding: binding ?? null,
+            coverage: { ...coverage, runtimePoll: this.#runtimePoll(binding) },
+          });
       }
     } catch (e) {
       if (e instanceof Rejection) send(e.status, { error: e.message });

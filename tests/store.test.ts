@@ -1,4 +1,4 @@
-import { seedBinding } from "./binding-fixture.js";
+import { fixtureAgent, seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -153,11 +153,11 @@ test("restart preserves queued work and blocks unknown execution and delivery", 
   reopened.resolveUnknownDelivery(c.id, "failed");
   assert.equal(reopened.pendingDelivery(), undefined);
 });
-test("fresh schema is version 3 and contains no legacy columns", (t) => {
+test("fresh schema is version 5 and contains no legacy columns", (t) => {
   const { path } = fixture(t);
   const db = new DatabaseSync(path);
   try {
-    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 4);
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 5);
     const columns = db
       .prepare("PRAGMA table_info(tasks)")
       .all()
@@ -315,7 +315,11 @@ test("a concurrent declaration change fences old work in the same durable queue 
       1001,
     ),
   );
-  peer.registry.apply(proof, 2, { enabled: true, events: ["push"] });
+  peer.registry.apply(proof, 2, {
+    enabled: true,
+    responsibleAgent: fixtureAgent,
+    events: ["push"],
+  });
   const binding = store.activeBinding(installationId, repositoryId)!;
   assert.notEqual(binding.id, current.bindingId);
   assert.throws(
@@ -374,7 +378,7 @@ test("device revocation stops pending publication and denies previously verified
           deviceId: "w",
         },
         0,
-        { enabled: true, events: ["push"] },
+        { enabled: true, responsibleAgent: fixtureAgent, events: ["push"] },
       ),
     /revoked/,
   );
@@ -404,6 +408,7 @@ test("a binding change cannot cancel an issued publication or admit the next rev
   };
   store.registry.apply(proof, 1, {
     enabled: true,
+    responsibleAgent: fixtureAgent,
     events: ["issue_comment.created"],
   });
   const binding = store.activeBinding(1, 2)!;

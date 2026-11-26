@@ -402,7 +402,7 @@ try {
           body: "@smoke[bot] explain this",
           user: { id: 5, login: "tester", type: "User" },
         },
-        issue: { number: 3 },
+        issue: { number: 3, state: "open" },
       });
       const delivery = randomUUID();
       const accepted = await tlsRequest(
