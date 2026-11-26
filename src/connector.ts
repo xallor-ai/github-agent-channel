@@ -189,6 +189,7 @@ export class OpenClawConnector implements RuntimeConnector {
       combined.throwIfAborted();
     };
     let evidence: z.infer<typeof diffSchema> | undefined;
+    let modelDispatched = false;
     let fileReads = 0,
       searches = 0,
       limitedReads = 0;
@@ -340,6 +341,8 @@ export class OpenClawConnector implements RuntimeConnector {
       for (let round = 0; round < this.config.maxToolRounds; round++) {
         let response: Response;
         try {
+          combined.throwIfAborted();
+          modelDispatched = true;
           response = await this.fetcher(
             new URL("/v1/responses", this.config.baseUrl),
             {
@@ -551,7 +554,7 @@ export class OpenClawConnector implements RuntimeConnector {
             kind:
               task.target.kind === "repository"
                 ? "none"
-                : evidence && task.reviewPolicy?.nativeReview
+                : evidence && task.reviewPolicy?.nativeReview === true
                   ? "review"
                   : "comment",
           },
@@ -562,6 +565,16 @@ export class OpenClawConnector implements RuntimeConnector {
         "tool_round_limit",
         "Runtime tool round limit reached",
       );
+    } catch (error) {
+      if (
+        !modelDispatched &&
+        (combined.aborted || error instanceof AmbiguousExecution)
+      )
+        throw new RuntimeFailure(
+          "preparation_interrupted",
+          "OpenClaw was not dispatched",
+        );
+      throw error;
     } finally {
       snapshot?.close();
     }

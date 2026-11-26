@@ -109,3 +109,7 @@
 2026-11-24 免提及测试：只读 OpenClaw、仅 github-agent-channel 绑定启用 issues.opened、issue_comment.created、pull_request.opened/synchronize；[Issue 创建](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127861955)、[普通评论](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127878845)、[PR 会话评论](https://github.com/xallor-ai/github-agent-channel/pull/16#issuecomment-7127972710) 已回帖。PR #16 的第一次 opened 已受理，但第三次工具请求 503，执行失败，无发布回执；其后普通评论成功是独立任务，不覆盖该失败。
 
 **工具读取降级与失败说明（C3/C5/C8）：** 已授权读取不能提供文件时返回有界原因；确认的模型输出失败可在开放线程给出状态通知；未知状态不重跑。本地 GitHub、Pull 和发布 worker 回归；运维边界见[失败回执](operations.md#工具读取和失败回执)。
+
+固定 PR 准备阶段与模型派发阶段的失败分类、同设备不同仓库的基础回复隔离、按标记查找不明 Review 回执均有本地回归；尚非生产故障注入验证。
+
+#20 补充证据：以 GitHub API 取得的真实 Issue #20 正文及其 Bot 评论重建事件，在隔离数据库使用本地测试签名回放；分别记录 observed / self_receipt，两条均没有任务。这不是公网原始 Webhook 投递或在线 Agent 逐条确认。乱序关闭、跨绑定去重、收件退避另由本地 HTTP/SQLite 回归验证。

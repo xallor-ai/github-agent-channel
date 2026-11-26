@@ -100,3 +100,5 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 `read_file` 读取默认分支上的单个文件。已授权的 Contents 请求遇到目录、404 或超过 128 KiB 时，模型分别收到 `not_a_file`、`file_unavailable` 或 `file_too_large`；没有文件内容，不能据此声称已核验 PR head。授权、限流、网络及上游服务错误仍中止读取。
 
 连接器只上报固定失败原因码，不保存异常消息。确认模型没有给出可用结果（轮次耗尽、没有最终回答、工具调用或结果格式无效）时，Channel 可在仍开放、仍授权的原 Issue/PR 发布一条状态通知。通知有自己的发布回执，任务保持 failed，不产生分析成果。未知执行、授权失败和旧失败任务不自动重跑或补发。
+
+原生 Review 的 POST 回包丢失且没有 ID 时，管理员先 GET `/tasks/<id>/lookup-review`，只读查验原 PR 上唯一的 Bot、任务标记、正文、commit 与链接。无匹配、多匹配、无法读取或超出扫描上限均保持 unknown，不证明写入失败。查得唯一链接后才按原流程提交 resolve-delivery；不重跑模型或 POST Review。

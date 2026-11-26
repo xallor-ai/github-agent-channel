@@ -246,7 +246,7 @@ async function fixture(
       },
       delivery,
     );
-  const agentWith = (model: typeof fetch) => {
+  const agentWith = (model: typeof fetch, transport: typeof fetch = fetch) => {
     const agentConfig: AgentConfig = {
       channel: { baseUrl: url, tokenEnv: "C" },
       runtime: {
@@ -266,6 +266,7 @@ async function fixture(
       journal,
       new OpenClawConnector(agentConfig.runtime, "model", model),
       "connector",
+      transport,
     );
   };
   return {
@@ -404,6 +405,48 @@ test("PR comment resolves once at claim, persists the pin and lease hash, and ca
   assert.deepEqual(f.store.get(taskId)?.target, target);
   assert.equal(f.resolver.mock.callCount(), 1);
   assert.equal((await f.post("claim", { runtime: fixtureAgent })).status, 204);
+});
+
+test("a lost preparatory tool read cannot wedge the device; a lost model response still fences it", async (t) => {
+  const f = await fixture(t);
+  const first = await f.pr("opened", h1);
+  let failedRead = false,
+    models = 0;
+  const agent = f.agentWith(
+    async () => {
+      models++;
+      throw Error("model response lost");
+    },
+    async (input, init) => {
+      if (!failedRead && String(input).endsWith("/tool")) {
+        failedRead = true;
+        throw Error("read interrupted");
+      }
+      return fetch(input, init);
+    },
+  );
+  await agent.once();
+  assert.equal(models, 0);
+  assert.equal(f.store.get(first.taskId)?.status, "failed");
+  assert.match(
+    f.store.get(first.taskId)?.error ?? "",
+    /preparation_interrupted/,
+  );
+  f.setHead(h2);
+  const second = await f.pr("synchronize", h2);
+  await agent.once();
+  assert.equal(models, 1);
+  assert.equal(f.store.get(second.taskId)?.status, "unknown");
+});
+
+test("a newer head before claim records a scoped revision rejection and discloses no assignment", async (t) => {
+  const f = await fixture(t);
+  const task = await f.pr("opened", h1);
+  f.setHead(h2);
+  const response = await f.post("claim", { runtime: fixtureAgent });
+  assert.equal(response.status, 204);
+  assert.equal(await response.text(), "");
+  assert.equal(f.store.get(task.taskId)?.error, "pr_revision_changed");
 });
 
 test("only the dedicated grant route releases a credential and never after the assignment expires", async (t) => {

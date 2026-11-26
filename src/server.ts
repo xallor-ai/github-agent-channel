@@ -77,6 +77,11 @@ export function createChannelServer(
         }
         let accepted;
         try {
+          if ("closure" in task) {
+            store.closeThread(task.closure);
+            send(200, { ignored: true });
+            return;
+          }
           accepted = store.observe(task);
         } catch (e) {
           if (!(e instanceof StaleBinding)) throw e;
@@ -126,7 +131,7 @@ export function createChannelServer(
           return;
         }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/lookup-review)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -153,6 +158,26 @@ export function createChannelServer(
             runtime: task.runtime,
             outcome: task.outcome,
           });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/lookup-review") {
+          if (
+            !reconcileReview ||
+            task.deliveryStatus !== "unknown" ||
+            task.outcome?.publication.kind !== "review"
+          ) {
+            send(409, { error: "No unknown native review to verify" });
+            return;
+          }
+          try {
+            const receipt = await reconcileReview(task);
+            send(200, { kind: "review", ...receipt });
+          } catch {
+            send(409, {
+              error:
+                "Could not uniquely verify native review; delivery remains unknown",
+            });
+          }
           return;
         }
         if (req.method === "POST" && match[2] === "/resolve-delivery") {

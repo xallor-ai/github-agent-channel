@@ -43,7 +43,7 @@
 | [agent-store.ts](../src/agent-store.ts)               | schema v3 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
 | [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
 | [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，接收已解析 token，不再读取凭据或保留空能力声明                            |
-| [review-cache.ts](../src/review-cache.ts) | 桥接进程维护隔离的 Git 对象库，按授权获取固定版本，不更新共享工作树。 |
+| [review-cache.ts](../src/review-cache.ts) | 桥接进程维护隔离的 Git 对象库，按授权获取固定版本，不更新共享工作树；下载退出不明时隔离 staging，仍可读取已验证的旧版本。 |
 | [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），PR 自动装入有界 diff，可选任务快照和正文型原生 Review                          |
 | [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
 | [runtime-workspace.ts](../src/runtime-workspace.ts)   | 干净 clone 的 origin/目标 SHA/元数据检查；共用索引校验拒绝隐藏修改；收集实际变更，不 clone/reset/push     |
@@ -78,3 +78,5 @@ Webhook 先分类观察，再判断行动；同一事务保存活动、线程关
 - [CI](../.github/workflows/checks.yml) 执行格式、类型、单元/HTTP、构建与 Docker smoke。当前实测见[v2 验证记录](runtime-neutral-validation-20261122.md)。
 
 工具读取与失败通知（C3/C5/C8）：github.ts 区分无文件材料与上游错误；连接器上报固定原因码，pull / store 记录结果并去重。worker 只对明确的模型输出失败发布状态通知，并单独记录发布结果。详见[运维](operations.md#工具读取和失败回执)。
+
+PR 模型未派发前因只读准备中断的结果为 failed；派发后传输不明仍为 unknown。领取响应携带该仓库有效修订的深评和原生 Review 权限。原生 Review 回执可凭唯一标记只读查找。

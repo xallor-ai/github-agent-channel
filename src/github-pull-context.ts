@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { Octokit } from "@octokit/core";
-import { AccessDenied, type PullRevision, type Task } from "./contracts.js";
+import {
+  AccessDenied,
+  PullTargetRejected,
+  type PullRevision,
+  type Task,
+} from "./contracts.js";
 
 function pullParams(task: Task) {
   if (
@@ -34,14 +39,14 @@ export async function checkPull(
     data.state !== "open" ||
     data.merged !== false
   )
-    throw new AccessDenied("Target pull request is not confirmed open");
+    throw new PullTargetRejected("pr_open_unconfirmed");
   // The installation credential is scoped to one repository. Even a visible
   // fork SHA is not evidence that this binding grants access to its contents.
   if (
     data.base?.repo?.id !== task.repositoryId ||
     data.head?.repo?.id !== task.repositoryId
   )
-    throw new AccessDenied("Pull request repository is outside the binding");
+    throw new PullTargetRejected("pr_outside_binding");
   if (
     ![data.base.sha, data.head.sha].every(
       (sha) => typeof sha === "string" && /^[a-f0-9]{40}$/.test(sha),
@@ -61,7 +66,7 @@ export async function checkPull(
       expected.baseRepoId !== revision.baseRepoId ||
       expected.headRepoId !== revision.headRepoId)
   )
-    throw new AccessDenied("Target pull request revision changed");
+    throw new PullTargetRejected("pr_revision_changed");
   return { revision, changedFiles: data.changed_files };
 }
 

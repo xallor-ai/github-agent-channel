@@ -46,10 +46,18 @@ export class ActivityLedger {
   }
   deliveryAttempts(deliveryId: string) {
     const row = this.db
-      .prepare("SELECT attempts, duplicate FROM deliveries WHERE deliveryId=?")
+      .prepare(
+        "SELECT attempts, duplicate,reviewFollowUp FROM deliveries WHERE deliveryId=?",
+      )
       .get(deliveryId);
     return (
-      row && { attempts: Number(row.attempts), duplicate: row.duplicate === 1 }
+      row && {
+        attempts: Number(row.attempts),
+        duplicate: row.duplicate === 1,
+        ...(row.reviewFollowUp
+          ? { reviewFollowUp: String(row.reviewFollowUp) }
+          : {}),
+      }
     );
   }
 
@@ -58,6 +66,7 @@ export class ActivityLedger {
     reason: Reason,
     createTask?: (key: string) => string,
     closedAt?: number,
+    githubTime?: number,
   ) {
     const key =
       input.source.event === "issue_comment" &&
@@ -79,7 +88,7 @@ export class ActivityLedger {
     if (original) {
       this.db
         .prepare(
-          "INSERT INTO deliveries VALUES(?,NULL,?,?,?,?,1,1) ON CONFLICT(deliveryId) DO UPDATE SET attempts=attempts+1",
+          "INSERT INTO deliveries VALUES(?,NULL,?,?,?,?,1,1,NULL,NULL) ON CONFLICT(deliveryId) DO UPDATE SET attempts=attempts+1",
         )
         .run(
           input.deliveryId,
@@ -105,15 +114,36 @@ export class ActivityLedger {
     const priorTask = createTask
       ? this.db
           .prepare(
-            `SELECT id,bindingId FROM tasks WHERE eventKey=?
-          AND (? IS NULL OR githubTime>?) LIMIT 1`,
+            `SELECT id,bindingId,status FROM tasks WHERE eventKey=?
+          AND (bindingId=? OR status!='rejected' OR EXISTS(SELECT 1 FROM assignments WHERE taskId=tasks.id))
+          AND (? IS NULL OR githubTime>?) ORDER BY (bindingId=?) DESC, rowid DESC LIMIT 1`,
           )
-          .get(taskKey, closedAt ?? null, closedAt ?? null)
+          .get(
+            taskKey,
+            input.bindingId,
+            closedAt ?? null,
+            closedAt ?? null,
+            input.bindingId,
+          )
       : undefined;
     const taskId = priorTask
       ? String(priorTask.id)
       : (createTask?.(taskKey) ?? null);
     const receivedAt = Date.now();
+    if (
+      priorTask?.status === "queued" &&
+      priorTask.bindingId === input.bindingId &&
+      reason === "review" &&
+      githubTime !== undefined
+    ) {
+      // A later close can separate two previously coalesced same-version reviews.
+      // Keep only the newest candidate and discard its body as soon as dispatch is reserved.
+      this.db
+        .prepare(
+          `INSERT INTO reviewCandidates VALUES(?,?,?,?) ON CONFLICT(taskId) DO UPDATE SET githubTime=excluded.githubTime,receivedAt=excluded.receivedAt,input=excluded.input WHERE excluded.githubTime>reviewCandidates.githubTime`,
+        )
+        .run(priorTask.id!, githubTime, receivedAt, JSON.stringify(input));
+    }
     const { prompt, actorId: _actorId, ...scope } = input;
     const data = {
       ...scope,
@@ -141,7 +171,7 @@ export class ActivityLedger {
         ).lastInsertRowid,
     );
     this.db
-      .prepare("INSERT INTO deliveries VALUES(?,?,?,?,?,?,1,?)")
+      .prepare("INSERT INTO deliveries VALUES(?,?,?,?,?,?,1,?,?,?)")
       .run(
         input.deliveryId,
         key,
@@ -150,6 +180,10 @@ export class ActivityLedger {
         taskId,
         reason,
         Number(!!priorTask),
+        githubTime ?? null,
+        priorTask && priorTask.bindingId !== input.bindingId
+          ? "check_prior_review_before_delegating"
+          : null,
       );
     this.db
       .prepare("DELETE FROM activities WHERE receivedAt<=?")

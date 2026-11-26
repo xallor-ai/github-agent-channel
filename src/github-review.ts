@@ -6,6 +6,7 @@ function reviewScope(task: Task) {
     task.target.kind !== "pull_request" ||
     !task.target.revision ||
     task.target.revision.baseRepoId !== task.repositoryId ||
+    task.target.revision.headRepoId !== task.repositoryId ||
     !Number.isSafeInteger(task.target.number) ||
     task.target.number < 1 ||
     !/^[0-9a-f]{40}$/i.test(task.target.revision.headSha) ||
@@ -53,19 +54,54 @@ function receipt(
     );
   return { id: data.id, url: data.html_url };
 }
+async function lookupMarker(
+  scope: ReturnType<typeof reviewScope>,
+  client: Octokit,
+  botLogin: string,
+  body: string,
+) {
+  let found: { id: number; url: string } | undefined;
+  for (let page = 1; page <= 10; page++) {
+    const { data } = await client.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      { ...scope.params, page, per_page: 100 },
+    );
+    for (const r of data) {
+      if (
+        r.user?.login !== botLogin ||
+        !r.body?.endsWith("\n\n" + scope.marker)
+      )
+        continue;
+      if (found)
+        throw new AmbiguousExecution("Multiple matching review markers");
+      found = receipt(r, scope, botLogin, body);
+    }
+    if (data.length < 100) return found;
+  }
+  throw new AccessDenied("Review reconciliation exceeded scan limit");
+}
 export async function reconcileNativeReview(
   task: Task,
-  id: number,
+  id: number | undefined,
   client: Octokit,
   botLogin: string,
 ) {
   const scope = reviewScope(task);
   if (
     task.outcome?.publication.kind !== "review" ||
-    !Number.isSafeInteger(id) ||
-    id < 1
+    (id !== undefined && (!Number.isSafeInteger(id) || id < 1))
   )
     throw new AccessDenied("Invalid review reconciliation request");
+  if (id === undefined) {
+    const found = await lookupMarker(
+      scope,
+      client,
+      botLogin,
+      `${task.outcome.text}\n\n${scope.marker}`,
+    );
+    if (!found) throw new AmbiguousExecution("No verified review marker");
+    return found;
+  }
   const { data } = await client.request(
     "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}",
     { ...scope.params, review_id: id },
@@ -99,22 +135,8 @@ export async function publishNativeReview(
   };
   await check();
   try {
-    for (let page = 1; page <= 10; page++) {
-      const { data } = await client.request(
-        "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-        { ...scope.params, page, per_page: 100 },
-      );
-      const existing = data.find(
-        (r) =>
-          r.user?.login === botLogin && r.body?.endsWith("\n\n" + scope.marker),
-      );
-      if (existing) return receipt(existing, scope, botLogin, body);
-      if (data.length < 100) break;
-      if (page === 10)
-        throw new AccessDenied(
-          "Review reconciliation exceeded scan limit before dispatch",
-        );
-    }
+    const existing = await lookupMarker(scope, client, botLogin, body);
+    if (existing) return existing;
   } catch (error) {
     // A conflicting observed task marker still requires reconciliation. GET transport,
     // parsing and scan-limit failures occurred before any write attempt.

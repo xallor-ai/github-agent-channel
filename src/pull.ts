@@ -4,7 +4,12 @@ import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
 import { z } from "zod";
-import { AccessDenied, type GitHubClient, type Task } from "./contracts.js";
+import {
+  AccessDenied,
+  PullTargetRejected,
+  type GitHubClient,
+  type Task,
+} from "./contracts.js";
 import {
   TaskStore,
   AssignmentConflict,
@@ -168,9 +173,11 @@ export class PullCoordinator {
             workerId,
             hash(leaseToken),
             error instanceof AccessDenied ? "rejected" : "failed",
-            error instanceof AccessDenied
-              ? "Task authorization denied"
-              : "Task authorization unavailable",
+            error instanceof PullTargetRejected
+              ? error.reason
+              : error instanceof AccessDenied
+                ? "Task authorization denied"
+                : "Task authorization unavailable",
           );
           // This is a denied GitHub actor, not a rejected connector identity.
           // Keep the healthy poller alive and disclose no rejected task content.
@@ -199,10 +206,14 @@ export class PullCoordinator {
         send(200, {
           task: {
             ...task,
-            reviewPolicy: {
-              deepReview: !!binding.deepReview,
-              nativeReview: !!binding.nativeReview,
-            },
+            ...(task.target.kind === "pull_request"
+              ? {
+                  reviewPolicy: {
+                    deepReview: !!binding.deepReview,
+                    nativeReview: !!binding.nativeReview,
+                  },
+                }
+              : {}),
             threadContext,
           },
           leaseToken,

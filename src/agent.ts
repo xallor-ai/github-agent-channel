@@ -27,48 +27,53 @@ import {
 
 const uuid = z.string().uuid();
 const assignmentSchema = z.strictObject({
-  task: z.strictObject({
-    reviewPolicy: z.strictObject({
-      deepReview: z.boolean(),
-      nativeReview: z.boolean(),
-    }),
-    threadContext: z
-      .array(
-        z.strictObject({
-          actor: z.string().max(100),
-          event: z.string().max(100),
-          excerpt: z.string().max(1024),
-          truncated: z.boolean(),
-        }),
-      )
-      .max(8),
-    id: uuid,
-    prompt: z.string().max(16000),
-    deliveryId: z.string(),
-    bindingId: z.string(),
-    installationId: z.number().int().positive(),
-    repositoryId: z.number().int().positive(),
-    owner: z.string(),
-    repo: z.string(),
-    actorId: z.number().int().positive(),
-    actorLogin: z.string(),
-    target: targetSchema,
-    source: sourceSchema,
-    status: z.literal("running"),
-    deliveryStatus: z.enum([
-      "pending",
-      "sending",
-      "sent",
-      "skipped",
-      "failed",
-      "unknown",
-    ]),
-    outcome: outcomeSchema.nullable(),
-    runtime: runtimeEventSchema.nullable(),
-    publicationReceipt: publicationReceiptSchema.nullable(),
-    error: z.string().nullable(),
-    createdAt: z.number(),
-  }),
+  task: z
+    .strictObject({
+      id: uuid,
+      prompt: z.string().max(16000),
+      deliveryId: z.string(),
+      bindingId: z.string(),
+      installationId: z.number().int().positive(),
+      repositoryId: z.number().int().positive(),
+      owner: z.string(),
+      repo: z.string(),
+      actorId: z.number().int().positive(),
+      actorLogin: z.string(),
+      target: targetSchema,
+      reviewPolicy: z
+        .strictObject({ deepReview: z.boolean(), nativeReview: z.boolean() })
+        .optional(),
+      threadContext: z
+        .array(
+          z.strictObject({
+            actor: z.string().max(100),
+            event: z.string().max(100),
+            excerpt: z.string().max(1024),
+            truncated: z.boolean(),
+          }),
+        )
+        .max(8),
+      source: sourceSchema,
+      status: z.literal("running"),
+      deliveryStatus: z.enum([
+        "pending",
+        "sending",
+        "sent",
+        "skipped",
+        "failed",
+        "unknown",
+      ]),
+      outcome: outcomeSchema.nullable(),
+      runtime: runtimeEventSchema.nullable(),
+      publicationReceipt: publicationReceiptSchema.nullable(),
+      error: z.string().nullable(),
+      createdAt: z.number(),
+    })
+    .refine(
+      (t) =>
+        (t.target.kind === "pull_request") === (t.reviewPolicy !== undefined),
+      "Only PR assignments require explicit review policy",
+    ),
   leaseToken: z.string().min(1).max(1024),
   expiresAt: z.number().positive(),
 });
@@ -206,7 +211,7 @@ export class Agent {
           this.runtime instanceof OpenClawConnector &&
           pin &&
           this.config.runtime.type === "openclaw" &&
-          task.reviewPolicy?.deepReview
+          task.reviewPolicy?.deepReview === true
             ? this.runtime.withReviewSource(async () => {
                 const dir = await this.prepareCache(
                   join(dirname(this.config.stateFile), "review-cache"),
@@ -304,19 +309,24 @@ export class Agent {
           outcome: validated,
         };
       } catch (e) {
-        const failure = signal?.aborted
-          ? "runtime_interrupted"
-          : deadline.aborted
-            ? "runtime_timeout"
-            : e instanceof AmbiguousExecution
-              ? "runtime_transport"
-              : e instanceof RuntimeFailure
-                ? e.code
-                : "runtime_failed";
+        const notDispatched =
+          e instanceof RuntimeFailure && e.code === "preparation_interrupted";
+        const failure = notDispatched
+          ? "preparation_interrupted"
+          : signal?.aborted
+            ? "runtime_interrupted"
+            : deadline.aborted
+              ? "runtime_timeout"
+              : e instanceof AmbiguousExecution
+                ? "runtime_transport"
+                : e instanceof RuntimeFailure
+                  ? e.code
+                  : "runtime_failed";
         result = {
           leaseToken: assignment.leaseToken,
           status:
-            e instanceof AmbiguousExecution || combined.aborted
+            !notDispatched &&
+            (e instanceof AmbiguousExecution || combined.aborted)
               ? "unknown"
               : "failed",
           failure,

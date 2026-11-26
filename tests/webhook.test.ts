@@ -30,7 +30,7 @@ const event = () => ({
   },
   issue: { number: 5, state: "open" },
 });
-async function run(
+async function ingress(
   payload: unknown,
   eventName = "issue_comment",
   settings = config,
@@ -52,6 +52,11 @@ async function run(
     },
     "test",
   );
+}
+async function run(...args: Parameters<typeof ingress>) {
+  const decision = await ingress(...args);
+  assert.ok(!decision || !("closure" in decision));
+  return decision;
 }
 test("valid signed mention constructs only server scope", async () => {
   const result = await run(event());
@@ -230,4 +235,43 @@ test("signed comment actions use their creation time and closed observations use
       ?.githubTime,
     undefined,
   );
+});
+
+test("private lifecycle input requires a closed target in the signed repository scope", async () => {
+  const { installation, repository } = event();
+  const payload = {
+    action: "closed",
+    installation,
+    repository,
+    sender: { id: 7, login: "merge-queue[bot]", type: "Bot" },
+    pull_request: {
+      number: 5,
+      state: "closed",
+      closed_at: "2026-11-26T01:00:00Z",
+      base: { repo: repository },
+    },
+  };
+  assert.deepEqual(await ingress(payload, "pull_request"), {
+    closure: {
+      bindingId: "b",
+      installationId: 1,
+      repositoryId: 2,
+      owner: "org",
+      repo: "repo",
+      target: { kind: "pull_request", number: 5 },
+      githubTime: Date.parse(payload.pull_request.closed_at),
+    },
+  });
+  for (const inconsistent of [
+    { ...payload, action: "synchronize" },
+    { ...payload, installation: { id: 9 } },
+    { ...payload, repository: { ...repository, name: "other" } },
+    { ...payload, pull_request: { ...payload.pull_request, state: "open" } },
+    {
+      ...payload,
+      pull_request: { ...payload.pull_request, base: { repo: { id: 9 } } },
+    },
+  ]) {
+    assert.equal(await ingress(inconsistent, "pull_request"), null);
+  }
 });

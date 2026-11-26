@@ -21,7 +21,7 @@ const target = {
     headSha: sha,
     baseSha: "b".repeat(40),
     baseRepoId: 2,
-    headRepoId: 3,
+    headRepoId: 2,
   },
 } as const;
 const task = {
@@ -331,4 +331,33 @@ test("admin recovery verifies only the original repository and review with insta
       expectedCalls.push("GET /repos/org/repo/pulls/6/reviews/8");
     assert.deepEqual(calls, expectedCalls);
   }
+});
+
+test("operator can discover a unique verified native review without a response ID and without posting", async () => {
+  for (const [listed, ok] of [
+    [[], false],
+    [[expected], true],
+    [[expected, expected], false],
+    [[{ ...expected, commit_id: "f".repeat(40) }], false],
+  ] as const) {
+    const f = fixture({ listed: [...listed] });
+    const result = reconcileNativeReview(task, undefined, f.client, bot);
+    if (ok) assert.deepEqual(await result, { id: 8, url });
+    else await assert.rejects(result);
+    assert.equal(f.writes.length, 0);
+  }
+});
+
+test("an exhausted native review marker scan blocks the POST", async () => {
+  const f = fixture({
+    listed: Array.from({ length: 100 }, () => ({
+      ...expected,
+      body: "unrelated",
+    })),
+  });
+  await assert.rejects(
+    publishNativeReview(task, "summary", f.client, bot, async () => {}),
+    AccessDenied,
+  );
+  assert.equal(f.writes.length, 0);
 });

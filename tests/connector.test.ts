@@ -431,6 +431,7 @@ const revision = {
 };
 const pr: Task = {
   ...task,
+  reviewPolicy: { deepReview: false, nativeReview: false },
   target: { kind: "pull_request", number: 1, revision },
 };
 const diff = {
@@ -820,3 +821,23 @@ for (const [status, marker, adds, dels] of [
     },
   );
 }
+test("a device with enhanced review enabled retains basic analysis on a comment-only binding", async () => {
+  let calls = 0;
+  const c = new OpenClawConnector(settings, "secret", async (_url, init) => {
+    const offered = JSON.parse(String(init?.body)).tools.map(
+      (x: { name: string }) => x.name,
+    );
+    assert.ok(!offered.includes("search_repo"));
+    calls++;
+    return Response.json(summary);
+  });
+  const result = await c.run(
+    { ...pr, reviewPolicy: { deepReview: false, nativeReview: false } },
+    async (name) => {
+      assert.equal(name, "read_pull_diff");
+      return diff;
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.publication.kind, "comment");
+});

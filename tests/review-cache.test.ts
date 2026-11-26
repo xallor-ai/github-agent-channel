@@ -91,6 +91,18 @@ test("managed cache admits immutable pins and negotiates H2 from H1 without a se
   const stale = join(root, ".preparing-abc123");
   mkdirSync(stale, { mode: 0o700 });
   writeFileSync(join(stale, "abandoned"), "interrupted download");
+  // Simulate restart after an interrupted real HTTPS transfer. A released SQLite
+  // lock is not evidence that Git helpers are gone; a fresh preparer must fence writes.
+  writeFileSync(join(root, ".fetch-in-flight"), ".preparing-abc123");
+  assert.equal(await prepare(root, task(h1), grant), dir);
+  await assert.rejects(prepare(root, task(h2), grant), /needs reconciliation/);
+  assert.equal(fetches, 1);
+  assert.equal(grants, 1);
+  assert.equal(
+    readFileSync(join(stale, "abandoned"), "utf8"),
+    "interrupted download",
+  );
+  rmSync(join(root, ".fetch-in-flight"));
   assert.equal(await prepare(root, task(h1), grant), dir);
   assert.ok(!readdirSync(root).includes(".preparing-abc123"));
   assert.equal(grants, 1);

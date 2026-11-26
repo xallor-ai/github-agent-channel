@@ -25,7 +25,7 @@ import {
   profilePredicate,
 } from "./activity-ledger.js";
 import type { RuntimeProfile } from "./runtime-profile.js";
-import type { WebhookDecision } from "./webhook.js";
+import type { WebhookDecision, ThreadClosure } from "./webhook.js";
 import { BindingRegistry, effectiveEvents } from "./binding-registry.js";
 import { initializeTaskSchema } from "./store-schema.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
@@ -222,82 +222,168 @@ export class TaskStore {
         input,
         isStale ? "closed" : reason,
         execute && !isStale
-          ? (eventKey) => {
-              const id = randomUUID();
-              this.db
-                .prepare(
-                  `INSERT INTO tasks(id,deliveryId,eventKey,bindingId,installationId,repositoryId,owner,repo,actorId,actorLogin,prompt,status,deliveryStatus,createdAt,target,source,githubTime) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued','pending',?,?,?,?)`,
-                )
-                .run(
-                  id,
-                  input.deliveryId,
-                  eventKey,
-                  input.bindingId,
-                  input.installationId,
-                  input.repositoryId,
-                  input.owner,
-                  input.repo,
-                  input.actorId,
-                  input.actorLogin,
-                  input.prompt,
-                  Date.now(),
-                  JSON.stringify(input.target),
-                  JSON.stringify(input.source),
-                  githubTime ?? null,
-                );
-              return id;
-            }
+          ? (eventKey) => this.enqueue(input, eventKey, githubTime)
           : undefined,
         closed?.closedAt == null ? undefined : Number(closed.closedAt),
+        githubTime,
       );
       if (
         !receipt.duplicate &&
         reason === "closed" &&
         input.target.kind !== "repository"
       ) {
-        // A missing close instant cannot be ordered relative to any later delivery.
-        // Preserve that uncertainty rather than guessing from arrival order.
-        this.db
-          .prepare(
-            `INSERT INTO threadClosures VALUES(?,?,?) ON CONFLICT(repositoryId,thread) DO UPDATE SET closedAt=max(threadClosures.closedAt,excluded.closedAt)`,
-          )
-          .run(...scope, githubTime ?? null);
-        const affected = [
-          input.repositoryId,
-          input.target.kind,
-          input.target.number,
-          githubTime ?? null,
-          githubTime ?? null,
-        ];
-        const target =
-          "repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND (? IS NULL OR githubTime IS NULL OR githubTime<=?)";
-        this.db
-          .prepare(
-            "UPDATE tasks SET publicationBlocked=1 WHERE deliveryStatus IN ('sending','pending') AND " +
-              target,
-          )
-          .run(...affected);
-        this.db
-          .prepare(
-            "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Thread closed before execution' WHERE status='queued' AND " +
-              target,
-          )
-          .run(...affected);
-        this.db
-          .prepare(
-            "UPDATE tasks SET status='unknown',error='Thread closed during execution; reconcile' WHERE status='running' AND " +
-              target,
-          )
-          .run(...affected);
-        this.db
-          .prepare(
-            "UPDATE tasks SET deliveryStatus='skipped',error='Thread closed before publication' WHERE status IN ('succeeded','failed') AND deliveryStatus='pending' AND " +
-              target,
-          )
-          .run(...affected);
+        this.fenceThread({ ...input, target: input.target, githubTime });
       }
       return receipt;
     });
+  }
+  private enqueue(
+    input: NewTask,
+    eventKey: string,
+    githubTime?: number,
+    receivedAt = Date.now(),
+  ) {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO tasks(id,deliveryId,eventKey,bindingId,installationId,repositoryId,owner,repo,actorId,actorLogin,prompt,status,deliveryStatus,createdAt,target,source,githubTime) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued','pending',?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.deliveryId,
+        eventKey,
+        input.bindingId,
+        input.installationId,
+        input.repositoryId,
+        input.owner,
+        input.repo,
+        input.actorId,
+        input.actorLogin,
+        input.prompt,
+        receivedAt,
+        JSON.stringify(input.target),
+        JSON.stringify(input.source),
+        githubTime ?? null,
+      );
+    return id;
+  }
+  closeThread(closure: ThreadClosure) {
+    this.transaction(() => {
+      const binding = this.activeBinding(
+        closure.installationId,
+        closure.repositoryId,
+      );
+      if (
+        !binding ||
+        binding.id !== closure.bindingId ||
+        binding.owner !== closure.owner ||
+        binding.repo !== closure.repo
+      )
+        throw new StaleBinding("Binding changed before close");
+      this.fenceThread(closure);
+    });
+  }
+  private fenceThread(input: ThreadClosure) {
+    const { githubTime } = input;
+    const scope = [input.repositoryId, threadKey(input.target)];
+    // A missing close instant cannot be ordered relative to any later delivery.
+    // Preserve that uncertainty rather than guessing from arrival order.
+    this.db
+      .prepare(
+        `INSERT INTO threadClosures VALUES(?,?,?) ON CONFLICT(repositoryId,thread) DO UPDATE SET closedAt=max(threadClosures.closedAt,excluded.closedAt)`,
+      )
+      .run(...scope, githubTime ?? null);
+    const affected = [
+      input.repositoryId,
+      input.target.kind,
+      input.target.number,
+      githubTime ?? null,
+      githubTime ?? null,
+    ];
+    const target =
+      "repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND (? IS NULL OR githubTime IS NULL OR githubTime<=?)";
+    const cutoff = this.db
+      .prepare(
+        "SELECT closedAt FROM threadClosures WHERE repositoryId=? AND thread=?",
+      )
+      .get(...scope)?.closedAt;
+    const candidates =
+      cutoff == null
+        ? []
+        : this.db
+            .prepare(
+              `SELECT c.input,c.githubTime,c.receivedAt,t.id,t.eventKey FROM reviewCandidates c JOIN tasks t ON t.id=c.taskId
+          WHERE t.bindingId=? AND t.status='queued' AND (t.githubTime IS NULL OR t.githubTime<=?) AND c.githubTime>? AND json_extract(t.target,'$.kind')=? AND json_extract(t.target,'$.number')=?`,
+            )
+            .all(
+              input.bindingId,
+              cutoff,
+              cutoff,
+              input.target.kind,
+              input.target.number,
+            );
+    // A dispatched task may already have side effects. Record the mismatch on the
+    // newer delivery instead of replaying it; a confirmed publication is preserved.
+    if (cutoff != null)
+      this.db
+        .prepare(
+          `UPDATE deliveries SET reviewFollowUp='reconcile_before_new_review'
+          WHERE reason='review' AND duplicate=1 AND githubTime>? AND taskId IN (
+            SELECT id FROM tasks WHERE repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=?
+            AND (githubTime IS NULL OR githubTime<=?) AND deliveryStatus!='sent')`,
+        )
+        .run(
+          cutoff,
+          input.repositoryId,
+          input.target.kind,
+          input.target.number,
+          cutoff,
+        );
+    this.db
+      .prepare(
+        "UPDATE tasks SET publicationBlocked=1 WHERE deliveryStatus IN ('sending','pending') AND " +
+          target,
+      )
+      .run(...affected);
+    this.db
+      .prepare(
+        "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Thread closed before execution' WHERE status='queued' AND " +
+          target,
+      )
+      .run(...affected);
+    this.db
+      .prepare(
+        "UPDATE tasks SET status='unknown',error='Thread closed during execution; reconcile' WHERE status='running' AND " +
+          target,
+      )
+      .run(...affected);
+    this.db
+      .prepare(
+        "UPDATE tasks SET deliveryStatus='skipped',error='Thread closed before publication' WHERE status IN ('succeeded','failed') AND deliveryStatus='pending' AND " +
+          target,
+      )
+      .run(...affected);
+
+    for (const candidate of candidates) {
+      const fresh = JSON.parse(String(candidate.input)) as NewTask;
+      const next = this.enqueue(
+        fresh,
+        String(candidate.eventKey),
+        Number(candidate.githubTime),
+        Number(candidate.receivedAt),
+      );
+      this.db
+        .prepare(
+          `UPDATE deliveries SET taskId=?,reviewFollowUp=NULL,duplicate=CASE WHEN deliveryId=? THEN 0 ELSE 1 END
+      WHERE taskId=? AND reason='review' AND bindingId=? AND githubTime>?`,
+        )
+        .run(next, fresh.deliveryId, candidate.id!, input.bindingId, cutoff!);
+      this.db
+        .prepare(
+          `UPDATE activities SET data=json_set(data,'$.taskId',?) WHERE cursor IN (SELECT cursor FROM deliveries WHERE taskId=?)`,
+        )
+        .run(next, next);
+    }
   }
   recordRuntime(id: string, event: RuntimeEvent): void {
     const task = this.get(id);

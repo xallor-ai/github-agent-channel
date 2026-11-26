@@ -327,7 +327,7 @@ export class OctokitGitHubClient implements GitHubClient {
       },
     );
   }
-  async reconcileReview(task: Task, id: number) {
+  async reconcileReview(task: Task, id?: number) {
     // Only the authenticated admin resolution route calls this read-only path.
     // A retired binding/actor cannot grant another write, or prevent auditing an old one.
     if (
@@ -336,7 +336,8 @@ export class OctokitGitHubClient implements GitHubClient {
       task.target.kind !== "pull_request" ||
       task.target.revision?.baseRepoId !== task.repositoryId ||
       task.target.revision?.headRepoId !== task.repositoryId ||
-      ![task.installationId, task.repositoryId, id].every(
+      (id !== undefined && (!Number.isSafeInteger(id) || id < 1)) ||
+      ![task.installationId, task.repositoryId].every(
         (n) => Number.isSafeInteger(n) && n > 0,
       )
     )
