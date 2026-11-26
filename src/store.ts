@@ -259,11 +259,15 @@ export class TaskStore {
       )
         throw new StaleBinding("Binding changed before acceptance");
       const scope = [input.repositoryId, threadKey(input.target)];
-      const match =
+      const canAnswer =
         binding.responsibleAgent?.type === "openclaw" &&
-        (reason === "observed" || reason === "mention")
-          ? this.questions.match(input, githubTime, reason === "observed")
-          : undefined;
+        input.source.event === "issue_comment" &&
+        input.source.action === "created" &&
+        (reason === "observed" || reason === "mention");
+      if (canAnswer) this.expireQueuedAnswers(Date.now(), input);
+      const match = canAnswer
+        ? this.questions.match(input, githubTime, reason === "observed")
+        : undefined;
       if (match) {
         reason = match.reason;
         execute =
@@ -500,31 +504,39 @@ export class TaskStore {
   }
   private expireInTransaction(now: number): void {
     this.questions.expireCandidates(now);
-    // Only queued answers have positive evidence of non-dispatch. An expired
-    // running lease below remains unknown and must not reopen its question.
-    const expiredAnswers = this.db
-      .prepare(
-        "SELECT t.id,t.createdAt FROM tasks t JOIN clarifications q ON q.answerTaskId=t.id WHERE t.status='queued' AND t.createdAt<=?",
-      )
-      .all(now - QUEUE_MAX_AGE_MS);
+    this.expireQueuedAnswers(now);
     this.db
       .prepare(
         `UPDATE tasks SET status='rejected', deliveryStatus='skipped', error='Queue deadline expired before execution'
       WHERE status='queued' AND createdAt<=?`,
       )
       .run(now - QUEUE_MAX_AGE_MS);
-    for (const row of expiredAnswers)
-      this.questions.undelivered(
-        String(row.id),
-        false,
-        Number(row.createdAt) + QUEUE_MAX_AGE_MS,
-      );
     this.db
       .prepare(
         `UPDATE tasks SET status='unknown', error='Connector lease expired; reconcile execution'
       WHERE status='running' AND id IN (SELECT taskId FROM assignments WHERE expiresAt<=?)`,
       )
       .run(now);
+  }
+  // Evaluate the deadline before matching a new comment, not only on the next
+  // device poll. Caller holds the write transaction through admission.
+  private expireQueuedAnswers(now: number, scope?: NewTask): void {
+    const args = scope
+      ? [scope.bindingId, threadKey(scope.target), scope.actorId]
+      : [];
+    const expired = this.db
+      .prepare(
+        "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Queue deadline expired before execution' WHERE status='queued' AND createdAt<=? AND id IN (SELECT answerTaskId FROM clarifications WHERE answerTaskId IS NOT NULL" +
+          (scope ? " AND bindingId=? AND thread=? AND actorId=?" : "") +
+          ") RETURNING id,createdAt",
+      )
+      .all(now - QUEUE_MAX_AGE_MS, ...args);
+    for (const row of expired)
+      this.questions.undelivered(
+        String(row.id),
+        false,
+        Number(row.createdAt) + QUEUE_MAX_AGE_MS,
+      );
   }
   claimAssignment(
     workerId: string,

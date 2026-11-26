@@ -232,6 +232,33 @@ test("offline queue expiry preserves the unstarted answer and accepts a new repl
     clock.mock.restore();
   }
 });
+test("a new signed answer after the queue deadline can arrive before the first expiry tick or device claim", (t) => {
+  const f = fixture(t),
+    q = f.request("Inspect");
+  f.ask(q, "Which browser?");
+  const input = f.comment("Original answer"),
+    original = f.receive(input).taskId!;
+  const later = Date.now() + 25 * 3600000;
+  t.mock.method(Date, "now", () => later);
+  f.restart();
+  assert.equal(f.store.get(original)?.status, "queued");
+  const update = f.receive(f.comment("/answer " + q + " Firefox"), later);
+  assert.equal(update.reason, "clarification_reply");
+  assert.ok(update.taskId && update.taskId !== original);
+  assert.equal(f.store.get(original)?.status, "rejected");
+  assert.equal(
+    f.store.conversation(original)?.turns[0].lastUndeliveredTaskId,
+    original,
+  );
+  assert.equal(
+    f.receive({ ...input, deliveryId: "old-duplicate" }).taskId,
+    original,
+  );
+  assert.equal(
+    f.store.claimAssignment("worker", "fresh", later + 60000)?.id,
+    update.taskId,
+  );
+});
 test("expired or retired questions cannot start a new run", (t) => {
   const f = fixture(t),
     a = f.request("alpha");
