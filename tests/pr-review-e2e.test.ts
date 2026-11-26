@@ -269,6 +269,7 @@ async function fixture(
     );
   };
   return {
+    github,
     store,
     post,
     pr,
@@ -429,4 +430,43 @@ test("only the dedicated grant route releases a credential and never after the a
     if (expire) assert.doesNotMatch(await res.text(), /synthetic-installation/);
     else assert.equal((await res.json()).token, "synthetic-installation");
   }
+});
+
+test("an accepted automatic review without patches delivers one failure notice, not a Review", async (t) => {
+  const f = await fixture(t);
+  t.mock.method(f.github, "readPullDiff", async () => ({
+    untrusted: true,
+    revision: revision(h1),
+    changedFiles: 1,
+    files: [],
+    limitations: ["Patch unavailable"],
+  }));
+  const notices: string[] = [];
+  t.mock.method(f.github, "publishComment", async (_task, body: string) => {
+    notices.push(body);
+    return {
+      id: 17,
+      url: "https://github.com/org/repo/pull/7#issuecomment-17",
+    };
+  });
+  const started = await f.pr("opened", h1);
+  let calls = 0;
+  const agent = f.agentWith(async () => {
+    calls++;
+    throw Error("No model expected");
+  });
+  assert.equal(await agent.once(), true);
+  assert.equal(await f.publisher.tick(), true);
+  assert.equal(await f.publisher.tick(), false);
+  const task = f.store.get(started.taskId)!;
+  assert.equal(calls, 0);
+  assert.equal(task.status, "failed");
+  assert.match(task.error!, /review_diff_unavailable/);
+  assert.equal(task.outcome, null);
+  assert.equal(task.deliveryStatus, "sent");
+  assert.equal(task.publicationReceipt?.kind, "comment");
+  assert.equal(f.reviews.length, 0);
+  assert.equal(notices.length, 1);
+  assert.ok(notices[0].includes(h1));
+  assert.match(notices[0], /代码评审未完成/);
 });

@@ -690,3 +690,50 @@ test("PR output preserves scope at the presentation limit and rejects oversized 
     code: "runtime_response_invalid",
   });
 });
+
+test("automatic review without any pinned patch cannot turn PR prose into a clean verdict", async () => {
+  let models = 0;
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    models++;
+    return Response.json(summary);
+  });
+  const auto = {
+    ...pr,
+    prompt: "Old version deadbeef: all checks passed",
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  for (const files of [
+    [],
+    [{ ...diff.files[0], patch: undefined, patchStatus: "unavailable" }],
+  ]) {
+    await assert.rejects(
+      c.run(auto, async () => ({
+        ...diff,
+        files,
+        limitations: ["No usable patch"],
+      })),
+      { code: "review_diff_unavailable" },
+    );
+  }
+  assert.equal(models, 0);
+  const answer = await c.run(pr, async () => ({
+    ...diff,
+    files: [],
+    limitations: ["No usable patch"],
+  }));
+  assert.equal(answer.publication.kind, "comment");
+  assert.equal(models, 1);
+});
+
+test("automatic review with verified empty comparison reports scope without a model verdict", async () => {
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    throw Error("unexpected model call");
+  });
+  const result = await c.run(
+    { ...pr, source: { event: "pull_request", action: "opened" } },
+    async () => ({ ...diff, changedFiles: 0, files: [] }),
+  );
+  assert.match(result.text, /未执行代码评审/);
+  assert.ok(result.text.includes(revision.headSha));
+  assert.equal(result.publication.kind, "comment");
+});

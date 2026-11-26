@@ -37,7 +37,11 @@ export class DeliveryWorker {
             throw new AccessDenied("No failure notice requested");
           const result = await this.github.publishComment(
             delivery,
-            `本次任务未生成可发布的分析。原因：\`${code}\`。维护者可按任务 ID ${delivery.id} 查看执行记录。`,
+            code === "review_diff_unavailable" &&
+              delivery.target.kind === "pull_request" &&
+              delivery.target.revision
+              ? `代码评审未完成：没有取得本次提交的可用差异。base ${delivery.target.revision.baseSha}，head ${delivery.target.revision.headSha}。本通知不是评审结论。任务 ID：${delivery.id}`
+              : `本次任务未生成可发布的分析。原因：\`${code}\`。维护者可按任务 ID ${delivery.id} 查看执行记录。`,
           );
           this.store.markDelivery(delivery.id, "sent", {
             kind: "comment",

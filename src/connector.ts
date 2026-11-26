@@ -196,6 +196,33 @@ export class OpenClawConnector implements RuntimeConnector {
           Buffer.byteLength(JSON.stringify(evidence)) > 80 * 1024
         )
           throw Error("PR diff does not match the assigned revision or limits");
+        // Automatic review is about the signed event's revision. PR prose is not a patch.
+        if (
+          task.source.event === "pull_request" &&
+          (task.source.action === "opened" ||
+            task.source.action === "synchronize")
+        ) {
+          combined.throwIfAborted();
+          if (evidence.changedFiles === 0 && !evidence.limitations.length) {
+            return {
+              text: `固定版本 ${pin.baseSha} → ${pin.headSha} 的差异中没有变更文件。未执行代码评审；未验证 CI 或合并条件。`,
+              artifacts: [],
+              publication: {
+                kind: task.reviewPolicy?.nativeReview ? "review" : "comment",
+              },
+            };
+          }
+          if (
+            !evidence.files.some(
+              (file) =>
+                file.patchStatus !== "unavailable" && file.patch?.trim(),
+            )
+          )
+            throw new RuntimeFailure(
+              "review_diff_unavailable",
+              "No pinned patch available for automatic code review",
+            );
+        }
         if (task.reviewPolicy?.deepReview === true) {
           await access();
           if (!this.prepareReview)
@@ -443,6 +470,7 @@ export class OpenClawConnector implements RuntimeConnector {
             "/" +
             evidence.changedFiles +
             " changed files supplied" +
+            `; patches complete: ${evidence.files.filter((f) => f.patchStatus === "provided" && f.patch?.trim()).length}/${evidence.changedFiles} (input coverage, not a review verdict)` +
             limitations +
             reads +
             ".";

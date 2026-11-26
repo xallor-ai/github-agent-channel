@@ -39,3 +39,5 @@ PR 的单文件补读从固定提交逐层遍历 Git 树（最多 24 段），�
 **真实只读探针（2026-11-25）：** 对公开的 [PR #19](https://github.com/xallor-ai/github-agent-channel/pull/19)，通过 GitHub API 读取固定 base `1e56df7` / head `45b848d` 的差异（16/16 文件）；3.183 的真实 OpenClaw 收到适配器自动提供的材料，返回 `src/runtime-failure.ts` 中的一行新增代码，与实际 patch 逐字核对通过。探针 `e297022a-057f-43b0-8822-431f6ee3575d` 未写 GitHub，未使用生产任务队列；不计作原生 Review、深评或 H1/H2 真实闭环。
 
 同一公开 PR 的深评探针 `ec8c8acb-7373-4671-9d5f-34ea123e38a6` 使用 3.183 真实 OpenClaw 和只读 bare Git 对象库。没有在提示里提供文件名；模型搜索两次、打开一个文件，找到本版未改动的 `tests/github-publication.test.ts`，引用源码与固定 head 的 blob 一致。其中一次搜索达到结果上限，已在输出中标记。本探针使用隔离的工具授权回执，没有验证生产绑定、Webhook 收件或外部发布。
+
+**自动评审的材料门槛（#24）。** opened/synchronize 没有取得任何可用固定版本 patch 时，连接器不调用模型，不以正文代替差异；记录 `review_diff_unavailable`，在仍获授权的开放 PR 发布带 base/head 的未完成通知。若确认比较为空，单列“没有变更文件”，不宣称 CI 通过。仍有部分补丁时，列出材料覆盖；评论提问可使用其他线程材料，不能以此证明已审查代码。上线后仍须真实 H1/H2 验收。
