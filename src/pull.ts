@@ -56,6 +56,28 @@ function classifyReadFailure(error: unknown): ToolFailureCode {
   if (error instanceof AccessDenied) return "scope";
   if (error instanceof z.ZodError || error instanceof SyntaxError)
     return "invalid_evidence";
+  // Octokit can surface an HTTP 200 GraphQL response as an error. Inspect
+  // only bounded, structured types; a mixed response has no single cause.
+  if (
+    error instanceof Error &&
+    error.name === "GraphqlResponseError" &&
+    "errors" in error
+  ) {
+    const causes: unknown = error.errors;
+    if (
+      Array.isArray(causes) &&
+      causes.length > 0 &&
+      causes.length <= 16 &&
+      causes.every(
+        (v: unknown) =>
+          v !== null &&
+          typeof v === "object" &&
+          "type" in v &&
+          (v.type === "FORBIDDEN" || v.type === "NOT_FOUND"),
+      )
+    )
+      return "github_permission_or_resource";
+  }
   const status =
     error && typeof error === "object" && "status" in error
       ? error.status

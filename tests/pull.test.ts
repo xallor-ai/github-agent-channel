@@ -438,6 +438,22 @@ test("cloud tool audit classifies admitted failures without recording arguments 
     [invalid.error, "invalid_evidence", 503],
     [new SyntaxError("private-body"), "invalid_evidence", 503],
     [
+      Object.assign(Error("private-body"), {
+        name: "GraphqlResponseError",
+        errors: [{ type: "FORBIDDEN", message: "private-actor" }],
+      }),
+      "github_permission_or_resource",
+      503,
+    ],
+    [
+      Object.assign(Error("private-body"), {
+        name: "GraphqlResponseError",
+        errors: [{ type: "NOT_FOUND" }, { type: "something_unknown" }],
+      }),
+      "unknown",
+      503,
+    ],
+    [
       Object.assign(Error("private-token"), { status: 502 }),
       "upstream_unavailable",
       503,
