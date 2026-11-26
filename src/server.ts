@@ -12,6 +12,8 @@ import type {
 } from "./contracts.js";
 import { StaleBinding, TaskStore } from "./store.js";
 import { normalizeWebhook } from "./webhook.js";
+import { AccessDenied } from "./contracts.js";
+import { assessMerge } from "./merge-assessment.js";
 function authorized(header: string | undefined, token: string) {
   const a = Buffer.from(header ?? "");
   const b = Buffer.from(`Bearer ${token}`);
@@ -38,6 +40,7 @@ export function createChannelServer(
   },
   lookup: BindingLookup = store.activeBinding.bind(store),
   reconcileReview?: GitHubClient["reconcileReview"],
+  readMergeFacts?: GitHubClient["readMergeFacts"],
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -125,13 +128,39 @@ export function createChannelServer(
         } else send(200, receipt);
         return;
       }
-      if (path.startsWith("/tasks/")) {
+      const byComment =
+        /^\/repositories\/([1-9]\d{0,15})\/comments\/([1-9]\d{0,15})\/task$/.exec(
+          path,
+        );
+      if (byComment || path.startsWith("/tasks/")) {
         if (!authorized(req.headers.authorization, adminToken)) {
           send(401, { error: "Unauthorized" });
           return;
         }
+        if (byComment) {
+          const repo = Number(byComment[1]),
+            comment = Number(byComment[2]);
+          const task =
+            req.method === "GET" &&
+            Number.isSafeInteger(repo) &&
+            Number.isSafeInteger(comment) &&
+            store.taskForComment(repo, comment);
+          if (!task) send(404, { error: "Not found" });
+          else
+            send(200, {
+              id: task.id,
+              target: task.target,
+              source: task.source,
+              runtime: task.runtime,
+              status: task.status,
+              deliveryStatus: task.deliveryStatus,
+              publicationReceipt: task.publicationReceipt,
+              toolAudit: store.toolAudit(task.id),
+            });
+          return;
+        }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/lookup-review)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/lookup-review|\/merge-facts)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -146,6 +175,26 @@ export function createChannelServer(
           send(200, { activities: store.recentThread(task) });
           return;
         }
+        if (req.method === "GET" && match[2] === "/merge-facts") {
+          if (task.target.kind !== "pull_request" || !task.target.revision) {
+            send(409, { error: "No pinned pull request" });
+          } else if (!readMergeFacts) {
+            send(503, { error: "Merge facts unavailable" });
+          } else
+            try {
+              const facts = await readMergeFacts(task);
+              send(200, {
+                source: "current_readback",
+                facts,
+                assessment: assessMerge(facts),
+              });
+            } catch (error) {
+              if (error instanceof AccessDenied)
+                send(403, { error: "Task authorization denied" });
+              else send(503, { error: "Merge facts unavailable" });
+            }
+          return;
+        }
         if (req.method === "GET" && !match[2]) {
           send(200, {
             id: task.id,
@@ -156,6 +205,7 @@ export function createChannelServer(
             target: task.target,
             source: task.source,
             runtime: task.runtime,
+            toolAudit: store.toolAudit(task.id),
             outcome: task.outcome,
           });
           return;

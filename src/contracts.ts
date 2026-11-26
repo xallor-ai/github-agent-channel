@@ -1,3 +1,7 @@
+import type { MergeFacts } from "./merge-assessment.js";
+import type { runtimeEventSchema } from "./outcomes.js";
+import type { z } from "zod";
+
 export type TaskState =
   | "queued"
   | "running"
@@ -118,7 +122,7 @@ export type PublicationRequest =
       baseSha: string;
       files: ChangedFile[];
     };
-export type RuntimeEvent = { kind: "started"; runId: string; provider: string };
+export type RuntimeEvent = z.infer<typeof runtimeEventSchema>;
 export type PublicationReceipt = {
   kind: "comment" | "pull_request" | "review";
   id?: number;
@@ -161,6 +165,7 @@ export interface GitHubClient {
   authorize(task: Task): Promise<void>;
   resolvePullRevision?(task: Task): Promise<PullRevision>;
   readPullDiff?(task: Task): Promise<unknown>;
+  readMergeFacts?(task: Task): Promise<MergeFacts>;
   issueSourceGrant?(
     task: Task,
     checkAssignment: () => void,

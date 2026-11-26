@@ -28,6 +28,11 @@ import type { RuntimeProfile } from "./runtime-profile.js";
 import type { WebhookDecision, ThreadClosure } from "./webhook.js";
 import { BindingRegistry, effectiveEvents } from "./binding-registry.js";
 import { initializeTaskSchema } from "./store-schema.js";
+import {
+  ToolAuditStore,
+  type CloudToolName,
+  type ToolPhase,
+} from "./tool-audit.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 
 // Prior failed tasks also used pending. Only explicitly diagnosed model failures may enqueue a notice.
@@ -51,6 +56,7 @@ export class InvalidAssignmentOutcome extends Error {}
 export class TaskStore {
   private readonly db: DatabaseSync;
   private readonly ledger: ActivityLedger;
+  private readonly audit: ToolAuditStore;
   readonly registry: BindingRegistry;
   private closed = false;
   constructor(dbPath: string) {
@@ -60,6 +66,9 @@ export class TaskStore {
       initializeTaskSchema(this.db);
       this.ledger = new ActivityLedger(this.db);
       this.registry = new BindingRegistry(this.db);
+      this.audit = new ToolAuditStore(
+        dbPath === ":memory:" ? dbPath : dbPath + ".tool-audit.sqlite",
+      );
     } catch (error) {
       this.db.close();
       throw error;
@@ -94,6 +103,27 @@ export class TaskStore {
   get(id: string): Task | undefined {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id=?").get(id);
     return row ? this.decodeTask(row) : undefined;
+  }
+  taskForComment(repositoryId: number, commentId: number): Task | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE repositoryId=? AND json_extract(source,'$.event')='issue_comment' AND json_extract(source,'$.commentId')=? ORDER BY createdAt DESC,rowid DESC LIMIT 1",
+      )
+      .get(repositoryId, commentId);
+    return row ? this.decodeTask(row) : undefined;
+  }
+  recordToolCall(id: string, name: CloudToolName, phase: ToolPhase): void {
+    if (
+      phase === "requested" &&
+      !this.db
+        .prepare("SELECT 1 FROM tasks WHERE id=? AND status='running'")
+        .get(id)
+    )
+      throw new AssignmentConflict("No active task for tool audit");
+    this.audit.record(id, name, phase);
+  }
+  toolAudit(id: string) {
+    return this.audit.rows(id);
   }
   private decodeTask(row: Record<string, unknown>): Task {
     const {
@@ -682,6 +712,7 @@ export class TaskStore {
   }
   close(): void {
     if (!this.closed) {
+      this.audit.close();
       this.db.close();
       this.closed = true;
     }

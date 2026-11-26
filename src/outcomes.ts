@@ -6,6 +6,17 @@ export const runtimeEventSchema = z.strictObject({
   kind: z.literal("started"),
   provider: z.string().min(1).max(100),
   runId: z.string().min(1).max(1024),
+  bridgeBuildSha: z
+    .string()
+    .regex(/^[a-f0-9]{40}$/)
+    .optional(),
+  modelTools: z
+    .array(
+      z.enum(["read_issue", "read_file", "read_merge_facts", "search_repo"]),
+    )
+    .max(4)
+    .refine((tools) => new Set(tools).size === tools.length)
+    .optional(),
 });
 export const publicationReceiptSchema = z.strictObject({
   kind: z.enum(["comment", "pull_request", "review"]),

@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { buildRevision } from "./build-revision.js";
 import { RuntimeFailure } from "./runtime-failure.js";
 import { dirname, join } from "node:path";
 import { OpenClawConnector } from "./connector.js";
@@ -245,10 +246,13 @@ export class Agent {
           assignment.task,
           async (name, args) => {
             if (
+              (name === "read_merge_facts" &&
+                assignment.task.target.kind !== "pull_request") ||
               ![
                 "read_issue",
                 "read_file",
                 "read_pull_diff",
+                "read_merge_facts",
                 "review_access",
               ].includes(name)
             )
@@ -276,7 +280,14 @@ export class Agent {
           },
           combined,
           async (event) => {
-            const validated = runtimeEventSchema.parse(event);
+            // A runtime cannot supply the deployed bridge version. Accept only a
+            // full commit SHA configured by the deployment; never log raw env.
+            const { bridgeBuildSha: _ignored, ...handle } = event;
+            const build = buildRevision();
+            const validated = runtimeEventSchema.parse({
+              ...handle,
+              ...(build ? { bridgeBuildSha: build } : {}),
+            });
             this.store.recordRuntime(assignment.task.id, validated);
             const receipt = await this.post(
               "/connector/v2/tasks/" + assignment.task.id + "/execution",

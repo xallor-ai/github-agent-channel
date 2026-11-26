@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
+import { cloudToolNames } from "./tool-audit.js";
 import { z } from "zod";
 import {
   AccessDenied,
@@ -21,7 +22,7 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const leaseSchema = z.string().min(32).max(256);
 const toolSchema = z.strictObject({
   leaseToken: leaseSchema,
-  name: z.enum(["read_issue", "read_file", "read_pull_diff", "review_access"]),
+  name: z.enum(cloudToolNames),
   args: z.unknown(),
 });
 const resultSchema = z.discriminatedUnion("status", [
@@ -269,29 +270,50 @@ export class PullCoordinator {
                 .strictObject({ path: z.string().min(1).max(1024) })
                 .parse(data.args);
         const task = this.assignment(id, data.leaseToken, workerId);
-        await this.github.authorize(task);
-        this.assignment(id, data.leaseToken, workerId);
+        this.store.recordToolCall(id, data.name, "requested");
         let output: unknown;
-        if (data.name === "read_file")
-          output = await this.github.readFile(
-            task,
-            (args as { path: string }).path,
-          );
-        else if (data.name === "read_issue") {
-          if (task.target.kind === "repository")
-            throw new AccessDenied("No issue scope");
-          output = await this.github.readIssue(task);
-        } else {
-          if (task.target.kind !== "pull_request" || !task.target.revision)
-            throw new AccessDenied("No pinned PR");
-          if (data.name === "read_pull_diff" && this.github.readPullDiff)
-            output = await this.github.readPullDiff(task);
-          else if (data.name === "review_access") {
-            this.checkReviewAccess(task, workerId, credential);
-            output = { authorized: true };
-          } else throw new AccessDenied("Review capability not enabled");
+        try {
+          // The merge reader checks the binding, manager and actor before and after its read.
+          // Generic execution authorization also requires an open, unchanged target, which
+          // would hide exactly the terminal/drift facts this read is meant to report.
+          if (data.name !== "read_merge_facts")
+            await this.github.authorize(task);
+          this.assignment(id, data.leaseToken, workerId);
+          if (data.name === "read_file")
+            output = await this.github.readFile(
+              task,
+              (args as { path: string }).path,
+            );
+          else if (data.name === "read_issue") {
+            if (task.target.kind === "repository")
+              throw new AccessDenied("No issue scope");
+            output = await this.github.readIssue(task);
+          } else {
+            if (task.target.kind !== "pull_request" || !task.target.revision)
+              throw new AccessDenied("No pinned PR");
+            if (data.name === "read_pull_diff" && this.github.readPullDiff)
+              output = await this.github.readPullDiff(task);
+            else if (
+              data.name === "read_merge_facts" &&
+              this.github.readMergeFacts
+            )
+              output = await this.github.readMergeFacts(task);
+            else if (data.name === "review_access") {
+              this.checkReviewAccess(task, workerId, credential);
+              output = { authorized: true };
+            } else throw new AccessDenied("Review capability not enabled");
+          }
+          this.assignment(id, data.leaseToken, workerId);
+          if (
+            !credential ||
+            this.authenticate(credential)?.deviceId !== workerId
+          )
+            throw new AccessDenied("Device no longer authorized");
+        } catch (error) {
+          this.store.recordToolCall(id, data.name, "failed");
+          throw error;
         }
-        this.assignment(id, data.leaseToken, workerId);
+        this.store.recordToolCall(id, data.name, "succeeded");
         send(200, output);
         return true;
       }

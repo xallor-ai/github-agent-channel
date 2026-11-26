@@ -12,6 +12,7 @@ import { Agent } from "../src/agent.js";
 import { AgentStore } from "../src/agent-store.js";
 import type { AgentConfig } from "../src/agent-config.js";
 import type { Task, RuntimeResult } from "../src/contracts.js";
+import { buildRevision } from "../src/build-revision.js";
 
 const task: Task = {
   id: "a0000000-0000-4000-8000-000000000001",
@@ -100,6 +101,20 @@ const respond = (res: any, value: unknown) => {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify(value));
 };
+test("build revision accepts only a full SHA and never exposes arbitrary environment text", () => {
+  const previous = process.env.CHANNEL_BUILD_SHA;
+  try {
+    process.env.CHANNEL_BUILD_SHA = "a".repeat(40);
+    assert.equal(buildRevision(), "a".repeat(40));
+    process.env.CHANNEL_BUILD_SHA = "latest";
+    assert.equal(buildRevision(), null);
+    delete process.env.CHANNEL_BUILD_SHA;
+    assert.equal(buildRevision(), null);
+  } finally {
+    if (previous === undefined) delete process.env.CHANNEL_BUILD_SHA;
+    else process.env.CHANNEL_BUILD_SHA = previous;
+  }
+});
 
 test("lost result acknowledgement retries identical payload and never reruns model", async (t) => {
   const received: any[] = [];
@@ -443,6 +458,9 @@ test("runtime cannot request a repository grant through its tool invoker", async
         await assert.rejects(invoke("read_source_grant", {}), {
           code: "tool_call_invalid",
         });
+        await assert.rejects(invoke("read_merge_facts", {}), {
+          code: "tool_call_invalid",
+        });
         return outcome("summary");
       },
     },
@@ -453,6 +471,83 @@ test("runtime cannot request a repository grant through its tool invoker", async
     paths.map((p) => p.split("/").pop()),
     ["claim", "result"],
   );
+});
+test("a failed merge query records its deployed bridge SHA and empty model tool list before the authorized read", async (t) => {
+  const previous = process.env.CHANNEL_BUILD_SHA;
+  process.env.CHANNEL_BUILD_SHA = "A".repeat(40);
+  t.after(() => {
+    if (previous === undefined) delete process.env.CHANNEL_BUILD_SHA;
+    else process.env.CHANNEL_BUILD_SHA = previous;
+  });
+  const actions: string[] = [];
+  const expected = {
+    kind: "started",
+    provider: "channel-merge-assessment",
+    runId: "github-channel:" + task.id,
+    bridgeBuildSha: "a".repeat(40),
+    modelTools: [],
+  };
+  const f = await fixture(t, (path, body, res) => {
+    actions.push(path.split("/").pop()!);
+    if (path.endsWith("/claim"))
+      return respond(res, {
+        ...assignment(),
+        task: {
+          ...task,
+          prompt: "@bot /merge-status",
+          threadContext: [],
+          reviewPolicy: { deepReview: false, nativeReview: false },
+          target: {
+            kind: "pull_request",
+            number: 1,
+            revision: {
+              baseRepoId: 2,
+              headRepoId: 2,
+              baseSha: "1".repeat(40),
+              headSha: "2".repeat(40),
+            },
+          },
+        },
+      });
+    if (path.endsWith("/execution")) {
+      assert.deepEqual(body.event, expected);
+      return respond(res, { accepted: true });
+    }
+    if (path.endsWith("/tool")) {
+      assert.deepEqual(body, {
+        leaseToken: "lease-value",
+        name: "read_merge_facts",
+        args: {},
+      });
+      res.writeHead(403);
+      return res.end();
+    }
+    assert.equal(body.status, "failed");
+    assert.equal(body.failure, "tool_call_failed");
+    respond(res, { accepted: true, duplicate: false });
+  });
+  const cfg = config(f.base);
+  assert.ok(cfg.runtime.type === "openclaw");
+  const agent = new Agent(
+    cfg,
+    f.store(),
+    new OpenClawConnector(cfg.runtime, "model-token", async () => {
+      throw Error("unexpected dispatch");
+    }),
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.deepEqual(actions, ["claim", "execution", "tool", "result"]);
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  try {
+    const row = db
+      .prepare("SELECT runtime, phase FROM journal WHERE id=?")
+      .get(task.id);
+    assert.equal(row?.phase, "reported");
+    assert.deepEqual(JSON.parse(String(row.runtime)), expected);
+  } finally {
+    db.close();
+  }
 });
 test("pinned review grants stay in the cache preparer, outside model requests, journal and results", async (t) => {
   const token = "installation-read-fixture";
@@ -499,7 +594,15 @@ test("pinned review grants stay in the cache preparer, outside model requests, j
       assert.equal(body.name, "review_access");
       return respond(res, { authorized: true });
     }
-    if (path.endsWith("/execution")) return respond(res, { accepted: true });
+    if (path.endsWith("/execution")) {
+      assert.deepEqual(body.event.modelTools, [
+        "read_issue",
+        "read_file",
+        "read_merge_facts",
+        "search_repo",
+      ]);
+      return respond(res, { accepted: true });
+    }
     reports.push(body);
     respond(res, { accepted: true, duplicate: false });
   });

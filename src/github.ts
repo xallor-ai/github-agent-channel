@@ -1,3 +1,4 @@
+import { boundedMergeFetch, collectMergeFacts } from "./github-merge-facts.js";
 import { z } from "zod";
 import { readPinnedPullFile } from "./github-pinned-file.js";
 import { publishNativeReview, reconcileNativeReview } from "./github-review.js";
@@ -49,10 +50,11 @@ export class OctokitGitHubClient implements GitHubClient {
       }),
     });
   }
-  #binding(task: Task) {
+  #binding(task: Task, evidenceRead = false) {
     const found = this.lookup(task.installationId, task.repositoryId);
     if (
-      ((task.status === "succeeded" || task.status === "failed") &&
+      (!evidenceRead &&
+        (task.status === "succeeded" || task.status === "failed") &&
         !this.publicationAllowed(task.id)) ||
       !found?.enabled ||
       found.id !== task.bindingId ||
@@ -80,7 +82,11 @@ export class OctokitGitHubClient implements GitHubClient {
       pull_requests: "read" | "write";
       contents?: "read" | "write";
       issues?: "write";
+      administration?: "read";
+      checks?: "read";
+      statuses?: "read";
     },
+    evidenceRead = false,
   ): Promise<Octokit> {
     const installation = await this.#app.getInstallationOctokit(
       task.installationId,
@@ -94,14 +100,27 @@ export class OctokitGitHubClient implements GitHubClient {
     })) as { token: string };
     return new Octokit({
       auth: auth.token,
-      request: { fetch: this.#fetch, timeout: 30000 },
+      request: {
+        fetch: evidenceRead ? boundedMergeFetch(this.#fetch) : this.#fetch,
+        timeout: 30000,
+      },
       log: { debug() {}, info() {}, warn() {}, error() {} },
     });
   }
-  async #authorized(task: Task): Promise<Octokit> {
-    this.#binding(task);
+  async #authorized(task: Task, evidenceRead = false): Promise<Octokit> {
+    this.#binding(task, evidenceRead);
     await this.verifyManager(task);
-    const client = await this.#client(task);
+    const client = evidenceRead
+      ? await this.#installationClient(
+          task,
+          {
+            metadata: "read",
+            contents: "read",
+            pull_requests: "read",
+          },
+          true,
+        )
+      : await this.#client(task);
     const { data: repo } = await client.request("GET /repos/{owner}/{repo}", {
       owner: task.owner,
       repo: task.repo,
@@ -122,7 +141,7 @@ export class OctokitGitHubClient implements GitHubClient {
       !["admin", "maintain", "write"].includes(data.permission)
     )
       throw new AccessDenied("Actor is not authorized");
-    this.#binding(task);
+    this.#binding(task, evidenceRead);
     return client;
   }
   async #checkedClient(task: Task) {
@@ -156,6 +175,26 @@ export class OctokitGitHubClient implements GitHubClient {
   }
   async authorize(task: Task): Promise<void> {
     await this.#checkedClient(task);
+  }
+  async readMergeFacts(task: Task) {
+    const client = await this.#authorized(task, true);
+    const facts = await collectMergeFacts(client, task, (purpose) => {
+      this.#binding(task, true);
+      return this.#installationClient(
+        task,
+        {
+          metadata: "read",
+          contents: "read",
+          pull_requests: "read",
+          ...(purpose === "classic"
+            ? ({ administration: "read" } as const)
+            : ({ checks: "read", statuses: "read" } as const)),
+        },
+        true,
+      );
+    });
+    await this.#authorized(task, true);
+    return facts;
   }
   async readPullDiff(task: Task) {
     const client = await this.#authorized(task);

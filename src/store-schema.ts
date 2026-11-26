@@ -174,3 +174,35 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX assignment_worker ON assignments(workerId);
     PRAGMA user_version=5; COMMIT;`);
 }
+
+// The task database rejects extra tables; keep the cloud tool ledger independent
+// and verify its exact layout before writing to an existing file.
+export function initializeToolAuditSchema(db: DatabaseSync) {
+  const layout =
+    "CREATE TABLE toolAudit(taskId TEXT NOT NULL,name TEXT NOT NULL,requested INTEGER NOT NULL,succeeded INTEGER NOT NULL,failed INTEGER NOT NULL,firstRequestedAt INTEGER NOT NULL,lastRequestedAt INTEGER NOT NULL,lastSucceededAt INTEGER,lastFailedAt INTEGER,buildSha TEXT,PRIMARY KEY(taskId,name)) STRICT";
+  db.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
+  try {
+    const objects = db
+      .prepare("SELECT sql FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")
+      .all();
+    const version = db.prepare("PRAGMA user_version").get()?.user_version;
+    const app = db.prepare("PRAGMA application_id").get()?.application_id;
+    if (!objects.length && version === 0 && app === 0) {
+      db.exec(layout);
+      db.exec("PRAGMA user_version=1");
+    } else if (
+      version !== 1 ||
+      app !== 0 ||
+      objects.length !== 1 ||
+      objects[0].sql !== layout
+    ) {
+      throw new StorageSchemaError(
+        "Incompatible tool audit database; existing data left intact.",
+      );
+    }
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+}

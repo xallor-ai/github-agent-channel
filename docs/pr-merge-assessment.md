@@ -1,6 +1,14 @@
 # 回答“这个 PR 能合吗”
 
-**规划规格（C3/C6/C7/C8、W3/W4）。** 对应 [#23](https://github.com/xallor-ai/github-agent-channel/issues/23)。这是针对原 PR 的只读判断，不发起合并、不绕过保护，不把普通评论升级为批准。状态查询可描述已关闭目标；不得因此在已关闭的旧 PR 上重新开工或发布。
+**维护者使用说明与验收规格（C3/C6/C7/C8、W3/W4）。** 对应 [#23](https://github.com/xallor-ai/github-agent-channel/issues/23)。这是针对原 PR 的只读判断，不发起合并、不绕过保护，不把普通评论升级为批准。状态查询可描述已关闭目标；不得因此在已关闭的旧 PR 上重新开工或发布。
+
+## 如何查询
+
+在已绑定、仍开放的同仓 PR 上评论 `@<bot> /merge-status`。OpenClaw 连接器识别该指令和部分直接提问（如“这个 PR 能合吗？”），调用无参数的 `read_merge_facts`，直接生成三项结论：PR 是否已合并、平台条件是否满足、工程上是否建议合并。该路径不调用模型，不生成批准或原生 Review。其他 PR 分析可以由模型请求同一只读工具；Issue 和仓库任务不能指定别的 PR 调用它。
+
+云端从已授权任务读取两端仓库、PR 号和 SHA，取证前后重查当前绑定与发起人权限。检查名称和来源来自[适用于目标分支的活动 ruleset](https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch)及[传统分支保护](https://docs.github.com/en/graphql/reference/branches#branchprotectionrule)，审核决定和冲突状态直接读取 [GitHub PR](https://docs.github.com/en/graphql/reference/pulls#pullrequest)。候选测试合并提交的结果与 head 分开；队列条目只能证明已入队，不能证明队列生成的新候选已通过。若要求的部署、签名或其他规则未逐项核实，报告缺项。提交者自己的合并权限和工程验收均不由此推断。
+
+普通任务无需新增权限。查询传统保护时使用仓库限定的可选 `Administration: read`；读取检查与提交状态时使用 `Checks: read` 和 `Commit statuses: read`。某项权限不可用只影响对应证据。每个提交最多读取 100 个检查上下文，单次响应最大 512 KiB；超限按不完整处理。显式合并查询只对仍开放、快照稳定的目标请求普通回帖；是否已发布以独立的 GitHub 回执为准。
 
 ## 给维护者的答案
 
@@ -42,3 +50,22 @@
 | 采集中 H1→H2，或 base 推进 | 旧事实留作历史，无同版新快照不能给 H2 肯定建议。 |
 
 先用可控数据覆盖所有分支，再用真实开放 PR 对照同一次查询的 GitHub 事实、版本、工具轨迹与回执。测试全程没有合并写入。
+
+## 实测：真实 GitHub 只读对照
+
+**如何在原 PR 使用。** 在已绑定且接收评论的仓库，向负责的机器人单独提问“这个 PR 现在能合并吗？”或发送 `@机器人 /merge-status`。绑定 OpenClaw 时，这类问题由 Channel 直接读取 GitHub，无需模型作决定；明确的状态查询仅产生普通评论，即使绑定启用了原生评审。ACP 不承诺这条快捷路径。
+
+**管理端核对。** 使用现有管理员身份查询 `GET /repositories/<repositoryId>/comments/<commentId>/task`，得到任务 ID、原 PR 版本、运行句柄、工具计数和回执。查看 `GET /tasks/<id>` 的历史成果，其中 `merge_assessment` 记录当时的查询时间、三项结论和缺项。运行记录的 `modelTools: []` 表示确定性路径没向模型提供工具；云端工具计数表示连接器请求，并不等于模型调用次数。若要重新查询此任务绑定的 PR，使用 `GET /tasks/<id>/merge-facts`；返回的 `current_readback` 是现在的观察，不回帖、不改写旧成果。版本变动不可用新事实替旧版本背书。
+
+两端均从部署者提供的 `CHANNEL_BUILD_SHA` 读取完整 40 位提交号（Docker 构建参数同名）。未提供就标记未知。构建号不是运行机器上的仓库 HEAD，也不证明镜像内容经过签名验证。
+
+北京时间 2026-11-27 04:26:55（`2026-11-26T20:26:55.277Z`），在开发工作树调用 [collectMergeFacts](../src/github-merge-facts.ts)，对照采集前后两次独立的 `gh pr view`。目标为 [xallor-ai/github-agent-channel#25](https://github.com/xallor-ai/github-agent-channel/pull/25)。
+
+| 事实 | 对照结果 |
+| --- | --- |
+| 目标版本 | 三次读取的 base 均为 `2e9c950ebc9f674e9df8202c1e407aac1fe673cd`，head 均为 `a2ce778ee6213f6e5d931f32685c1670ae158688`，同仓，快照稳定。 |
+| 生命周期、草稿、冲突 | CLI 返回 `OPEN`、`mergedAt=null`、`isDraft=false`、`MERGEABLE`、`CLEAN`；采集器得到仍开放未合并、非草稿、无已知冲突。 |
+| 分支门禁 | 另读目标分支得活动 ruleset 列表 `[]`、传统保护 `null`、合并队列及条目 `null`。本次没有必需状态检查或必需批准；独立 CLI 的审核决定为空，没有把它记为批准。 |
+| 测试合并与工程建议 | GitHub 返回测试合并 SHA `6fa2f25cd908aa4b91c31ed2997c4253b494e52d`；无必需检查，未查询 CI 执行记录。平台条件满足，工程上是否建议合并仍然证据不足。 |
+
+这是用操作者已授权的 GitHub 身份执行实际 API 读取；未使用生产 App 身份，未触发 Channel 任务、模型或回帖。它证明该版本下的采集和呈现依据，不证明生产 App 的可见权限、任务审计、GitHub 发布回执，也不覆盖真实受保护分支、失败检查或队列候选。上述分支由[模拟传输测试](../tests/github-merge-facts.test.ts)和[判断测试](../tests/merge-assessment.test.ts)覆盖；生产验收仍需真实评论、实际工具轨迹和该任务的独立回执。

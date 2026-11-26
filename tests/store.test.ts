@@ -426,3 +426,117 @@ test("a binding change cannot cancel an issued publication or admit the next rev
   assert.deepEqual(store.get(first.id)?.publicationReceipt, receipt);
   assert.equal(store.claimAssignment("w", "next", 2000, 1001)?.id, next.id);
 });
+
+test("cloud tool counters persist across connections and restart without changing runtime evidence", (t) => {
+  const { store, path, stores } = fixture(t);
+  const peer = new TaskStore(path);
+  stores.push(peer);
+  const task = store.accept(input()).task;
+  assert.deepEqual(store.toolAudit(task.id), []);
+  assert.throws(() => store.recordToolCall(task.id, "read_file", "requested"));
+  store.claimAssignment("w", "h", 2000, 1000);
+  assert.throws(() => store.recordToolCall(task.id, "read_file", "failed"));
+  store.recordToolCall(task.id, "read_file", "requested");
+  peer.recordToolCall(task.id, "read_file", "requested");
+  peer.recordToolCall(task.id, "read_file", "failed");
+  store.recordToolCall(task.id, "read_file", "succeeded");
+  // A third request was initiated, but no terminal observation was made.
+  peer.recordToolCall(task.id, "read_file", "requested");
+  assert.throws(() =>
+    store.recordToolCall(task.id, "secret-token-as-name" as never, "requested"),
+  );
+  assert.throws(() =>
+    store.recordToolCall(
+      task.id,
+      "read_file",
+      "secret-token-as-phase" as never,
+    ),
+  );
+  assert.equal(store.get(task.id)?.runtime, null);
+  store.close();
+  peer.close();
+  const reopened = new TaskStore(path);
+  stores.push(reopened);
+  const [audit] = reopened.toolAudit(task.id);
+  assert.deepEqual(
+    [audit.name, audit.requested, audit.succeeded, audit.failed],
+    ["read_file", 3, 1, 1],
+  );
+  assert.ok(audit.firstRequestedAt <= audit.lastRequestedAt);
+  assert.ok(audit.lastSucceededAt && audit.lastFailedAt);
+  assert.deepEqual(
+    Object.keys(audit).sort(),
+    [
+      "name",
+      "requested",
+      "succeeded",
+      "failed",
+      "firstRequestedAt",
+      "lastRequestedAt",
+      "lastSucceededAt",
+      "lastFailedAt",
+      "buildSha",
+    ].sort(),
+  );
+});
+test("comment audit lookup stays scoped to a repository and triggering comment", (t) => {
+  const { store } = fixture(t);
+  const a = store.accept(input()).task;
+  const b = store.accept({
+    ...input(1, 3),
+    deliveryId: "other-repo-delivery",
+  }).task;
+  assert.equal(store.taskForComment(2, 1)?.id, a.id);
+  assert.equal(store.taskForComment(3, 1)?.id, b.id);
+  assert.equal(store.taskForComment(9, 1), undefined);
+});
+test("the audit records only a full server build SHA; invalid values never enter the receipt", (t) => {
+  const previous = process.env.CHANNEL_BUILD_SHA;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CHANNEL_BUILD_SHA;
+    else process.env.CHANNEL_BUILD_SHA = previous;
+  });
+  for (const value of ["a".repeat(40), "not-a-sha-or-secret"]) {
+    process.env.CHANNEL_BUILD_SHA = value;
+    const { store } = fixture(t);
+    const task = store.accept(input()).task;
+    store.claimAssignment("w", "h", 2000, 1000);
+    store.recordToolCall(task.id, "read_issue", "requested");
+    assert.equal(
+      store.toolAudit(task.id)[0].buildSha,
+      value.length === 40 ? value : null,
+    );
+  }
+});
+
+test("an incompatible companion audit database is rejected without dropping its data or changing the v5 tasks", (t) => {
+  const { path, store } = fixture(t);
+  const task = store.accept(input()).task;
+  store.close();
+  const sidecar = path + ".tool-audit.sqlite";
+  const db = new DatabaseSync(sidecar);
+  try {
+    db.exec(
+      "CREATE TABLE retained(marker TEXT); INSERT INTO retained VALUES ('kept')",
+    );
+  } finally {
+    db.close();
+  }
+  assert.throws(() => new TaskStore(path), StorageSchemaError);
+  const audit = new DatabaseSync(sidecar);
+  const tasks = new DatabaseSync(path);
+  try {
+    assert.equal(
+      audit.prepare("SELECT marker FROM retained").get()?.marker,
+      "kept",
+    );
+    assert.equal(
+      tasks.prepare("SELECT status FROM tasks WHERE id=?").get(task.id)?.status,
+      "queued",
+    );
+    assert.equal(tasks.prepare("PRAGMA user_version").get()?.user_version, 5);
+  } finally {
+    audit.close();
+    tasks.close();
+  }
+});
