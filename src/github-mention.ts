@@ -13,13 +13,21 @@ const markdown = {
 // Limit accepted prose containers explicitly; a new AST node type cannot opt in.
 export function mentionsBot(body: string, login: string): boolean {
   const slug = login.replace(/\[bot\]$/i, "");
+  return !!slug && mentions(body, slug);
+}
+export function addressedFirstLine(body: string): boolean {
+  return mentions(body.trimStart().split(/[\r\n]/, 1)[0], null);
+}
+function mentions(body: string, slug: string | null): boolean {
   if (
-    !slug ||
     body.length > 16000 ||
-    !body.toLowerCase().includes("@" + slug.toLowerCase())
+    !body.toLowerCase().includes("@" + (slug ?? "").toLowerCase())
   )
     return false;
-  const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped =
+    slug === null
+      ? "[a-z0-9][a-z0-9-]*(?:/[a-z0-9_-]+)?"
+      : slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(
     "@" + escaped + "(?:\\[bot\\])?(?![a-z0-9_@/\\[\\]-])",
     "gi",
@@ -27,8 +35,9 @@ export function mentionsBot(body: string, login: string): boolean {
   // A leading command remains unambiguous even before a very large diff.
   // Otherwise bound the syntax work performed on the synchronous ingress path.
   if ((body.match(/[-<>*_\[\]`~#|!\\.():]/g)?.length ?? 0) > 512)
-    return new RegExp("^@" + escaped + "(?:\\[bot\\])?(?=\\s|$)", "i").test(
-      body,
+    return (
+      slug === null ||
+      new RegExp("^@" + escaped + "(?:\\[bot\\])?(?=\\s|$)", "i").test(body)
     );
   let root;
   try {

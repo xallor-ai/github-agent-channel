@@ -410,6 +410,119 @@ async function fixture(
   };
 }
 
+for (const changed of ["closed", "new_head"] as const) {
+  test(
+    "a resumed PR keeps its merge snapshot without publishing after " + changed,
+    async (t) => {
+      const f = await fixture(t);
+      let turns = 0;
+      const agent = f.agentWith(async () => {
+        const first = ++turns === 1;
+        assert.ok(turns <= 2, "No model turn after the unpublishable read");
+        if (!first) {
+          if (changed === "closed") f.closePr();
+          else f.setHead(h2);
+        }
+        return json({
+          status: "completed",
+          id: "r" + turns,
+          output: [
+            {
+              type: "function_call",
+              call_id: "c" + turns,
+              name: first ? "request_clarification" : "read_merge_facts",
+              arguments: first
+                ? JSON.stringify({ question: "Which environment?" })
+                : "{}",
+            },
+          ],
+        });
+      });
+      await f.reply(8, "@fixture inspect this change", f.postedAt - 1000);
+      await agent.once();
+      await f.publisher.tick();
+      const { taskId } = await f.reply(9, "Linux", f.postedAt + 2000);
+      await agent.once();
+      const stored = f.store.get(taskId)!;
+      assert.equal(stored.status, "succeeded");
+      assert.equal(stored.deliveryStatus, "skipped");
+      assert.equal(stored.publicationReceipt, null);
+      assert.match(stored.error ?? "", /merge snapshot/);
+      assert.equal(stored.outcome?.artifacts[0]?.name, "merge_assessment");
+      assert.ok(
+        stored.outcome?.text.includes(
+          changed === "closed" ? "已关闭未合并" : h2,
+        ),
+      );
+      assert.equal(await f.publisher.tick(), false);
+      assert.equal(f.replies.length, 1);
+    },
+  );
+}
+
+test("an implicit answer delivered during an uncertain question write is only activated after verified readback", async (t) => {
+  const f = await fixture(t);
+  let calls = 0;
+  const agent = f.agentWith(async () => {
+    assert.equal(++calls, 1);
+    return json({
+      status: "completed",
+      id: "question",
+      output: [
+        {
+          type: "function_call",
+          name: "request_clarification",
+          call_id: "q",
+          arguments: JSON.stringify({ question: "Which browser?" }),
+        },
+      ],
+    });
+  });
+  const { taskId } = await f.reply(
+    8,
+    "@fixture check the login screen",
+    f.postedAt - 1000,
+  );
+  await agent.once();
+  f.loseNextComment();
+  await f.publisher.tick();
+  const delivery = randomUUID();
+  const early = await f.reply(
+    20,
+    "Firefox",
+    Date.now() + 1000,
+    sender,
+    200,
+    delivery,
+  );
+  assert.equal(early.taskId, null);
+  assert.equal(
+    f.store.activityReceipt(delivery)?.reason,
+    "clarification_pending",
+  );
+  assert.equal(await agent.once(), false);
+  const reconciled = await fetch(
+    f.url + "/tasks/" + taskId + "/reconcile-clarification",
+    { method: "POST", headers: { authorization: "Bearer admin" } },
+  );
+  assert.equal(reconciled.status, 200);
+  const answer = f.store.activityReceipt(delivery);
+  assert.equal(answer?.reason, "clarification_reply");
+  assert.ok(answer?.taskId);
+  assert.equal(f.store.get(answer.taskId)?.continuation?.rootTaskId, taskId);
+  const conversation = await (
+    await fetch(f.url + "/tasks/" + answer.taskId + "/conversation", {
+      headers: { authorization: "Bearer admin" },
+    })
+  ).json();
+  assert.equal(conversation.rootTaskId, taskId);
+  assert.deepEqual(
+    conversation.turns.map((v: { taskId: string }) => v.taskId),
+    [taskId, answer.taskId],
+  );
+  assert.equal(f.replies.length, 1);
+});
+
 test("an unmentioned answer resumes the original PR delegation after a verified question, even when the question POST acknowledgement was lost", async (t) => {
   const f = await fixture(t);
   const original = "@fixture inspect this change",

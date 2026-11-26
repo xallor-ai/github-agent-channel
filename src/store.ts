@@ -549,6 +549,14 @@ export class TaskStore {
           ...noticeMessages,
         );
       if (!row) return undefined;
+      if (!this.questions.selectionValid(String(row.id), now)) {
+        this.db
+          .prepare(
+            "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Clarification choices changed before execution' WHERE id=? AND status='queued'",
+          )
+          .run(row.id!);
+        return undefined;
+      }
       this.db
         .prepare(
           "UPDATE tasks SET status='running' WHERE id=? AND status='queued'",
@@ -569,6 +577,14 @@ export class TaskStore {
     now = Date.now(),
   ): Task | undefined {
     this.expireTasks(now);
+    return this.readActiveAssignment(taskId, workerId, leaseHash, now);
+  }
+  private readActiveAssignment(
+    taskId: string,
+    workerId: string,
+    leaseHash: string,
+    now: number,
+  ) {
     const row = this.db
       .prepare(
         `SELECT t.* FROM tasks t JOIN assignments a ON a.taskId=t.id
@@ -584,7 +600,9 @@ export class TaskStore {
     revision: import("./contracts.js").PullRevision,
   ): Task {
     return this.transaction(() => {
-      const task = this.assignedTask(id, workerId, leaseHash);
+      const now = Date.now();
+      this.expireInTransaction(now);
+      const task = this.readActiveAssignment(id, workerId, leaseHash, now);
       if (
         !task ||
         task.target.kind !== "pull_request" ||
@@ -664,6 +682,13 @@ export class TaskStore {
           throw new InvalidAssignmentOutcome("Invalid assignment outcome");
         }
       }
+      const withheld =
+        task.continuation &&
+        this.db
+          .prepare(
+            "SELECT answerWithheldReason FROM clarifications WHERE answerTaskId=?",
+          )
+          .get(task.id)?.answerWithheldReason;
       this.db
         .prepare(
           "UPDATE tasks SET status=?,outcome=?,error=?,deliveryStatus=? WHERE id=? AND status='running'",
@@ -677,17 +702,21 @@ export class TaskStore {
               ? result.failure
                 ? failedExecutionMessage(result.failure)
                 : "Connector execution failed"
-              : null,
-          result.status === "succeeded"
-            ? outcome?.publication.kind === "none"
-              ? "skipped"
-              : "pending"
-            : result.status === "failed" &&
-                task.target.kind !== "repository" &&
-                result.failure &&
-                noticeFailureCode(failedExecutionMessage(result.failure))
-              ? "pending"
-              : "skipped",
+              : withheld
+                ? "Continuation retained; PR merge snapshot: " + withheld
+                : null,
+          withheld
+            ? "skipped"
+            : result.status === "succeeded"
+              ? outcome?.publication.kind === "none"
+                ? "skipped"
+                : "pending"
+              : result.status === "failed" &&
+                  task.target.kind !== "repository" &&
+                  result.failure &&
+                  noticeFailureCode(failedExecutionMessage(result.failure))
+                ? "pending"
+                : "skipped",
           taskId,
         );
       this.db
@@ -761,11 +790,26 @@ export class TaskStore {
     });
   }
   publicationAllowed(taskId: string) {
-    return !!this.db
+    return this.questions.selectionValid(taskId) && !!this.db
       .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
       .get(taskId);
   }
-  pendingDelivery(): Task | undefined {
+  fenceContinuationPublication(
+    task: Task,
+    reason: "closed" | "merged" | "unconfirmed",
+  ) {
+    if (
+      this.activeBinding(task.installationId, task.repositoryId)?.id !==
+        task.bindingId ||
+      !this.db
+        .prepare(
+          "UPDATE clarifications SET answerWithheldReason=COALESCE(answerWithheldReason,?) WHERE answerTaskId=? AND bindingId=?",
+        )
+        .run(reason, task.id, task.bindingId).changes
+    )
+      throw new AssignmentConflict("Inactive continuation");
+  }
+  pendingDelivery(now = Date.now()): Task | undefined {
     return this.transaction(() => {
       const row = this.db
         .prepare(
@@ -773,6 +817,19 @@ export class TaskStore {
         )
         .get(...noticeMessages);
       if (!row) return undefined;
+      if (!this.questions.selectionValid(String(row.id), now)) {
+        this.db
+          .prepare(
+            "UPDATE tasks SET deliveryStatus='skipped',error='Clarification choices changed before publication' WHERE id=? AND deliveryStatus='pending'",
+          )
+          .run(row.id!);
+        return undefined;
+      }
+      this.db
+        .prepare(
+          "INSERT INTO clarificationAttempts SELECT id,? FROM tasks WHERE id=? AND json_extract(outcome,'$.publication.kind')='clarification'",
+        )
+        .run(now, row.id!);
       this.db
         .prepare("UPDATE tasks SET deliveryStatus='sending' WHERE id=?")
         .run(row.id!);
@@ -810,6 +867,7 @@ export class TaskStore {
     if (status === "unknown") return;
     const task = this.get(id)!;
     if (task.outcome?.publication.kind !== "clarification") return;
+    this.db.prepare("DELETE FROM clarificationAttempts WHERE taskId=?").run(id);
     if (status === "sent") this.questions.open(task, receipt);
     const binding = this.activeBinding(task.installationId, task.repositoryId);
     this.questions.settle(

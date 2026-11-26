@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TaskStore } from "../src/store.js";
+import { renderQuestionChoices } from "../src/outcomes.js";
 import { seedBinding } from "./binding-fixture.js";
 import type { NewTask } from "../src/contracts.js";
 
@@ -68,7 +69,7 @@ function fixture(t: test.TestContext) {
       },
       "digest",
     );
-    assert.equal(store.pendingDelivery()?.id, id);
+    assert.equal(store.pendingDelivery(receiptTime - 1000)?.id, id);
     const receipt = {
       kind: "comment" as const,
       id: 11,
@@ -100,7 +101,7 @@ test("a verified posted question can resume only its original actor and root, on
   const f = fixture(t);
   const id = f.request("original task"),
     receipt = f.ask(id, "Which test?", f.after, true);
-  assert.equal(f.receive(f.comment("early")).taskId, null);
+  assert.equal(f.receive(f.comment("early"), f.after - 1000).taskId, null);
   assert.throws(() =>
     f.store.resolveUnknownDelivery(id, "sent", {
       kind: "comment",
@@ -116,6 +117,8 @@ test("a verified posted question can resume only its original actor and root, on
     "@other please inspect",
     "@org/team take this",
     "/other-command one",
+    "FYI @bob handle this",
+    "please ask @org/team to look",
   ]) {
     assert.equal(f.receive(f.comment(prompt)).taskId, null);
     assert.equal(f.store.clarificationState(id)?.status, "waiting");
@@ -235,13 +238,16 @@ test("a second question with an unconfirmed write prevents assigning implicit re
     "clarification_reply",
   );
 });
-test("only an explicitly addressed answer can be activated after delayed confirmation; preserve receipts and one run", (t) => {
+test("an explicitly addressed answer can be activated after delayed confirmation; preserve receipts and one run", (t) => {
   const f = fixture(t);
   const q = f.request("inspect"),
     receipt = f.ask(q, "Which?", f.after, true);
   const early = f.comment("/answer " + q + " premature");
   f.receive(early, f.after - 1000);
-  const old = f.receive(f.comment("ordinary answer before confirmation"));
+  const old = f.receive(
+    f.comment("ordinary answer before publication"),
+    f.after - 1000,
+  );
   const input = f.comment("/answer " + q + " check L2");
   const d = f.receive(input);
   assert.equal(d.reason, "clarification_pending");
@@ -272,4 +278,83 @@ test("only an explicitly addressed answer can be activated after delayed confirm
     "clarification_unmatched",
   );
   assert.equal(old.taskId, null);
+});
+test("a unique inflight question holds an implicit reply without claiming silent handling until GitHub confirms chronology", (t) => {
+  const f = fixture(t),
+    q = f.request("root"),
+    r = f.ask(q, "Which?", f.after, true);
+  const ans = f.comment("use head\nlogs say @bob too");
+  assert.equal(f.receive(ans).reason, "clarification_pending");
+  f.restart();
+  f.store.resolveUnknownDelivery(q, "sent", r);
+  const result = f.store.activityReceipt(ans.deliveryId);
+  assert.equal(result?.reason, "clarification_reply");
+  assert.equal(f.store.get(result!.taskId!)?.continuation?.questionTaskId, q);
+});
+test("obsolete choices cannot be sent after a delayed close retires both questions", (t) => {
+  const f = fixture(t),
+    a = f.request("first");
+  f.ask(a, "A?");
+  const b = f.request("second");
+  f.ask(b, "B?");
+  const choice = f.receive(f.comment("which?"), f.after + 3000).taskId!;
+  const task = f.store.claimAssignment("worker", "x", Date.now() + 60_000)!;
+  assert.equal(task.id, choice);
+  f.store.finishAssignment(
+    choice,
+    "worker",
+    "x",
+    {
+      status: "succeeded",
+      outcome: {
+        publication: { kind: "comment" },
+        artifacts: [],
+        text: renderQuestionChoices(task.questionChoices!),
+      },
+    },
+    "digest",
+  );
+  f.store.closeThread({
+    ...scope,
+    bindingId: f.b.id,
+    target: { kind: "issue", number: 9 },
+    githubTime: f.after + 1000,
+  });
+  assert.equal(f.store.pendingDelivery(), undefined);
+  assert.equal(f.store.publicationAllowed(choice), false);
+  assert.equal(f.store.get(choice)?.deliveryStatus, "skipped");
+  assert.match(f.store.get(choice)?.error ?? "", /choices changed/);
+});
+test("retired, expired or pre-attempt unconfirmed writes never capture an implicit reply", (t) => {
+  const f = fixture(t),
+    q = f.request("first");
+  f.ask(q, "Past?", f.after - 8 * 86400000, true);
+  assert.equal(
+    f.receive(f.comment("nobody requested this")).reason,
+    "observed",
+  );
+  assert.equal(
+    f.receive(f.comment("/answer " + q + " old")).reason,
+    "clarification_unmatched",
+  );
+});
+test("late and same-second deliveries cannot consume a remaining question by erasing a historical competitor; obsolete pick is skipped", (t) => {
+  const f = fixture(t),
+    a = f.request("first");
+  f.ask(a, "A?");
+  const b = f.request("second");
+  f.ask(b, "B?");
+  const choice = f.receive(f.comment("ambiguous"), f.after + 1000).taskId!;
+  f.receive(f.comment("/answer " + a + " yes"), f.after + 4000);
+  for (const signed of [f.after + 2000, f.after + 4000])
+    assert.equal(
+      f.receive(f.comment("late"), signed).reason,
+      "clarification_unmatched",
+    );
+  assert.equal(f.store.clarificationState(b)?.status, "waiting");
+  assert.equal(
+    f.store.claimAssignment("worker", "token", Date.now() + 60000),
+    undefined,
+  );
+  assert.match(f.store.get(choice)?.error ?? "", /choices changed/);
 });

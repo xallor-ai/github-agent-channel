@@ -16,12 +16,31 @@ export class DeliveryWorker {
     try {
       const delivery = this.store.pendingDelivery();
       if (!delivery) return false;
+      const obsoleteSelection = () =>
+        !!delivery.questionChoices &&
+        !this.store.publicationAllowed(delivery.id);
+      const staleSelectionMessage =
+        "Clarification choices are no longer current; selection prompt not published";
       try {
+        if (obsoleteSelection()) {
+          this.store.markDelivery(
+            delivery.id,
+            "failed",
+            undefined,
+            staleSelectionMessage,
+          );
+          return true;
+        }
         try {
           await this.github.authorize(delivery);
         } catch {
           // No publication call has been made. Do not block the queue as an unknown write.
-          this.store.markDelivery(delivery.id, "failed");
+          this.store.markDelivery(
+            delivery.id,
+            "failed",
+            undefined,
+            obsoleteSelection() ? staleSelectionMessage : undefined,
+          );
           return true;
         }
         // Authorization may have awaited GitHub while this binding was disabled.
@@ -98,7 +117,9 @@ export class DeliveryWorker {
           undefined,
           error instanceof DraftPublicationUncertain
             ? error.message
-            : undefined,
+            : error instanceof AccessDenied && obsoleteSelection()
+              ? staleSelectionMessage
+              : undefined,
         );
       }
       return true;

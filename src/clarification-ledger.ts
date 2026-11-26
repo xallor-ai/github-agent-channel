@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { NewTask, PublicationReceipt, Task } from "./contracts.js";
+import { addressedFirstLine } from "./github-mention.js";
 import { threadKey } from "./activity-ledger.js";
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
@@ -51,6 +52,22 @@ export class ClarificationLedger {
       .prepare("SELECT choices FROM clarificationSelections WHERE taskId=?")
       .get(id);
     return pick ? { questionChoices: JSON.parse(String(pick.choices)) } : {};
+  }
+  selectionValid(id: string, now = Date.now()) {
+    const selection = this.db
+      .prepare("SELECT choices FROM clarificationSelections WHERE taskId=?")
+      .get(id);
+    if (!selection) return true;
+    const choices = JSON.parse(String(selection.choices)) as string[];
+    const current = this.db
+      .prepare(
+        `SELECT q.questionTaskId FROM clarifications q JOIN tasks s ON s.id=? AND s.bindingId=q.bindingId AND s.actorId=q.actorId AND json_extract(s.target,'$.kind')||':'||json_extract(s.target,'$.number')=q.thread WHERE q.answerTaskId IS NULL AND q.closed=0 AND q.expiresAt>? ORDER BY q.askedAt DESC,q.questionTaskId LIMIT 8`,
+      )
+      .all(id, now);
+    return (
+      current.length === choices.length &&
+      current.every((r, i) => r.questionTaskId === choices[i])
+    );
   }
   open(task: Task, receipt: PublicationReceipt | undefined) {
     if (task.outcome?.publication.kind !== "clarification") return;
@@ -106,61 +123,76 @@ export class ClarificationLedger {
     // the very commands or logs the question asked the user to supply.
     if (
       !selector &&
-      /^(?:@[a-z0-9]|\/[a-z][\w-]*(?=\s|$))/i.test(body.trimStart())
+      (addressedFirstLine(body) ||
+        /^\/[a-z][\w-]*(?=\s|$)/i.test(body.trimStart()))
     )
       return;
     const selected = selector ? explicit.exec(body) : null;
     const unmatched = { reason: "clarification_unmatched" } as const;
     if ((selector && !selected) || !time || !Number.isSafeInteger(time))
       return selector ? unmatched : undefined;
-    // An unconfirmed write could already be visible on GitHub. In that window
-    // never give an implicit reply to a different, older confirmed question.
-    if (
-      !selector &&
-      this.db
-        .prepare(
-          "SELECT 1 FROM tasks WHERE bindingId=? AND actorId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND deliveryStatus IN ('sending','unknown') AND json_extract(outcome,'$.publication.kind')='clarification' LIMIT 1",
-        )
-        .get(
-          input.bindingId,
-          input.actorId,
-          input.target.kind,
-          input.target.number,
-        )
-    )
-      return undefined;
-    // Ordering is based on GitHub timestamps, not delivery order. A prompt can only
-    // consume one question and a question can only be consumed once.
+    // At the reply's GitHub time a question consumed by a later (or same-
+    // second) answer was still a plausible addressee. Never drop that
+    // competitor merely because its answer reached us first.
+    const selectorId = selected?.[1].toLowerCase() ?? null;
     const rows = this.db
       .prepare(
-        `SELECT questionTaskId,askedAt FROM clarifications WHERE bindingId=? AND thread=? AND actorId=? AND closed=0 AND answerTaskId IS NULL AND expiresAt>? AND expiresAt>? AND askedAt<=? ${selected ? "AND questionTaskId=?" : ""} ORDER BY askedAt DESC,questionTaskId LIMIT 8`,
+        `
+      SELECT q.questionTaskId,q.askedAt,q.expiresAt,q.answerTaskId FROM clarifications q
+      LEFT JOIN tasks a ON a.id=q.answerTaskId
+      WHERE q.bindingId=? AND q.thread=? AND q.actorId=? AND q.closed=0 AND q.askedAt<=? AND q.expiresAt>?
+      AND (q.answerTaskId IS NULL OR a.githubTime>=?) AND (? IS NULL OR q.questionTaskId=?)
+      ORDER BY q.askedAt DESC,q.questionTaskId LIMIT 9`,
       )
       .all(
         input.bindingId,
         threadKey(input.target),
         input.actorId,
         time,
-        Date.now(),
         time,
-        ...(selected ? [selected[1].toLowerCase()] : []),
+        time,
+        selectorId,
+        selectorId,
       );
-    if (!rows.length && selected) {
-      const questionId = selected[1].toLowerCase();
-      const pending = this.db
-        .prepare(
-          "SELECT 1 FROM tasks WHERE id=? AND bindingId=? AND actorId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND status='succeeded' AND publicationBlocked=0 AND deliveryStatus IN ('sending','unknown') AND json_extract(outcome,'$.publication.kind')='clarification'",
-        )
-        .get(
-          questionId,
-          input.bindingId,
-          input.actorId,
-          input.target.kind,
-          input.target.number,
-        );
-      if (pending) return { reason: "clarification_pending", questionId };
+    const now = Date.now();
+    const inflight = this.db
+      .prepare(
+        `SELECT t.id FROM clarificationAttempts p JOIN tasks t ON t.id=p.taskId
+      LEFT JOIN clarifications prev ON prev.answerTaskId=t.id JOIN tasks root ON root.id=coalesce(prev.rootTaskId,t.id)
+      LEFT JOIN threadClosures c ON c.repositoryId=root.repositoryId AND c.thread=?
+      WHERE t.bindingId=? AND t.actorId=? AND json_extract(t.target,'$.kind')=? AND json_extract(t.target,'$.number')=?
+      AND t.publicationBlocked=0 AND t.deliveryStatus IN ('sending','unknown') AND (c.thread IS NULL OR root.githubTime>c.closedAt)
+      AND p.startedAt>? AND p.startedAt<? AND (? IS NULL OR t.id=?) LIMIT 2`,
+      )
+      .all(
+        threadKey(input.target),
+        input.bindingId,
+        input.actorId,
+        input.target.kind,
+        input.target.number,
+        Math.max(time, now) - WEEK,
+        Math.floor(time / 1000) * 1000 + 1000,
+        selectorId,
+        selectorId,
+      );
+    if (inflight.length) {
+      if (inflight.length === 1 && !rows.length)
+        return {
+          reason: "clarification_pending",
+          questionId: String(inflight[0].id),
+        };
+      return unmatched;
     }
-    if (!rows.length || rows.some((r) => r.askedAt === time))
-      return selector ? unmatched : undefined;
+    if (!rows.length) return selector ? unmatched : undefined;
+    if (
+      rows.some(
+        (r) =>
+          r.answerTaskId !== null ||
+          Number(r.expiresAt) <= now ||
+          r.askedAt === time,
+      )
+    )
+      return unmatched;
     if (rows.length === 1)
       return {
         reason: "clarification_reply",
@@ -169,7 +201,7 @@ export class ClarificationLedger {
       };
     return {
       reason: "clarification_ambiguous",
-      choices: rows.map((r) => String(r.questionTaskId)),
+      choices: rows.slice(0, 8).map((r) => String(r.questionTaskId)),
     };
   }
   private resolveCandidate(cursor: number, id: string | null) {
@@ -290,7 +322,7 @@ export class ClarificationLedger {
     while (cursor && turns.length < 5) {
       const row = this.db
         .prepare(
-          "SELECT id AS taskId,json_extract(source,'$.commentId') AS sourceCommentId,status,deliveryStatus,publicationReceipt FROM tasks WHERE id=?",
+          "SELECT id AS taskId,json_extract(source,'$.commentId') AS sourceCommentId,status,deliveryStatus,publicationReceipt,error AS diagnostic FROM tasks WHERE id=?",
         )
         .get(cursor);
       if (!row) return null;

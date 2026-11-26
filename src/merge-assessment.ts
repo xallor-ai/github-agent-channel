@@ -83,6 +83,11 @@ export const mergeFactsSchema = z.strictObject({
   missing: z.array(label(200)).max(32),
 });
 export type MergeFacts = z.infer<typeof mergeFactsSchema>;
+export function mergeSnapshotPublishable(
+  facts: MergeFacts,
+): facts is MergeFacts & { baseRefName: string; state: "open"; stable: true } {
+  return facts.stable && facts.state === "open" && !!facts.baseRefName;
+}
 
 interface MergeAssessment {
   state: MergeFacts["state"];

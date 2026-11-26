@@ -132,8 +132,10 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "expiresAt",
         "answerTaskId",
         "closed",
+        "answerWithheldReason",
       ],
       clarificationSelections: ["taskId", "choices"],
+      clarificationAttempts: ["taskId", "startedAt"],
       clarificationCandidates: [
         "cursor",
         "questionTaskId",
@@ -212,9 +214,10 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX receipt_source ON ownerReceipts(repositoryId,commentId,cursor) WHERE commentId IS NOT NULL;
     CREATE UNIQUE INDEX reaction_source ON ownerReceipts(repositoryId,commentId) WHERE reactionStatus IS NOT NULL;
     CREATE INDEX pending_reactions ON ownerReceipts(cursor) WHERE reactionStatus='pending';
-    CREATE TABLE clarifications(questionTaskId TEXT PRIMARY KEY REFERENCES tasks(id),rootTaskId TEXT NOT NULL REFERENCES tasks(id),bindingId TEXT NOT NULL,thread TEXT NOT NULL,actorId INTEGER NOT NULL,askedAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,answerTaskId TEXT UNIQUE REFERENCES tasks(id),closed INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE TABLE clarifications(questionTaskId TEXT PRIMARY KEY REFERENCES tasks(id),rootTaskId TEXT NOT NULL REFERENCES tasks(id),bindingId TEXT NOT NULL,thread TEXT NOT NULL,actorId INTEGER NOT NULL,askedAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,answerTaskId TEXT UNIQUE REFERENCES tasks(id),closed INTEGER NOT NULL DEFAULT 0,answerWithheldReason TEXT CHECK(answerWithheldReason IN ('closed','merged','unconfirmed'))) STRICT;
     CREATE INDEX clarification_match ON clarifications(bindingId,thread,actorId,askedAt) WHERE answerTaskId IS NULL AND closed=0;
     CREATE TABLE clarificationSelections(taskId TEXT PRIMARY KEY REFERENCES tasks(id),choices TEXT NOT NULL) STRICT;
+    CREATE TABLE clarificationAttempts(taskId TEXT PRIMARY KEY REFERENCES tasks(id),startedAt INTEGER NOT NULL) STRICT;
     CREATE TABLE clarificationCandidates(cursor INTEGER PRIMARY KEY,questionTaskId TEXT NOT NULL REFERENCES tasks(id),input TEXT NOT NULL,githubTime INTEGER NOT NULL,receivedAt INTEGER NOT NULL) STRICT;
     CREATE INDEX clarification_inflight ON clarificationCandidates(questionTaskId,githubTime,cursor);
     CREATE INDEX clarification_candidate_age ON clarificationCandidates(receivedAt,cursor);

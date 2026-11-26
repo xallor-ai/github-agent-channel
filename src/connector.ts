@@ -10,6 +10,7 @@ import {
 } from "./outcomes.js";
 import {
   mergeFactsSchema,
+  mergeSnapshotPublishable,
   renderMergeAssessment,
   type MergeFacts,
 } from "./merge-assessment.js";
@@ -322,10 +323,9 @@ export class OpenClawConnector implements RuntimeConnector {
           return {
             text,
             artifacts: [{ kind: "text", name: "merge_assessment", text }],
-            publication:
-              facts.state === "open" && facts.stable && facts.baseRefName
-                ? { kind: "comment", expectedBaseRef: facts.baseRefName }
-                : { kind: "none" },
+            publication: mergeSnapshotPublishable(facts)
+              ? { kind: "comment", expectedBaseRef: facts.baseRefName }
+              : { kind: "none" },
           };
         }
         const result = diffSchema.safeParse(await invoke("read_pull_diff", {}));
@@ -628,6 +628,17 @@ export class OpenClawConnector implements RuntimeConnector {
             } else if (call.name === mergeTool.name) {
               localToolArgs(z.strictObject({}), args);
               mergeFacts = await readMergeFacts(task, invoke, combined);
+              if (task.continuation && !mergeSnapshotPublishable(mergeFacts)) {
+                // The cloud fenced publication before returning this snapshot.
+                // Retain its answer even if the model has no further rounds.
+                const text = renderMergeAssessment(mergeFacts);
+                return {
+                  text,
+                  responseId: responseData.id,
+                  artifacts: [{ kind: "text", name: "merge_assessment", text }],
+                  publication: { kind: "comment" },
+                };
+              }
               result = { assessment: renderMergeAssessment(mergeFacts) };
             } else if (
               snapshot &&
@@ -733,19 +744,14 @@ export class OpenClawConnector implements RuntimeConnector {
           publication: {
             kind:
               task.target.kind === "repository" ||
-              (mergeFacts &&
-                (!mergeFacts.stable ||
-                  mergeFacts.state !== "open" ||
-                  !mergeFacts.baseRefName))
+              (mergeFacts && !mergeSnapshotPublishable(mergeFacts))
                 ? "none"
                 : !task.continuation &&
                     evidence &&
                     task.reviewPolicy?.nativeReview === true
                   ? "review"
                   : "comment",
-            ...(mergeFacts?.stable &&
-            mergeFacts.state === "open" &&
-            mergeFacts.baseRefName
+            ...(mergeFacts && mergeSnapshotPublishable(mergeFacts)
               ? { expectedBaseRef: mergeFacts.baseRefName }
               : {}),
           },
