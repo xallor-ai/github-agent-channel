@@ -704,6 +704,15 @@ test("automatic review without any pinned patch cannot turn PR prose into a clea
   };
   for (const files of [
     [],
+    ...["provided", "truncated"].flatMap((patchStatus) =>
+      ["+", "-"].map((marker) => [
+        {
+          ...diff.files[0],
+          patch: "@@ -1 +1 @@\n" + marker + "\n",
+          patchStatus,
+        },
+      ]),
+    ),
     [{ ...diff.files[0], patch: undefined, patchStatus: "unavailable" }],
     [
       {

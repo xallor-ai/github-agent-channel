@@ -66,6 +66,25 @@ const diffSchema = z.strictObject({
     .max(100),
   limitations: z.array(z.string().max(256)).max(16),
 });
+function hasVisibleChange(file: z.infer<typeof diffSchema>["files"][number]) {
+  if (!file.patch || file.patchStatus === "unavailable") return false;
+  const lines = file.patch.split("\n");
+  if (file.patchStatus === "truncated") lines.pop(); // final line may be cut, even at its first character
+  let inHunk = false;
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      inHunk = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line);
+      continue;
+    }
+    if (
+      inHunk &&
+      (line.startsWith("+") || line.startsWith("-")) &&
+      line.slice(1).trim()
+    )
+      return true;
+  }
+  return false;
+}
 const maxAnswerLength = 18000;
 const searchArgs = z.strictObject({
   query: z
@@ -212,18 +231,7 @@ export class OpenClawConnector implements RuntimeConnector {
               },
             };
           }
-          if (
-            !evidence.files.some(
-              (file) =>
-                file.patchStatus !== "unavailable" &&
-                file.patch &&
-                /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@[^\n]*\n(?: [^\n]*\n)*[+-]/m.test(
-                  file.patchStatus === "truncated"
-                    ? file.patch.slice(0, file.patch.lastIndexOf("\n") + 1)
-                    : file.patch,
-                ),
-            )
-          )
+          if (!evidence.files.some(hasVisibleChange))
             throw new RuntimeFailure(
               "review_diff_unavailable",
               "No pinned patch available for automatic code review",
