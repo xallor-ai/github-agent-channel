@@ -19,6 +19,8 @@
 5. result 必须为 status + 嵌套 outcome。云端保存摘要和 outcome 后 ACK；重复相同结果只确认，冲突拒绝。
 6. publication=none → skipped；comment/review/pull_request → worker 重新授权，按 policy 发布并保存 publicationReceipt；不确定则 unknown。
 
+文件工具由 GitHub 客户端核验权限及目标后检查租约，再读取内容；固定版本 PR 在返回内容前重新授权。云端拒绝工具请求导致执行明确失败时，worker 仅在目标仍获授权时发布状态通知。
+
 规范模型没有 task 根级 commentId/issueNumber/result/commentUrl。commentId 只作为原始评论事件的 source.commentId；目标号在 target.number；文本在 outcome.text；外部地址在 publicationReceipt.url。产物必须明确包含 artifacts 和 publication，不做兼容推断。
 
 [DeviceService](../src/device-service.ts) 核验设备凭据，[BindingPrincipalVerifier](../src/binding-principal.ts) 核对安装和管理员权限，[BindingRegistry](../src/binding-registry.ts) 与任务同库；[客户端命令](../src/self-service-cli.ts) 显式登记/停用。任务库已按首次受理时间拒绝排队满 24 小时的任务，独立于执行租约。

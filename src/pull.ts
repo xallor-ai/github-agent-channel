@@ -370,13 +370,15 @@ export class PullCoordinator {
           // The merge reader checks the binding, manager and actor before and after its read.
           // Generic execution authorization also requires an open, unchanged target, which
           // would hide exactly the terminal/drift facts this read is meant to report.
-          if (data.name !== "read_merge_facts")
+          // readFile checks the same target and then fences the lease before reading.
+          if (data.name !== "read_merge_facts" && data.name !== "read_file")
             await this.github.authorize(task);
           this.assignment(id, data.leaseToken, workerId);
           if (data.name === "read_file")
             output = await this.github.readFile(
               task,
               (args as { path: string }).path,
+              () => this.assignment(id, data.leaseToken, workerId),
             );
           else if (data.name === "read_issue") {
             if (task.target.kind === "repository")

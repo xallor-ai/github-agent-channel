@@ -373,7 +373,11 @@ export class OctokitGitHubClient implements GitHubClient {
       body: data.body,
     };
   }
-  async readFile(task: Task, path: string): Promise<unknown> {
+  async readFile(
+    task: Task,
+    path: string,
+    checkAssignment: () => void,
+  ): Promise<unknown> {
     if (
       typeof path !== "string" ||
       !path ||
@@ -384,6 +388,7 @@ export class OctokitGitHubClient implements GitHubClient {
     )
       throw new Error("Invalid repository file path");
     const client = await this.#checkedClient(task);
+    checkAssignment();
     if (task.target.kind === "pull_request") {
       const revision = task.target.revision!;
       const result = await readPinnedPullFile(

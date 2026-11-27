@@ -24,6 +24,8 @@
 | 普通讨论和明确提及 | [双设备 HTTP/SQLite 联测](../tests/self-service-e2e.test.ts)：按事件持久接收；离线、只领取或只读活动均不生成公开回执。 | 普通讨论收件时才写入策略决定 silent_by_policy；生产现场未验。 |
 | 原评论 👀 | 同一联测中，明确提及在确认收件后获得一个 App reaction ID；普通讨论没有。重启和重复投递不重复写，最终评论有独立 ID。[异常分支](../tests/github-reaction.test.ts)覆盖不明写入及只读对账。 | GitHub HTTP 为合成传输；仍需当前版本的真实原评论、离线恢复及 Bot 身份回执。 |
 
+现网 PR 文件读取：[xallor#215 的回执](https://github.com/xallor-ai/xallor/pull/215#issuecomment-7215330874) 对应 head `403ac77`。修正外部网关后，新委派的 diff 及文件读取分别耗时 17.98s、19.73s，均成功；这不是原 opened 事件重跑或失败通知的现网证据。
+
 ## 状态和证据口径
 
 - **已实现**：代码存在，并列出测试或源码入口；不自动代表线上已验收。

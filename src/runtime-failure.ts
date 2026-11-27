@@ -31,6 +31,7 @@ export class RuntimeFailure extends Error {
 
 // Only definitive execution or input-evidence failures qualify for a Channel-authored status notice.
 export const notifiableFailures = [
+  "tool_call_failed",
   "tool_round_limit",
   "no_final_answer",
   "runtime_response_invalid",

@@ -199,7 +199,12 @@ export interface GitHubClient {
     id?: number,
   ): Promise<{ id: number; url: string }>;
   readIssue(task: Task): Promise<unknown>;
-  readFile(task: Task, path: string): Promise<unknown>;
+  // Authorize the target, then check the live assignment before fetching any file data.
+  readFile(
+    task: Task,
+    path: string,
+    checkAssignment: () => void,
+  ): Promise<unknown>;
   publishComment(
     task: Task,
     text: string,

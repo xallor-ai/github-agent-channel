@@ -123,6 +123,8 @@ curl --fail http://127.0.0.1:18896/healthz
 
 先备份配置，执行 `nginx -t`，通过后再reload。官方Nginx容器的templates文件只在启动流程中做envsubst；修改模板后直接reload不会重新展开，须按现有部署方式生成运行配置并验证。容器网关使用Docker DNS动态解析上游，以适应Channel重建换IP。
 
+核对生成片段、持久模板及 `nginx -T` 中两个实际 location：Webhook 只负责收件，默认 15s；连接器要等待 GitHub 的授权和固定版本文件读取，默认 150s。不要把前者的时限复制到后者。升级外部网关后，以耗时超过旧时限的真实 `read_file` 及发布回执验收；健康探针或无凭据 401 不能验证这个路径。
+
 ### 没有现成入口：caddy
 
 把 `deployment.mode` 改为 `caddy`，填写实际 `publicUrl`。确认域名A/AAAA记录和ECS入口对应，安全组/防火墙允许TCP80/443，且这两个端口没有其他服务占用。然后运行同样的render/up/status命令。

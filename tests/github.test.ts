@@ -268,7 +268,7 @@ test("reads are scoped, marked untrusted and bounded", async () => {
   const { client, calls } = fixture();
   assert.equal(((await client.readIssue(task)) as any).untrusted, true);
   assert.equal(
-    ((await client.readFile(task, "README.md")) as any).content,
+    ((await client.readFile(task, "README.md", () => {})) as any).content,
     "hello",
   );
   for (const path of [
@@ -280,22 +280,34 @@ test("reads are scoped, marked untrusted and bounded", async () => {
     "C:/a",
     "%2e%2e/secret",
   ])
-    await assert.rejects(client.readFile(task, path));
+    await assert.rejects(client.readFile(task, path, () => {}));
   assert.deepEqual(
-    await fixture({ directory: true }).client.readFile(task, "folder"),
+    await fixture({ directory: true }).client.readFile(
+      task,
+      "folder",
+      () => {},
+    ),
     { untrusted: true, unavailable: "not_a_file" },
   );
   assert.deepEqual(
-    await fixture({ size: 131073 }).client.readFile(task, "large"),
+    await fixture({ size: 131073 }).client.readFile(task, "large", () => {}),
     { untrusted: true, unavailable: "file_too_large" },
   );
   assert.deepEqual(
-    await fixture({ contentStatus: 404 }).client.readFile(task, "missing"),
+    await fixture({ contentStatus: 404 }).client.readFile(
+      task,
+      "missing",
+      () => {},
+    ),
     { untrusted: true, unavailable: "file_unavailable" },
   );
   for (const status of [401, 403, 429, 503])
     await assert.rejects(
-      fixture({ contentStatus: status }).client.readFile(task, "README.md"),
+      fixture({ contentStatus: status }).client.readFile(
+        task,
+        "README.md",
+        () => {},
+      ),
     );
   assert.ok(calls.some((x) => x.path === "/repos/org/repo/issues/5"));
 });
@@ -348,7 +360,7 @@ test("an Issue closed without a webhook cannot be assigned or expose tool data",
   for (const check of [
     () => f.client.authorize(running),
     () => f.client.readIssue(running),
-    () => f.client.readFile(running, "README.md"),
+    () => f.client.readFile(running, "README.md", () => {}),
   ])
     await assert.rejects(check, AccessDenied);
   assert.ok(!f.calls.some((call) => call.path.includes("/contents/")));
@@ -571,7 +583,10 @@ test("only resolution accepts an unpinned PR; foreign heads, stale versions and 
   const { client, calls } = fixture();
   assert.deepEqual(await client.resolvePullRevision(unpinned), revision);
   await assert.rejects(client.authorize(unpinned), AccessDenied);
-  await assert.rejects(client.readFile(unpinned, "README.md"), AccessDenied);
+  await assert.rejects(
+    client.readFile(unpinned, "README.md", () => {}),
+    AccessDenied,
+  );
   await assert.rejects(client.readPullDiff(task), AccessDenied);
   assert.ok(
     !calls.some(
@@ -586,7 +601,10 @@ test("only resolution accepts an unpinned PR; foreign heads, stale versions and 
   ]) {
     const f = fixture({ pull: () => ({ ...openPull, ...drift }) });
     await assert.rejects(f.client.resolvePullRevision(pinned), AccessDenied);
-    await assert.rejects(f.client.readFile(pinned, "README.md"), AccessDenied);
+    await assert.rejects(
+      f.client.readFile(pinned, "README.md", () => {}),
+      AccessDenied,
+    );
     assert.ok(!f.calls.some((c) => c.path.includes("/contents/")));
   }
 });
@@ -595,13 +613,24 @@ test("PR file reads use pinned head even when same path exists on default branch
     fileAt: () => "not-pinned",
     gitObject: pinnedFileObjects(),
   });
-  assert.deepEqual(await client.readFile(pinned, "src/readme.md"), {
+  assert.deepEqual(await client.readFile(pinned, "src/readme.md", () => {}), {
     untrusted: true,
     revision,
     path: "src/readme.md",
     content: "\uFEFFonly-on-head",
   });
   assert.ok(!calls.some((call) => call.path.includes("/contents/")));
+});
+
+test("file reads stop before fetching Git objects when the assignment ends during authorization", async () => {
+  const { client, calls } = fixture({ gitObject: pinnedFileObjects() });
+  await assert.rejects(
+    client.readFile(pinned, "src/readme.md", () => {
+      throw Error("lease ended");
+    }),
+    /lease ended/,
+  );
+  assert.ok(!calls.some((call) => call.path.includes("/git/")));
 });
 
 function pinnedFileObjects(
@@ -661,12 +690,15 @@ test("pinned PR reads never follow symlinks or accept content that does not matc
   const symbolic = fixture({
     gitObject: pinnedFileObjects({ mode: "120000" }),
   });
-  assert.deepEqual(await symbolic.client.readFile(pinned, "src/readme.md"), {
-    untrusted: true,
-    revision,
-    path: "src/readme.md",
-    unavailable: "not_a_file",
-  });
+  assert.deepEqual(
+    await symbolic.client.readFile(pinned, "src/readme.md", () => {}),
+    {
+      untrusted: true,
+      revision,
+      path: "src/readme.md",
+      unavailable: "not_a_file",
+    },
+  );
   assert.ok(
     !symbolic.calls.some((call) => /\/(blobs|contents)\//.test(call.path)),
   );
@@ -675,7 +707,7 @@ test("pinned PR reads never follow symlinks or accept content that does not matc
     gitObject: pinnedFileObjects({ content: "\uFEFFnot-the-head" }),
   });
   await assert.rejects(
-    tampered.client.readFile(pinned, "src/readme.md"),
+    tampered.client.readFile(pinned, "src/readme.md", () => {}),
     /Git object/,
   );
 });
@@ -688,7 +720,7 @@ test("pinned PR reads distinguish directories, missing files and oversized blobs
     ["src/missing.md", "file_unavailable"],
     ["src/readme.md", "file_too_large"],
   ]) {
-    assert.deepEqual(await client.readFile(pinned, path), {
+    assert.deepEqual(await client.readFile(pinned, path, () => {}), {
       untrusted: true,
       revision,
       path,
@@ -704,7 +736,10 @@ test("a PR change also withholds pinned unavailable results", async () => {
     gitObject: pinnedFileObjects(),
     pull: () => (++checks === 1 ? openPull : { ...openPull, state: "closed" }),
   });
-  await assert.rejects(client.readFile(pinned, "src/missing.md"), AccessDenied);
+  await assert.rejects(
+    client.readFile(pinned, "src/missing.md", () => {}),
+    AccessDenied,
+  );
   assert.equal(checks, 2);
 });
 test("pinned PR reads fail closed on partial and oversized Git tree responses", async () => {
@@ -712,7 +747,7 @@ test("pinned PR reads fail closed on partial and oversized Git tree responses", 
     const { client, calls } = fixture({
       gitObject: pinnedFileObjects(options),
     });
-    await assert.rejects(client.readFile(pinned, "src/readme.md"));
+    await assert.rejects(client.readFile(pinned, "src/readme.md", () => {}));
     assert.ok(!calls.some((call) => /\/(blobs|contents)\//.test(call.path)));
   }
 });
