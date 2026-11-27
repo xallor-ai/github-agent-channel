@@ -215,9 +215,29 @@ export class PullTargetRejected extends AccessDenied {
       | "pr_open_unconfirmed"
       | "pr_outside_binding"
       | "pr_revision_changed",
+    readonly observedRevision?: PullRevision,
   ) {
     super(reason);
   }
+}
+export function isAutomaticReview(
+  task: Pick<Task, "target" | "source">,
+): boolean {
+  return (
+    task.source.event === "pull_request" &&
+    (task.source.action === "opened" || task.source.action === "synchronize") &&
+    task.target.kind === "pull_request"
+  );
+}
+export function observedReviewDrift(
+  task: Task,
+  error: unknown,
+): PullRevision | undefined {
+  return isAutomaticReview(task) &&
+    error instanceof PullTargetRejected &&
+    error.reason === "pr_revision_changed"
+    ? error.observedRevision
+    : undefined;
 }
 export class AmbiguousExecution extends Error {}
 

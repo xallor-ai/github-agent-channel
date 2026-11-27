@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   AccessDenied,
   AmbiguousExecution,
+  PullTargetRejected,
   type ChannelConfig,
   type Task,
 } from "../src/contracts.js";
@@ -77,6 +78,20 @@ function fixture({
   });
   return { client, writes };
 }
+test("a changed version during the final native Review check preserves the observed revision and never dispatches", async () => {
+  const f = fixture();
+  const observed = { ...target.revision, headSha: "c".repeat(40) };
+  let checks = 0;
+  await assert.rejects(
+    publishNativeReview(task, "summary", f.client, bot, async () => {
+      if (++checks === 2)
+        throw new PullTargetRejected("pr_revision_changed", observed);
+    }),
+    (e) => e instanceof PullTargetRejected && e.observedRevision === observed,
+  );
+  assert.equal(checks, 2);
+  assert.deepEqual(f.writes, []);
+});
 test("native review submits COMMENT on the pinned commit, returns a verified receipt", async () => {
   const f = fixture();
   assert.deepEqual(

@@ -3,13 +3,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
+import { summarizeReviewInput } from "./review-input.js";
 import { mergeSnapshotPublishable } from "./merge-assessment.js";
 import { cloudToolNames, type ToolFailureCode } from "./tool-audit.js";
 import { z } from "zod";
 import {
   AccessDenied,
   PullTargetRejected,
+  isAutomaticReview,
+  observedReviewDrift,
   type GitHubClient,
+  type PullRevision,
   type Task,
 } from "./contracts.js";
 import {
@@ -128,6 +132,22 @@ export class PullCoordinator {
     if (!task) throw new StaleAssignment();
     return task;
   }
+  private recordDrift(
+    task: Task,
+    error: unknown,
+    lease: string,
+    workerId: string,
+    credential: string | undefined,
+  ) {
+    const observed = observedReviewDrift(task, error);
+    if (
+      observed &&
+      credential &&
+      this.authenticate(credential)?.deviceId === workerId &&
+      this.store.assignedTask(task.id, workerId, hash(lease))
+    )
+      this.store.recordReviewDrift(task.id, observed);
+  }
   private checkReviewAccess(
     task: Task,
     workerId: string,
@@ -213,6 +233,7 @@ export class PullCoordinator {
           this.assignment(task.id, leaseToken, workerId);
         } catch (error) {
           // No request has reached the remote runtime; keep details out of the response.
+          this.recordDrift(task, error, leaseToken, workerId, credential);
           this.store.rejectUndeliveredClaim(
             task.id,
             workerId,
@@ -286,7 +307,12 @@ export class PullCoordinator {
         checkAssignment();
         if (!this.github.issueSourceGrant)
           throw new AccessDenied("Source grant unavailable");
-        const grant = await this.github.issueSourceGrant(task, checkAssignment);
+        const grant = await this.github
+          .issueSourceGrant(task, checkAssignment)
+          .catch((error: unknown) => {
+            this.recordDrift(task, error, leaseToken, workerId, credential);
+            throw error;
+          });
         checkAssignment();
         send(200, grant);
         return true;
@@ -316,6 +342,7 @@ export class PullCoordinator {
         const task = this.assignment(id, data.leaseToken, workerId);
         this.store.recordToolCall(id, data.name, "requested");
         let output: unknown;
+        let observedRevision: PullRevision | undefined;
         let fenceReason: "closed" | "merged" | "unconfirmed" | undefined;
         try {
           // The merge reader checks the binding, manager and actor before and after its read.
@@ -343,6 +370,29 @@ export class PullCoordinator {
               this.github.readMergeFacts
             ) {
               const facts = await this.github.readMergeFacts(task);
+              const pin = task.target.revision,
+                last = facts.observedRevision;
+              const repository = task.owner + "/" + task.repo;
+              if (
+                isAutomaticReview(task) &&
+                !facts.stable &&
+                facts.state === "open" &&
+                last &&
+                facts.number === task.target.number &&
+                facts.repository === repository &&
+                facts.base.repository === repository &&
+                facts.head.repository === repository &&
+                facts.base.id === task.repositoryId &&
+                facts.head.id === task.repositoryId &&
+                facts.base.sha === pin.baseSha &&
+                facts.head.sha === pin.headSha &&
+                (pin.baseSha !== last.baseSha || pin.headSha !== last.headSha)
+              )
+                observedRevision = {
+                  ...pin,
+                  baseSha: last.baseSha,
+                  headSha: last.headSha,
+                };
               if (task.continuation && !mergeSnapshotPublishable(facts))
                 fenceReason =
                   facts.state === "closed" || facts.state === "merged"
@@ -362,7 +412,14 @@ export class PullCoordinator {
             throw new AccessDenied("Device no longer authorized");
           if (fenceReason)
             this.store.fenceContinuationPublication(task, fenceReason);
+          if (observedRevision)
+            this.store.recordReviewDrift(id, observedRevision);
+          if (data.name === "read_pull_diff") {
+            const summary = summarizeReviewInput(task, output);
+            if (summary) this.store.recordReviewInput(task.id, summary);
+          }
         } catch (error) {
+          this.recordDrift(task, error, data.leaseToken, workerId, credential);
           this.store.recordToolCall(
             id,
             data.name,

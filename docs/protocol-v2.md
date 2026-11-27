@@ -47,6 +47,7 @@ allowedPaths 支持精确文件和以 `/` 或 `/**` 结尾的目录前缀；不�
 | `POST /connector/v2/tasks/<id>/tool`      | `{leaseToken,name,args}`；按 target/租约授权；PR 可用 read_pull_diff；review_access 为连接器快照访问核验，不能指定任意仓库或 SHA                      |
 | `POST /connector/v2/tasks/<id>/result`    | `{leaseToken,status:"succeeded",outcome}` 或 `{leaseToken,status:"failed"或"unknown"}` |
 | `GET /tasks/<id>/conversation` | 管理员按根任务或任一续办执行查看有界轮次、执行及发布状态和原线程回执；不附原评论正文。 |
+| `GET /tasks/<id>/review-lineage` | 管理员读取自动评审的版本取代、云端输入摘要和可核验的前一次发布。手工评论任务不作为自动评审依据；查询不访问模型或发布器。 |
 | `POST /tasks/<id>/reconcile-clarification` | 管理员对结果未知的问题做只读 GitHub 对账。唯一的同 Bot、原线程、精确正文与提交版本、可信评论 ID/创建时间才允许打开等待状态；不重发。 |
 
 管理接口 `POST /admin/device-invites` 和 `POST /admin/device-revoke` 仅供受控管理入口使用，不经公网代理。所有任务的 target/source 必填。Issue/PR 的号码在 target.number，仓库目标可以携带 ref/sha；ACP 对明确的 target.sha 校验工作区 HEAD，不匹配时拒绝启动，不自动切分支；评论 ID 只在原始 source.commentId。PR 的 target.revision 保存 baseSha、headSha、baseRepoId 和 headRepoId；评论任务在授权领取时固定版本后再交付。安装、仓库和 actor 来自服务端，不允许 Runtime 提交替换字段。
@@ -61,7 +62,7 @@ publication=none 保存成果并将 deliveryStatus 置 skipped；comment/clarifi
 
 ## 使用新状态库
 
-云端任务、活动与绑定与逐事件收件确认共享 schema 7；设备身份另库持久化，内网执行 journal 为 schema 3，活动收件箱为 schema 2。协议路径仍是 v2，须使用同一修订的服务端和 bridge。旧格式直接抛出 StorageSchemaError；没有迁移、修复或清空行为。
+云端任务、活动与绑定与逐事件收件确认共享 schema 8；设备身份另库持久化，内网执行 journal 为 schema 3，活动收件箱为 schema 2。协议路径仍是 v2，须使用同一修订的服务端和 bridge。旧格式直接抛出 StorageSchemaError；没有迁移、修复或清空行为。
 
 1. 对已有旧部署，先停止接收新任务，完成现有任务与 unknown 对账，再停止旧 bridge 和服务端。
 2. 保留旧配置和数据库备份。准备新的 dataFile/stateFile；容器使用新的 projectName/数据卷。不要把旧库挂进 v2，也不要在尚有任务运行时删除旧卷。

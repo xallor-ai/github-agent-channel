@@ -5,6 +5,8 @@ import { OctokitGitHubClient } from "../src/github.js";
 import {
   AccessDenied,
   AmbiguousExecution,
+  PullTargetRejected,
+  observedReviewDrift,
   type ChannelConfig,
   type Task,
 } from "../src/contracts.js";
@@ -433,6 +435,73 @@ test("PR may close between claim and publication; an unverifiable PR also blocks
   }
 });
 
+test("only a verified open same-repository SHA change is review replacement evidence", async () => {
+  const auto = {
+    ...pinned,
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  const newHead = "9".repeat(40),
+    changed = { ...openPull, head: { ...openPull.head, sha: newHead } };
+  for (const [read, expected] of [
+    [changed, true],
+    [{ ...changed, state: "closed", merged: true }, false],
+    [{ ...changed, head: { sha: newHead, repo: { id: 555 } } }, false],
+    [{ ...changed, head: { sha: "invalid", repo: { id: 2 } } }, false],
+  ] as const) {
+    const { client } = fixture({ pull: () => read });
+    await assert.rejects(client.authorize(auto), (e) => {
+      const observed = observedReviewDrift(auto, e);
+      assert.deepEqual(
+        observed,
+        expected ? { ...revision, headSha: newHead } : undefined,
+      );
+      assert.equal(observedReviewDrift(pinned, e), undefined);
+      return true;
+    });
+  }
+  const retargeted = {
+    ...auto,
+    outcome: {
+      publication: { kind: "comment" as const, expectedBaseRef: "former" },
+      text: "x",
+      artifacts: [],
+    },
+  };
+  await assert.rejects(
+    fixture({
+      pull: () => ({ ...openPull, base: { ...openPull.base, ref: "new" } }),
+    }).client.authorize(retargeted),
+    (e) => e instanceof PullTargetRejected && !e.observedRevision,
+  );
+  await assert.rejects(
+    fixture({
+      pull: () => changed,
+      revokeOnSecondCheck: true,
+    }).client.authorize(auto),
+    (e) => e instanceof AccessDenied && !observedReviewDrift(auto, e),
+  );
+});
+test("final pre-POST comment version drift propagates without a GitHub write", async () => {
+  const auto = {
+    ...pinned,
+    source: { event: "pull_request", action: "opened" },
+  };
+  let reads = 0;
+  const newHead = "8".repeat(40);
+  const { client, calls } = fixture({
+    pull: () =>
+      ++reads === 1
+        ? openPull
+        : { ...openPull, head: { ...openPull.head, sha: newHead } },
+  });
+  await assert.rejects(
+    client.publishComment(auto, "Findings"),
+    (e) => observedReviewDrift(auto, e)?.headSha === newHead,
+  );
+  assert.ok(
+    !calls.some((c) => c.method === "POST" && c.path.endsWith("/comments")),
+  );
+});
 test("local disable during final PR state read prevents a new comment POST", async () => {
   let enabled = true;
   const { client, calls } = fixture({

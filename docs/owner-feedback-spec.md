@@ -1,6 +1,6 @@
 # 仓库负责人如何收件、答复和复评
 
-**目标与验收规格。** 当前已实现逐事件收件确认及明确提及后的独立 👀；OpenClaw 的结构化澄清支持在原线程无 @ 续办。版本取代与生产验收仍待完成。操作见[自助接入](agent-self-service.md)。 对应 [#20 绑定](https://github.com/xallor-ai/github-agent-channel/issues/20)、[#21 负责人反馈](https://github.com/xallor-ai/github-agent-channel/issues/21)、[#22 收件回执](https://github.com/xallor-ai/github-agent-channel/issues/22)；承接 C1/C2/C4/C5/C6/C7/C8、W1/W3。用户应能在原线程得到答复，或查清为什么这件事没有公开回复。
+**目标与验收规格。** 当前已实现逐事件收件确认及明确提及后的独立 👀；OpenClaw 的结构化澄清支持在原线程无 @ 续办。自动评审会记录可查的取代依据，真实多版本验收尚未完成。操作见[自助接入](agent-self-service.md)。 对应 [#20 绑定](https://github.com/xallor-ai/github-agent-channel/issues/20)、[#21 负责人反馈](https://github.com/xallor-ai/github-agent-channel/issues/21)、[#22 收件回执](https://github.com/xallor-ai/github-agent-channel/issues/22)；承接 C1/C2/C4/C5/C6/C7/C8、W1/W3。用户应能在原线程得到答复，或查清为什么这件事没有公开回复。
 
 ## 一条消息的四份证据
 

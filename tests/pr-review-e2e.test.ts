@@ -26,7 +26,10 @@ import type { ChannelConfig } from "../src/contracts.js";
 
 const baseSha = "a".repeat(40),
   h1 = "1".repeat(40),
-  h2 = "2".repeat(40);
+  h2 = "2".repeat(40),
+  h3 = "3".repeat(40),
+  emptyCommit = "4".repeat(40),
+  rewritten = "5".repeat(40);
 const revision = (headSha: string) => ({
   baseSha,
   headSha,
@@ -76,6 +79,7 @@ async function fixture(
       nativeReview: true,
       deepReview,
       events: [
+        "push",
         "pull_request.opened",
         "pull_request.synchronize",
         "issue_comment.created",
@@ -98,6 +102,13 @@ async function fixture(
     created_at: new Date(postedAt + index * 1000).toISOString(),
   });
   const reviews: { commit_id: string; body: string }[] = [];
+  const markers = new Map([
+    [h1, "FIRST_ONLY"],
+    [h2, "SECOND_ONLY"],
+    [h3, "THIRD_ONLY"],
+    [emptyCommit, "THIRD_ONLY"], // New commit, unchanged PR diff.
+    [rewritten, "REWRITTEN_ONLY"],
+  ]);
   const filesRead: string[] = [];
   const gitTransport: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -196,9 +207,8 @@ async function fixture(
       }
     }
     if (
-      [h1, h2].some(
-        (sha) => path === `/repos/org/repo/compare/${baseSha}...${sha}`,
-      )
+      path.startsWith(`/repos/org/repo/compare/${baseSha}...`) &&
+      markers.has(path.split("...")[1]!)
     ) {
       const requested = path.split("...")[1]!;
       filesRead.push(requested);
@@ -210,9 +220,7 @@ async function fixture(
             status: "added",
             additions: 1,
             deletions: 0,
-            patch:
-              "@@ -0,0 +1 @@\n+" +
-              (requested === h1 ? "FIRST_ONLY" : "SECOND_ONLY"),
+            patch: "@@ -0,0 +1 @@\n+" + markers.get(requested),
           },
         ],
       });
@@ -222,8 +230,10 @@ async function fixture(
       const request = JSON.parse(String(init?.body));
       reviews.push(request);
       return json({
-        id: 23,
-        html_url: reviewUrl,
+        id: 22 + reviews.length,
+        html_url:
+          "https://github.com/org/repo/pull/7#pullrequestreview-" +
+          (22 + reviews.length),
         body: request.body,
         commit_id: request.commit_id,
         user: { login: "fixture[bot]" },
@@ -308,6 +318,7 @@ async function fixture(
     action: "opened" | "synchronize",
     sha: string,
     delivery?: string,
+    at?: number,
   ) =>
     send(
       "pull_request",
@@ -318,6 +329,10 @@ async function fixture(
           title: "Inspect this change",
           body: null,
           state: "open",
+          ...(at !== undefined && {
+            created_at: new Date(at).toISOString(),
+            updated_at: new Date(at).toISOString(),
+          }),
           head: { sha, repo: { id: 2 } },
           base: { sha: baseSha, repo: { id: 2 } },
         },
@@ -367,6 +382,13 @@ async function fixture(
     },
     store,
     post,
+    push: (sha: string) =>
+      send(
+        "push",
+        { ref: "refs/heads/feature", after: sha, deleted: false },
+        randomUUID(),
+        200,
+      ),
     pr,
     comment,
     agentWith,
@@ -775,6 +797,141 @@ test("opened H1 returning after synchronize H2 cannot publish; only H2 produces 
   assert.equal(await agent.once(), false);
 });
 
+test("three rapid PR heads leave scoped lineage for stale runs and only the authorized current head publishes", async (t) => {
+  const f = await fixture(t);
+  const start = Date.now() - 120000;
+  const deliveries = [randomUUID(), randomUUID(), randomUUID()];
+  const first = await f.pr("opened", h1, deliveries[0], start);
+  let second = "",
+    third = "";
+  const modelPins: string[] = [];
+  const agent = f.agentWith(async (_url, init) => {
+    const evidence = JSON.parse(
+      JSON.parse(String(init?.body)).input.at(-1).content,
+    );
+    modelPins.push(evidence.revision.headSha);
+    if (evidence.revision.headSha === h1) {
+      f.setHead(h2);
+      second = (await f.pr("synchronize", h2, deliveries[1], start + 1000))
+        .taskId;
+      f.setHead(h3);
+      third = (await f.pr("synchronize", h3, deliveries[2], start + 2000))
+        .taskId;
+      assert.equal(f.store.get(first.taskId)?.status, "running");
+      assert.equal((await f.push(h3)).taskId, null);
+      assert.deepEqual(
+        await f.pr("synchronize", h3, deliveries[2], start + 2000),
+        { taskId: third, duplicate: true },
+      );
+    }
+    return json({
+      id: "run-" + modelPins.length,
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "Observed " + evidence.files[0].patch,
+            },
+          ],
+        },
+      ],
+    });
+  });
+  assert.equal(await agent.once(), true);
+  assert.equal(f.store.get(first.taskId)?.status, "succeeded");
+  assert.equal(await f.publisher.tick(), true);
+  assert.equal(await agent.once(), false); // H2 failed the claim preflight before any model call.
+  assert.equal(f.store.get(second)?.status, "rejected");
+  assert.equal(await agent.once(), true);
+  assert.equal(await f.publisher.tick(), true);
+  assert.deepEqual(modelPins, [h1, h3]);
+  assert.deepEqual(f.filesRead, [h1, h3]);
+  assert.deepEqual(
+    f.reviews.map((r) => r.commit_id),
+    [h3],
+  );
+  assert.match(f.reviews[0].body, /THIRD_ONLY/);
+  assert.equal(
+    await fetch(f.url + "/tasks/" + first.taskId + "/review-lineage").then(
+      (r) => r.status,
+    ),
+    401,
+  );
+  for (const [id, delivery, sha] of [
+    [first.taskId, deliveries[0], h1],
+    [second, deliveries[1], h2],
+  ]) {
+    const get = async (path: string) => {
+      const res = await fetch(f.url + path, {
+        headers: { authorization: "Bearer admin" },
+      });
+      assert.equal(res.status, 200);
+      return res.json();
+    };
+    const { reviewLineage, reviewInput } = await get(
+      "/tasks/" + id + "/review-lineage",
+    );
+    assert.deepEqual(reviewLineage.previousRevision, revision(sha));
+    assert.deepEqual(reviewLineage.observedRevision, revision(h3));
+    assert.equal(reviewLineage.successorTaskId, third);
+    assert.deepEqual(
+      (await get("/activities/" + delivery)).reviewLineage,
+      reviewLineage,
+    );
+    assert.equal(f.store.get(id)?.publicationReceipt, null);
+    if (sha === h1) {
+      assert.deepEqual(reviewInput.revision, revision(h1));
+      assert.equal(reviewInput.suppliedFiles, 1);
+    } else assert.equal(reviewInput, null); // H2 was never disclosed.
+  }
+  // A new head with identical base-to-head patch is still a different target.
+  // The next rewritten head has no supplied ancestry proof: the fixture allows
+  // only full pinned comparisons, never a delta from the prior review.
+  let previousId = third;
+  for (const [i, sha] of [emptyCommit, rewritten].entries()) {
+    f.setHead(sha);
+    const { taskId } = await f.pr(
+      "synchronize",
+      sha,
+      randomUUID(),
+      start + 3000 + i * 1000,
+    );
+    assert.equal(await agent.once(), true);
+    assert.equal(f.store.get(taskId)?.publicationReceipt, null);
+    assert.equal(await f.publisher.tick(), true);
+    assert.equal(f.store.get(taskId)?.publicationReceipt?.id, 24 + i);
+    const result = await fetch(f.url + "/tasks/" + taskId + "/review-lineage", {
+      headers: { authorization: "Bearer admin" },
+    });
+    assert.equal(result.status, 200);
+    const { reviewInput, previousPublishedReview } = await result.json();
+    assert.deepEqual(reviewInput.revision, revision(sha));
+    assert.equal(reviewInput.completePatches, 1);
+    assert.equal(previousPublishedReview.taskId, previousId);
+    assert.equal(
+      previousPublishedReview.reviewInput.revision.headSha,
+      i === 0 ? h3 : emptyCommit,
+    );
+    assert.equal(previousPublishedReview.publicationReceipt.id, 23 + i);
+    previousId = taskId;
+  }
+  assert.deepEqual(f.filesRead, [h1, h3, emptyCommit, rewritten]);
+  assert.deepEqual(modelPins, f.filesRead);
+  assert.deepEqual(
+    f.reviews.map((r) => r.commit_id),
+    [h3, emptyCommit, rewritten],
+  );
+  assert.match(f.reviews[1].body, /THIRD_ONLY/);
+  assert.match(f.reviews[2].body, /REWRITTEN_ONLY/);
+  assert.doesNotMatch(f.reviews[2].body, /THIRD_ONLY/);
+  assert.equal(await agent.once(), false);
+  assert.equal(await f.publisher.tick(), false);
+});
+
 test("merge question traverses the bridge and scoped GitHub reads; a later closed readback never publishes", async (t) => {
   const f = await fixture(t);
   const { taskId } = await f.comment(undefined, "@fixture is enable merged?");
@@ -924,12 +1081,23 @@ test("a lost preparatory tool read cannot wedge the device; a lost model respons
 
 test("a newer head before claim records a scoped revision rejection and discloses no assignment", async (t) => {
   const f = await fixture(t);
-  const task = await f.pr("opened", h1);
+  const at = Date.now() - 10_000;
+  const task = await f.pr("opened", h1, undefined, at);
   f.setHead(h2);
   const response = await f.post("claim", { runtime: fixtureAgent });
   assert.equal(response.status, 204);
   assert.equal(await response.text(), "");
   assert.equal(f.store.get(task.taskId)?.error, "pr_revision_changed");
+  assert.deepEqual(
+    f.store.reviewLineage(task.taskId)?.observedRevision,
+    revision(h2),
+  );
+  assert.equal(f.store.reviewLineage(task.taskId)?.successorTaskId, null);
+  const successor = await f.pr("synchronize", h2, undefined, at + 1000);
+  assert.equal(
+    f.store.reviewLineage(task.taskId)?.successorTaskId,
+    successor.taskId,
+  );
 });
 
 test("only the dedicated grant route releases a credential and never after the assignment expires", async (t) => {

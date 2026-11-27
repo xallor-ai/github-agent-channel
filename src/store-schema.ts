@@ -122,6 +122,10 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "data",
       ],
       reactionCooldowns: ["installationId", "until"],
+      reviewDrifts: ["taskId", "observed", "observedAt"],
+      reviewGenerations: ["oldTaskId", "via", "returnedAt", "successor"],
+      reviewInputs: ["taskId", "summary", "suppliedAt"],
+      reviewBoundaries: ["repositoryId", "number", "closedAt"],
       clarifications: [
         "questionTaskId",
         "rootTaskId",
@@ -173,7 +177,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "resultDigest",
       ],
     },
-    7,
+    8,
   );
   db.exec(
     "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;",
@@ -230,7 +234,12 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX clarification_inflight ON clarificationCandidates(questionTaskId,githubTime,cursor);
     CREATE INDEX clarification_candidate_age ON clarificationCandidates(receivedAt,cursor);
     CREATE INDEX clarification_sending ON tasks(bindingId,actorId,json_extract(target,'$.kind'),json_extract(target,'$.number')) WHERE deliveryStatus IN ('sending','unknown') AND json_extract(outcome,'$.publication.kind')='clarification';
-    PRAGMA user_version=7; COMMIT;`);
+    CREATE TABLE reviewDrifts(taskId TEXT PRIMARY KEY REFERENCES tasks(id),observed TEXT NOT NULL,observedAt INTEGER NOT NULL) STRICT;
+    CREATE TABLE reviewGenerations(oldTaskId TEXT PRIMARY KEY REFERENCES tasks(id),via TEXT NOT NULL REFERENCES tasks(id),returnedAt INTEGER NOT NULL,successor TEXT REFERENCES tasks(id)) STRICT;
+    CREATE TABLE reviewInputs(taskId TEXT PRIMARY KEY REFERENCES tasks(id),summary TEXT NOT NULL,suppliedAt INTEGER NOT NULL) STRICT;
+    CREATE TABLE reviewBoundaries(repositoryId INTEGER NOT NULL,number INTEGER NOT NULL,closedAt INTEGER NOT NULL,PRIMARY KEY(repositoryId,number,closedAt)) STRICT;
+    CREATE INDEX review_chronology ON tasks(bindingId,json_extract(target,'$.number'),githubTime) WHERE json_extract(source,'$.event')='pull_request';
+    PRAGMA user_version=8; COMMIT;`);
 }
 
 // The task database rejects extra tables; keep the cloud tool ledger independent

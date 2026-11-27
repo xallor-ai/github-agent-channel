@@ -59,19 +59,19 @@ export async function checkPull(
     baseRepoId: data.base.repo.id,
     headRepoId: data.head.repo.id,
   };
-  const publication = task.outcome?.publication;
-  if (
-    (publication?.kind === "comment" || publication?.kind === "review") &&
-    publication.expectedBaseRef !== undefined &&
-    publication.expectedBaseRef !== data.base.ref
-  )
-    throw new PullTargetRejected("pr_revision_changed");
   if (
     expected &&
     (expected.baseSha !== revision.baseSha ||
       expected.headSha !== revision.headSha ||
       expected.baseRepoId !== revision.baseRepoId ||
       expected.headRepoId !== revision.headRepoId)
+  )
+    throw new PullTargetRejected("pr_revision_changed", revision);
+  const publication = task.outcome?.publication;
+  if (
+    (publication?.kind === "comment" || publication?.kind === "review") &&
+    publication.expectedBaseRef !== undefined &&
+    publication.expectedBaseRef !== data.base.ref
   )
     throw new PullTargetRejected("pr_revision_changed");
   return { revision, changedFiles: data.changed_files };

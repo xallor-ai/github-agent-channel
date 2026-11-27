@@ -1,5 +1,10 @@
 import type { Octokit } from "@octokit/core";
-import { AccessDenied, AmbiguousExecution, type Task } from "./contracts.js";
+import {
+  AccessDenied,
+  AmbiguousExecution,
+  PullTargetRejected,
+  type Task,
+} from "./contracts.js";
 
 function reviewScope(task: Task) {
   if (
@@ -129,7 +134,8 @@ export async function publishNativeReview(
   const check = async () => {
     try {
       await authorize();
-    } catch {
+    } catch (e) {
+      if (e instanceof PullTargetRejected) throw e;
       throw new AccessDenied("Cannot confirm authorization for native review");
     }
   };
