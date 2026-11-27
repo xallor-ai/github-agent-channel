@@ -9,10 +9,12 @@ editing and its own tools. Channel does not implement a coding loop. Only native
 bridge execution is supported initially: Docker rendering rejects ACP configuration
 before writing a deployment bundle.
 
+The [PR review setup](pr-review.md) describes the OpenClaw snapshot and native COMMENT Review options. They are not ACP configuration fields. ACP runs its own installed harness in an administrator-prepared checkout.
+
 Prepare a dedicated clean local Git checkout with `origin` pointing to the task's
 `https://github.com/OWNER/REPO.git` (GitHub SSH forms also work). Configure the
 numeric repository ID and absolute checkout path. For a repository task with an
-explicit target SHA (such as a push), HEAD must equal that SHA before the harness
+explicit target SHA (such as a push), HEAD must equal that SHA. For a PR task, both repository IDs must match the binding and workspace HEAD must equal the pinned PR head before the harness
 can start. A detached HEAD at that commit is accepted; the ref name is not used
 to switch branches. Prepare the checkout yourself; a mismatch is rejected. Relative workspace paths resolve
 against the agent configuration file. Do not share a checkout between bridge
@@ -24,6 +26,7 @@ channel:
   tokenFile: secrets/connector-token
 runtime:
   type: acp
+  agentId: coding
   command: /absolute/path/to/acp-harness
   args: ["--acp"] # replace with the installed harness's actual ACP invocation
   timeoutMs: 600000

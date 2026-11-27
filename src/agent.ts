@@ -1,8 +1,19 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { buildRevision } from "./build-revision.js";
+import { RuntimeFailure } from "./runtime-failure.js";
+import { dirname, join } from "node:path";
+import { OpenClawConnector } from "./connector.js";
+import { openReviewSnapshot } from "./review-snapshot.js";
+import { prepareReviewCache } from "./review-cache.js";
+import { runtimeProfile } from "./runtime-profile.js";
+import { runActivityInbox } from "./agent-inbox.js";
 import { z } from "zod";
+import { priorReviewSchema } from "./review-input.js";
 import { createRuntime } from "./runtime-factory.js";
 import {
   targetSchema,
+  questionChoicesSchema,
+  continuationSchema,
   sourceSchema,
   validateOutcome,
   validateTaskOutcome,
@@ -10,7 +21,11 @@ import {
   outcomeSchema,
   publicationReceiptSchema,
 } from "./outcomes.js";
-import { AmbiguousExecution, type RuntimeConnector } from "./contracts.js";
+import {
+  AmbiguousExecution,
+  isAutomaticReview,
+  type RuntimeConnector,
+} from "./contracts.js";
 import { loadAgentConfig, type AgentConfig } from "./agent-config.js";
 import {
   AgentStore,
@@ -20,34 +35,67 @@ import {
 
 const uuid = z.string().uuid();
 const assignmentSchema = z.strictObject({
-  task: z.strictObject({
-    id: uuid,
-    prompt: z.string().max(16000),
-    deliveryId: z.string(),
-    bindingId: z.string(),
-    installationId: z.number().int().positive(),
-    repositoryId: z.number().int().positive(),
-    owner: z.string(),
-    repo: z.string(),
-    actorId: z.number().int().positive(),
-    actorLogin: z.string(),
-    target: targetSchema,
-    source: sourceSchema,
-    status: z.literal("running"),
-    deliveryStatus: z.enum([
-      "pending",
-      "sending",
-      "sent",
-      "skipped",
-      "failed",
-      "unknown",
-    ]),
-    outcome: outcomeSchema.nullable(),
-    runtime: runtimeEventSchema.nullable(),
-    publicationReceipt: publicationReceiptSchema.nullable(),
-    error: z.string().nullable(),
-    createdAt: z.number(),
-  }),
+  task: z
+    .strictObject({
+      id: uuid,
+      prompt: z.string().max(16000),
+      deliveryId: z.string(),
+      bindingId: z.string(),
+      installationId: z.number().int().positive(),
+      repositoryId: z.number().int().positive(),
+      owner: z.string(),
+      repo: z.string(),
+      actorId: z.number().int().positive(),
+      actorLogin: z.string(),
+      target: targetSchema,
+      continuation: continuationSchema.optional(),
+      questionChoices: questionChoicesSchema.optional(),
+      reviewPolicy: z
+        .strictObject({ deepReview: z.boolean(), nativeReview: z.boolean() })
+        .optional(),
+      threadContext: z
+        .array(
+          z.strictObject({
+            actor: z.string().max(100),
+            event: z.string().max(100),
+            excerpt: z.string().max(1024),
+            truncated: z.boolean(),
+          }),
+        )
+        .max(8),
+      source: sourceSchema,
+      previousReview: priorReviewSchema.optional(),
+      status: z.literal("running"),
+      deliveryStatus: z.enum([
+        "pending",
+        "sending",
+        "sent",
+        "skipped",
+        "failed",
+        "unknown",
+      ]),
+      outcome: outcomeSchema.nullable(),
+      runtime: runtimeEventSchema.nullable(),
+      publicationReceipt: publicationReceiptSchema.nullable(),
+      error: z.string().nullable(),
+      createdAt: z.number(),
+    })
+    .refine(
+      (t) =>
+        (t.target.kind === "pull_request") === (t.reviewPolicy !== undefined),
+      "Only PR assignments require explicit review policy",
+    )
+    .refine(
+      (t) =>
+        !t.previousReview ||
+        (isAutomaticReview(t) &&
+          t.target.kind === "pull_request" &&
+          t.previousReview.number === t.target.number &&
+          t.previousReview.taskId !== t.id &&
+          t.previousReview.revision.baseRepoId === t.repositoryId &&
+          t.previousReview.revision.headRepoId === t.repositoryId),
+      "Prior review must belong to the same automatic PR review scope",
+    ),
   leaseToken: z.string().min(1).max(1024),
   expiresAt: z.number().positive(),
 });
@@ -65,6 +113,7 @@ export class Agent {
     private runtime: RuntimeConnector,
     private token: string,
     private fetcher: typeof fetch = fetch,
+    private readonly prepareCache = prepareReviewCache,
   ) {}
   private async post(
     path: string,
@@ -157,7 +206,11 @@ export class Agent {
   private async step(signal?: AbortSignal): Promise<boolean> {
     if (signal?.aborted) return false;
     if (await this.report(signal)) return true;
-    const claimed = await this.post("/connector/v2/claim", {}, signal);
+    const claimed = await this.post(
+      "/connector/v2/claim",
+      { runtime: runtimeProfile(this.config.runtime) },
+      signal,
+    );
     if (claimed.status === 204) return false;
     const parsed = assignmentSchema.safeParse(claimed.data);
     if (!parsed.success) throw Error("Cloud assignment is invalid");
@@ -174,23 +227,96 @@ export class Agent {
       );
       const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
       try {
-        const output = await this.runtime.run(
+        const task = assignment.task;
+        if (
+          (task.continuation || task.questionChoices) &&
+          this.config.runtime.type !== "openclaw"
+        )
+          throw new RuntimeFailure(
+            "tool_call_invalid",
+            "Continuation requires analysis runtime",
+          );
+        const pin = task.target.kind === "pull_request" && task.target.revision;
+        const runtime =
+          this.runtime instanceof OpenClawConnector &&
+          pin &&
+          this.config.runtime.type === "openclaw" &&
+          task.reviewPolicy?.deepReview === true
+            ? this.runtime.withReviewSource(async () => {
+                const dir = await this.prepareCache(
+                  join(dirname(this.config.stateFile), "review-cache"),
+                  task,
+                  async () => {
+                    const response = await this.post(
+                      "/connector/v2/tasks/" + task.id + "/source-grant",
+                      { leaseToken: assignment.leaseToken },
+                      combined,
+                    );
+                    const grant = z
+                      .strictObject({
+                        token: z.string().min(1),
+                        expiresAt: z.iso.datetime(),
+                      })
+                      .safeParse(response.data);
+                    if (response.status !== 200 || !grant.success)
+                      throw Error("Invalid review source grant");
+                    return grant.data;
+                  },
+                  combined,
+                );
+                return openReviewSnapshot(
+                  dir,
+                  { fullName: task.owner + "/" + task.repo, sha: pin.headSha },
+                  combined,
+                );
+              })
+            : this.runtime;
+        const output = await runtime.run(
           assignment.task,
           async (name, args) => {
+            if (
+              (name === "read_merge_facts" &&
+                assignment.task.target.kind !== "pull_request") ||
+              ![
+                "read_issue",
+                "read_file",
+                "read_pull_diff",
+                "read_merge_facts",
+                "review_access",
+              ].includes(name)
+            )
+              throw new RuntimeFailure(
+                "tool_call_invalid",
+                "Unknown bridge tool",
+              );
             if (combined.aborted)
               throw new AmbiguousExecution("Execution interrupted");
             const response = await this.post(
               "/connector/v2/tasks/" + assignment.task.id + "/tool",
               { leaseToken: assignment.leaseToken, name, args },
               combined,
-            );
+            ).catch((error: unknown) => {
+              if (error instanceof CloudRejected)
+                throw new RuntimeFailure(
+                  "tool_call_failed",
+                  "Cloud rejected tool request",
+                );
+              throw error;
+            });
             if (response.status !== 200)
               throw new AmbiguousExecution("Invalid tool acknowledgement");
             return response.data;
           },
           combined,
           async (event) => {
-            const validated = runtimeEventSchema.parse(event);
+            // A runtime cannot supply the deployed bridge version. Accept only a
+            // full commit SHA configured by the deployment; never log raw env.
+            const { bridgeBuildSha: _ignored, ...handle } = event;
+            const build = buildRevision();
+            const validated = runtimeEventSchema.parse({
+              ...handle,
+              ...(build ? { bridgeBuildSha: build } : {}),
+            });
             this.store.recordRuntime(assignment.task.id, validated);
             const receipt = await this.post(
               "/connector/v2/tasks/" + assignment.task.id + "/execution",
@@ -205,20 +331,50 @@ export class Agent {
         );
         if (combined.aborted)
           throw new AmbiguousExecution("Execution interrupted");
-        const validated = validateOutcome(output);
-        validateTaskOutcome(assignment.task, validated);
+        const validated = (() => {
+          try {
+            const valid = validateOutcome(output);
+            if (
+              valid.publication.kind === "clarification" &&
+              this.config.runtime.type !== "openclaw"
+            )
+              throw Error("Clarification requires analysis runtime");
+            validateTaskOutcome(assignment.task, valid);
+            return valid;
+          } catch {
+            throw new RuntimeFailure(
+              "runtime_response_invalid",
+              "Invalid runtime outcome",
+            );
+          }
+        })();
         result = {
           leaseToken: assignment.leaseToken,
           status: "succeeded",
           outcome: validated,
         };
       } catch (e) {
+        const notDispatched =
+          e instanceof RuntimeFailure && e.code === "preparation_interrupted";
+        const failure = notDispatched
+          ? "preparation_interrupted"
+          : signal?.aborted
+            ? "runtime_interrupted"
+            : deadline.aborted
+              ? "runtime_timeout"
+              : e instanceof AmbiguousExecution
+                ? "runtime_transport"
+                : e instanceof RuntimeFailure
+                  ? e.code
+                  : "runtime_failed";
         result = {
           leaseToken: assignment.leaseToken,
           status:
-            e instanceof AmbiguousExecution || combined.aborted
+            !notDispatched &&
+            (e instanceof AmbiguousExecution || combined.aborted)
               ? "unknown"
               : "failed",
+          failure,
         };
       }
     }
@@ -236,6 +392,22 @@ export async function runAgent(
   const store = new AgentStore(config.stateFile);
   const runtime = createRuntime(config.runtime, configPath, secrets.runtime);
   const agent = new Agent(config, store, runtime, secrets.channel);
+  const stopInbox = new AbortController();
+  const inboxSignal = signal
+    ? AbortSignal.any([stopInbox.signal, signal])
+    : stopInbox.signal;
+  const inbox = runActivityInbox(
+    config.stateFile,
+    {
+      baseUrl: config.channel.baseUrl,
+      timeout: config.requestTimeoutMs,
+      token: secrets.channel,
+    },
+    runtimeProfile(config.runtime),
+    inboxSignal,
+  ).catch(() => {
+    console.error(JSON.stringify({ event: "activity_inbox_unavailable" }));
+  });
   let failures = 0;
   try {
     while (!signal?.aborted) {
@@ -276,6 +448,8 @@ export async function runAgent(
       }
     }
   } finally {
+    stopInbox.abort();
+    await inbox;
     store.close();
   }
 }

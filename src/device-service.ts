@@ -17,6 +17,10 @@ import {
   bindingDeclarationSchema,
   type BindingRegistry,
 } from "./binding-registry.js";
+import type { TaskStore } from "./store.js";
+import { feedQueryFields, receivedPageSchema } from "./activity-feed.js";
+import { ExpiredActivities, ReceiptScopeDenied } from "./owner-receipts.js";
+import { sameRuntimeIdentity, type RuntimeProfile } from "./runtime-profile.js";
 import { AccessDenied } from "./contracts.js";
 
 const digest = (value: string) => createHash("sha256").update(value).digest();
@@ -29,6 +33,11 @@ const target = z.strictObject({
     .string()
     .regex(/^[A-Za-z0-9_.-]{1,100}$/)
     .refine((s) => s !== "." && s !== ".."),
+});
+const feedQuery = target.extend(feedQueryFields);
+const receiptQuery = target.extend({
+  ...receivedPageSchema.shape,
+  runtime: feedQueryFields.runtime,
 });
 const update = target.extend({
   expectedRevision: z
@@ -44,7 +53,33 @@ const paths = {
   pair: "/connector/v2/devices/pair",
   read: "/connector/v2/bindings/read",
   apply: "/connector/v2/bindings/apply",
+  activities: "/connector/v2/activities",
+  received: "/connector/v2/activities/received",
 };
+function matchesActivityBinding(
+  binding: ReturnType<BindingRegistry["get"]>,
+  runtime: RuntimeProfile,
+) {
+  const agent = binding?.responsibleAgent;
+  return (
+    binding?.enabled === true &&
+    agent !== undefined &&
+    sameRuntimeIdentity(agent, runtime) &&
+    agent.deepReview === runtime.deepReview &&
+    agent.nativeReview === runtime.nativeReview
+  );
+}
+type VerifiedPrincipal = Parameters<BindingRegistry["apply"]>[0];
+function sameBindingIdentity(a: VerifiedPrincipal, b: VerifiedPrincipal) {
+  return (
+    a.installationId === b.installationId &&
+    a.repositoryId === b.repositoryId &&
+    a.deviceId === b.deviceId &&
+    a.administratorId === b.administratorId &&
+    a.owner === b.owner &&
+    a.repo === b.repo
+  );
+}
 const layout = [
   "CREATE TABLE devices(deviceId TEXT PRIMARY KEY, githubUserId INTEGER NOT NULL, credential BLOB NOT NULL UNIQUE, revoked INTEGER NOT NULL CHECK(revoked IN(0,1,2))) STRICT",
   "CREATE TABLE invites(digest BLOB PRIMARY KEY, githubUserId INTEGER NOT NULL, expiresAt INTEGER NOT NULL) STRICT",
@@ -74,11 +109,15 @@ async function jsonBody(req: IncomingMessage): Promise<unknown> {
 }
 
 type Options = {
+  runtimeLastSeen?: TaskStore["runtimeLastSeen"];
+  recentActivities?: TaskStore["activitiesForDevice"];
+  confirmActivities?: TaskStore["confirmActivities"];
   dbPath: string;
   adminToken: string;
   appId: string;
   privateKey: string;
   registry: BindingRegistry;
+  hasWriteProfile?: (installationId: number, repositoryId: number) => boolean;
   fetchImpl?: typeof fetch;
   now?: () => number;
 };
@@ -89,8 +128,16 @@ export class DeviceService {
   readonly #verifier: BindingPrincipalVerifier;
   readonly #registry: BindingRegistry;
   readonly #fetch: typeof fetch;
+  readonly #runtimeLastSeen: Options["runtimeLastSeen"];
+  readonly #recentActivities: Options["recentActivities"];
+  readonly #confirmActivities: Options["confirmActivities"];
+  readonly #hasWriteProfile: Options["hasWriteProfile"];
   readonly #now: () => number;
   constructor(options: Options) {
+    this.#runtimeLastSeen = options.runtimeLastSeen;
+    this.#recentActivities = options.recentActivities;
+    this.#confirmActivities = options.confirmActivities;
+    this.#hasWriteProfile = options.hasWriteProfile;
     this.#admin = digest(options.adminToken);
     this.#fetch = options.fetchImpl ?? fetch;
     this.#now = options.now ?? Date.now;
@@ -260,21 +307,22 @@ export class DeviceService {
     });
     return { deviceId, githubUserId };
   }
-  async #verify(credential: string, input: z.infer<typeof target>) {
-    const device = this.authenticate(credential);
-    const before =
-      device &&
-      this.#registry.ownedSelection(device.deviceId, input.owner, input.repo);
+  async #verify(
+    credential: string,
+    input: z.infer<typeof target>,
+    before: ReturnType<BindingRegistry["ownedSelections"]>,
+  ) {
     try {
       return await this.#verifier.verify(credential, input);
     } catch (e) {
-      if (
-        e instanceof AdministratorLost &&
-        before &&
-        e.repositoryId === before.repositoryId &&
-        e.installationId === before.installationId
-      )
-        this.#registry.disableIfCurrent(before);
+      if (e instanceof AdministratorLost) {
+        const affected = before.find(
+          (b) =>
+            e.repositoryId === b.repositoryId &&
+            e.installationId === b.installationId,
+        );
+        if (affected) this.#registry.disableIfCurrent(affected);
+      }
       if (e instanceof AccessDenied) {
         if (e.message === "Device is not paired")
           throw new Rejection(401, "device_unauthorized");
@@ -299,6 +347,22 @@ export class DeviceService {
       }
       throw new Rejection(502, "github_unavailable");
     }
+  }
+  #runtimePoll(binding: ReturnType<BindingRegistry["get"]>) {
+    if (!binding?.enabled || !binding.responsibleAgent)
+      return { status: "unbound", lastPolledAt: null };
+    if (!this.#runtimeLastSeen)
+      return { status: "unknown", lastPolledAt: null };
+    const lastPolledAt = this.#runtimeLastSeen(
+      binding.deviceId,
+      binding.responsibleAgent,
+    );
+    if (lastPolledAt === null) return { status: "never_seen", lastPolledAt };
+    const age = this.#now() - lastPolledAt;
+    return {
+      status: age >= 0 && age <= 120_000 ? "recent" : "last_seen",
+      lastPolledAt,
+    };
   }
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const path = req.url;
@@ -344,10 +408,42 @@ export class DeviceService {
           throw new Rejection(401, "device_unauthorized");
         const body = await jsonBody(req);
         const change = path === paths.apply ? update.parse(body) : undefined;
-        const selection = change
-          ? { owner: change.owner, repo: change.repo }
+        const feed =
+          path === paths.activities
+            ? feedQuery.parse(body)
+            : path === paths.received
+              ? receiptQuery.parse(body)
+              : undefined;
+        const selector = change ?? feed;
+        const selection = selector
+          ? { owner: selector.owner, repo: selector.repo }
           : target.parse(body);
-        const who = await this.#verify(credential, selection);
+        const paired = this.authenticate(credential);
+        if (!paired) throw new Rejection(401, "device_unauthorized");
+        const owned = this.#registry.ownedSelections(
+          paired.deviceId,
+          paired.githubUserId,
+          selection.owner,
+          selection.repo,
+        );
+        const before = feed
+          ? owned.filter((binding) =>
+              matchesActivityBinding(binding, feed.runtime),
+            )
+          : owned;
+        if (feed && before.length === 0)
+          throw new Rejection(403, "binding_owner");
+        const { who, installation } = await this.#verify(
+          credential,
+          selection,
+          owned,
+        );
+        const coverage = {
+          ...installation,
+          serverWriteProfile:
+            this.#hasWriteProfile?.(who.installationId, who.repositoryId) ??
+            null,
+        };
         // No await between the last credential/ownership checks and the registry operation.
         const device = this.authenticate(credential);
         if (
@@ -365,14 +461,74 @@ export class DeviceService {
             binding.administratorId !== who.administratorId)
         )
           throw new Rejection(403, "binding_owner");
-        if (change) {
-          try {
+        if (feed) {
+          const verifiedBefore = before.find((b) =>
+            sameBindingIdentity(b, who),
+          );
+          if (!binding || !verifiedBefore)
+            throw new Rejection(403, "binding_owner");
+          if (
+            verifiedBefore.revision !== binding.revision ||
+            !sameBindingIdentity(binding, who)
+          )
+            throw new Rejection(409, "binding_conflict");
+          if (!matchesActivityBinding(binding, feed.runtime))
+            throw new Rejection(403, "binding_owner");
+          const bindingId = [
+            binding.installationId,
+            binding.repositoryId,
+            binding.deviceId,
+            binding.revision,
+          ].join(":");
+          if ("entries" in feed) {
+            if (feed.bindingId !== bindingId)
+              throw new Rejection(409, "binding_conflict");
+            if (!this.#confirmActivities)
+              throw new Rejection(503, "service_error");
+            try {
+              this.#confirmActivities(
+                binding.deviceId,
+                feed.runtime,
+                bindingId,
+                feed.entries,
+              );
+            } catch (e) {
+              if (e instanceof ExpiredActivities) {
+                send(410, { bindingId, expired: e.expired });
+                return true;
+              }
+              if (e instanceof ReceiptScopeDenied)
+                throw new Rejection(403, "binding_owner");
+              throw e;
+            }
+            send(200, { bindingId, entries: feed.entries });
+          } else {
+            if (!this.#recentActivities)
+              throw new Rejection(503, "service_error");
             send(200, {
-              binding: this.#registry.apply(
-                who,
-                change.expectedRevision,
-                change.declaration,
+              bindingId,
+              ...this.#recentActivities(
+                binding.deviceId,
+                feed.after,
+                feed.limit,
+                feed.runtime,
+                bindingId,
               ),
+            });
+          }
+        } else if (change) {
+          try {
+            const updated = this.#registry.apply(
+              who,
+              change.expectedRevision,
+              change.declaration,
+            );
+            send(200, {
+              binding: updated,
+              coverage: {
+                ...coverage,
+                runtimePoll: this.#runtimePoll(updated),
+              },
             });
           } catch (e) {
             if (
@@ -384,7 +540,11 @@ export class DeviceService {
               throw new Rejection(409, "binding_conflict");
             throw e;
           }
-        } else send(200, { binding: binding ?? null });
+        } else
+          send(200, {
+            binding: binding ?? null,
+            coverage: { ...coverage, runtimePoll: this.#runtimePoll(binding) },
+          });
       }
     } catch (e) {
       if (e instanceof Rejection) send(e.status, { error: e.message });

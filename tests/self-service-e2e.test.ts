@@ -1,3 +1,4 @@
+import { fixtureAgent } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -15,6 +16,8 @@ import { DeviceService } from "../src/device-service.js";
 import { createChannelServer } from "../src/server.js";
 import { BindingPrincipalVerifier } from "../src/binding-principal.js";
 import { DeliveryWorker } from "../src/worker.js";
+import { ReactionWorker } from "../src/reaction-worker.js";
+import { ActivityInbox } from "../src/agent-inbox.js";
 import { PullCoordinator } from "../src/pull.js";
 import { OctokitGitHubClient } from "../src/github.js";
 import { AccessDenied, type ChannelConfig } from "../src/contracts.js";
@@ -40,6 +43,10 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   ];
   const actor = { id: 99, login: "author", type: "User" };
   const publication: string[] = [];
+  const eyes: string[] = [];
+  let revealHistoricalReaction = false;
+  let limitHistoricalLookup = false;
+  let historicalReads = 0;
   let actorAllowed = true,
     secondAdmin = true;
   // Only external GitHub transport is synthetic. Octokit authenticates managers,
@@ -47,6 +54,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const gitFetch: typeof fetch = async (url, init) => {
     const { pathname, origin } = new URL(String(url));
     assert.equal(origin, "https://api.github.com");
+    if (pathname === "/app") return Response.json({ id: 1, slug: "robot" });
     if (pathname === "/user") {
       const n = githubUsers.find(
         (u) =>
@@ -82,6 +90,53 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
         });
       }
       if (pathname === prefix) return Response.json(r);
+      if ([501, 503].some((n) => pathname === prefix + "/issues/comments/" + n))
+        return Response.json({
+          id: Number(pathname.split("/").at(-1)),
+          user: actor,
+          issue_url: origin + prefix + "/issues/1",
+        });
+      if (pathname === prefix + "/issues/comments/503/reactions") {
+        if (init?.method === "POST") {
+          eyes.push(pathname);
+          return Response.json(
+            { message: "response unavailable" },
+            { status: 502 },
+          );
+        }
+        historicalReads++;
+        if (limitHistoricalLookup)
+          return Response.json(
+            { message: "cooldown" },
+            { status: 429, headers: { "retry-after": "60" } },
+          );
+        return Response.json(
+          revealHistoricalReaction
+            ? [
+                {
+                  id: 779,
+                  content: "eyes",
+                  user: { type: "Bot", login: "robot[bot]" },
+                },
+              ]
+            : [],
+        );
+      }
+      if (
+        pathname === prefix + "/issues/comments/501/reactions" &&
+        init?.method === "POST"
+      ) {
+        assert.deepEqual(JSON.parse(String(init.body)), { content: "eyes" });
+        eyes.push(pathname);
+        return Response.json(
+          {
+            id: 778,
+            content: "eyes",
+            user: { type: "Bot", login: "robot[bot]" },
+          },
+          { status: 201 },
+        );
+      }
       if (pathname.startsWith(prefix + "/collaborators/")) {
         const login = pathname.split("/").at(-2);
         if (login === actor.login)
@@ -98,6 +153,8 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
           user,
         });
       }
+      if (pathname === prefix + "/issues/1")
+        return Response.json({ number: 1, state: "open" });
       if (pathname === prefix + "/issues/1/comments") {
         if (init?.method === "POST") {
           publication.push(r.name + ":" + JSON.parse(String(init.body)).body);
@@ -121,6 +178,9 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
       dbPath: config.dataFile + ".devices",
       adminToken: "admin",
       registry: store.registry,
+      runtimeLastSeen: store.runtimeLastSeen.bind(store),
+      recentActivities: store.activitiesForDevice.bind(store),
+      confirmActivities: store.confirmActivities.bind(store),
       appId: "1",
       privateKey: key,
       fetchImpl: gitFetch,
@@ -148,7 +208,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
           who.githubUserId !== b.administratorId
         )
           throw new AccessDenied("binding unavailable");
-        const checked = await verifier.verifyPaired(who, {
+        const { who: checked } = await verifier.verifyPaired(who, {
           owner: task.owner,
           repo: task.repo,
         });
@@ -181,6 +241,9 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
         },
       },
       lookup,
+      undefined,
+      undefined,
+      github.reconcileOwnerReaction.bind(github),
     );
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -189,6 +252,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
     return {
       store,
       worker,
+      reactions: new ReactionWorker(store, github),
       url: "http://127.0.0.1:" + addr.port,
       async close() {
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -225,18 +289,21 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
       expectedRevision: revision,
       declaration: {
         enabled,
-        requireMention: false,
+        ...(enabled
+          ? { responsibleAgent: fixtureAgent, autoTriage: true }
+          : {}),
         events: enabled ? ["issues.opened"] : [],
       },
     });
-  const claim = (i: number) => post(v + "/claim", tokens[i], {});
+  const claim = (i: number) =>
+    post(v + "/claim", tokens[i], { runtime: fixtureAgent });
   const hook = (i: number, delivery = randomUUID(), signature = true) => {
     const body = JSON.stringify({
       installation: { id: 700 + i },
       repository: repos[i],
       sender: actor,
       action: "opened",
-      issue: { number: 1, title: "inspect", body: "hello" },
+      issue: { number: 1, title: "inspect", body: "hello", state: "open" },
     });
     return fetch(cloud.url + "/webhooks/github", {
       method: "POST",
@@ -289,8 +356,49 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const second = await accept(1);
   await cloud.close();
   cloud = await start();
+  const feed = (
+    user: number,
+    repository: number,
+    after = 0,
+    agent = fixtureAgent.id as string,
+  ) =>
+    post(v + "/activities", tokens[user], {
+      owner: "example",
+      repo: repos[repository].name,
+      runtime: { ...fixtureAgent, id: agent },
+      after,
+      limit: 1,
+    });
+  const pageResponse = await feed(0, 0);
+  assert.equal(pageResponse.status, 200);
+  const page = await pageResponse.json();
+  assert.equal(page.bindingId, cloud.store.get(id)?.bindingId);
+  assert.equal(page.activities.length, 1);
+  assert.equal(page.activities[0].deliveryId, delivery);
+  assert.equal(page.activities[0].taskId, id);
+  assert.equal(page.activities[0].reason, "triage");
+  const emptyPage = await (await feed(0, 0, page.nextCursor)).json();
+  assert.equal(emptyPage.bindingId, page.bindingId);
+  assert.deepEqual(emptyPage.activities, []);
+  assert.equal((await feed(0, 0, 0, "different-agent")).status, 403);
+  assert.equal((await feed(1, 0)).status, 403);
+  const pollEvidence = async (i: number) =>
+    (
+      await (
+        await post(v + "/bindings/read", tokens[i], {
+          owner: "example",
+          repo: repos[i].name,
+        })
+      ).json()
+    ).coverage.runtimePoll;
+  assert.deepEqual(await pollEvidence(0), {
+    status: "never_seen",
+    lastPolledAt: null,
+  });
+  assert.equal((await pollEvidence(1)).status, "recent");
   const alpha = await claim(0);
   assert.equal(alpha.status, 200);
+  assert.equal((await pollEvidence(0)).status, "recent");
   const firstAssignment = await alpha.json();
   assert.equal(firstAssignment.task.id, id);
   assert.equal((await result(1, id, firstAssignment.leaseToken)).status, 409);
@@ -324,6 +432,7 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   const active = await (await claim(1)).json();
   assert.equal(active.task.id, old);
   assert.equal((await declare(1, 1, 1, false)).status, 200);
+  assert.equal((await feed(1, 1)).status, 403);
   assert.equal(cloud.store.get(queued)?.status, "rejected");
   assert.equal((await result(1, old, active.leaseToken)).status, 409);
   assert.equal(cloud.store.get(old)?.status, "unknown");
@@ -331,4 +440,186 @@ test("two paired devices on two repositories: signed ingress, offline recovery, 
   assert.equal((await declare(1, 1, 1, true)).status, 409);
   assert.equal(await cloud.worker.tick(), false);
   assert.equal(publication.length, 1);
+  await t.test(
+    "original signed comment receives one eyes only after durable inbox acknowledgment; final comment is independent",
+    async () => {
+      const changed = await post(v + "/bindings/apply", tokens[0], {
+        owner: "example",
+        repo: "alpha",
+        expectedRevision: 1,
+        declaration: {
+          enabled: true,
+          responsibleAgent: fixtureAgent,
+          events: ["issue_comment.created"],
+        },
+      });
+      assert.equal(changed.status, 200);
+      const { binding } = await changed.json();
+      const mention = randomUUID(),
+        ordinary = randomUUID();
+      const sendComment = async (
+        id: number,
+        text: string,
+        delivery: string,
+      ) => {
+        const body = JSON.stringify({
+          installation: { id: 700 },
+          repository: repos[0],
+          sender: actor,
+          action: "created",
+          issue: { number: 1, state: "open" },
+          comment: {
+            id,
+            user: actor,
+            body: text,
+            created_at: "2026-11-25T14:00:00Z",
+          },
+        });
+        return fetch(cloud.url + "/webhooks/github", {
+          method: "POST",
+          headers: {
+            "x-github-event": "issue_comment",
+            "x-github-delivery": delivery,
+            "x-hub-signature-256":
+              "sha256=" +
+              createHmac("sha256", "webhook").update(body).digest("hex"),
+          },
+          body,
+        });
+      };
+      const receipt = async (delivery: string) => {
+        const r = await fetch(cloud.url + "/activities/" + delivery, {
+          headers: { authorization: "Bearer admin" },
+        });
+        assert.equal(r.status, 200);
+        return (await r.json()).ownerReceipt;
+      };
+      const mentioned = await sendComment(
+        501,
+        "@robot please inspect",
+        mention,
+      );
+      assert.equal(mentioned.status, 202);
+      const { taskId } = await mentioned.json();
+      assert.equal(
+        (await sendComment(502, "ordinary human discussion", ordinary)).status,
+        200,
+      );
+      assert.equal(await receipt(mention), null);
+      assert.equal(await cloud.reactions.tick(), false);
+      const lease = await (await claim(0)).json();
+      assert.equal(lease.task.id, taskId);
+      assert.equal(await cloud.reactions.tick(), false); // Lease alone is not a receipt.
+
+      const path = join(dir, "owner-bridge.db"),
+        connection = { baseUrl: cloud.url, token: tokens[0], timeout: 5000 };
+      const poll = (inbox: ActivityInbox) =>
+        inbox.pollOne(connection, fixtureAgent, new AbortController().signal);
+      let inbox = new ActivityInbox(path);
+      try {
+        inbox.remember(cloud.url, fixtureAgent, binding);
+        assert.deepEqual(await poll(inbox), { received: 2, truncated: false });
+        assert.equal(await receipt(mention), null);
+        assert.equal(await cloud.reactions.tick(), false);
+        inbox.close();
+        inbox = new ActivityInbox(path);
+        assert.deepEqual(
+          inbox
+            .records(cloud.url, fixtureAgent, binding, 0, 10)
+            ?.activities.map((x) => [x.activity.source.commentId, x.ack]),
+          [
+            [501, "pending"],
+            [502, "pending"],
+          ],
+        );
+        await poll(inbox);
+        assert.deepEqual(
+          inbox
+            .records(cloud.url, fixtureAgent, binding, 0, 10)
+            ?.activities.map((x) => x.ack),
+          ["confirmed", "confirmed"],
+        );
+      } finally {
+        inbox.close();
+      }
+      assert.equal((await receipt(ordinary)).reaction, null);
+      const ordinaryUrl = cloud.url + "/repositories/11/comments/502/receipts";
+      assert.equal((await fetch(ordinaryUrl)).status, 401);
+      const ordinaryRecords = await (
+        await fetch(ordinaryUrl, { headers: { authorization: "Bearer admin" } })
+      ).json();
+      assert.deepEqual(ordinaryRecords.receipts, [await receipt(ordinary)]);
+      assert.equal((await receipt(mention)).reaction.status, "pending");
+      assert.equal(await cloud.reactions.tick(), true);
+      assert.deepEqual((await receipt(mention)).reaction, {
+        reactionId: 778,
+        status: "sent",
+        reason: null,
+      });
+      assert.deepEqual(eyes, [
+        "/repos/example/alpha/issues/comments/501/reactions",
+      ]);
+      assert.equal(cloud.store.get(taskId)?.publicationReceipt, null);
+      assert.equal((await result(0, taskId, lease.leaseToken)).status, 200);
+      assert.equal(await cloud.worker.tick(), true);
+      assert.equal(cloud.store.get(taskId)?.publicationReceipt?.id, 333);
+      assert.equal(publication.length, 2);
+      await cloud.close();
+      cloud = await start();
+      assert.equal(
+        (
+          await (
+            await sendComment(501, "@robot please inspect", mention)
+          ).json()
+        ).duplicate,
+        true,
+      );
+      assert.equal((await receipt(mention)).reaction.reactionId, 778);
+      assert.equal(await cloud.reactions.tick(), false);
+      assert.equal(await cloud.worker.tick(), false);
+      assert.equal(eyes.length, 1);
+      const additional = randomUUID();
+      const { taskId: unknownId } = await (
+        await sendComment(503, "@robot inspect this too", additional)
+      ).json();
+      const nextInbox = new ActivityInbox(path);
+      try {
+        nextInbox.remember(cloud.url, fixtureAgent, binding);
+        const link = { ...connection, baseUrl: cloud.url };
+        await nextInbox.pollOne(
+          link,
+          fixtureAgent,
+          new AbortController().signal,
+        );
+        await nextInbox.pollOne(
+          link,
+          fixtureAgent,
+          new AbortController().signal,
+        );
+      } finally {
+        nextInbox.close();
+      }
+      assert.equal(await cloud.reactions.tick(), true);
+      assert.equal((await receipt(additional)).reaction.status, "unknown");
+      assert.equal((await declare(0, 0, binding.revision, false)).status, 200);
+      const auditPath = "/tasks/" + unknownId + "/reconcile-reaction";
+      assert.equal((await post(auditPath, tokens[0], {})).status, 401);
+      assert.equal((await post(auditPath, "admin", {})).status, 409);
+      limitHistoricalLookup = true;
+      assert.equal((await post(auditPath, "admin", {})).status, 429);
+      const limitedCount = historicalReads;
+      limitHistoricalLookup = false;
+      assert.equal((await post(auditPath, "admin", {})).status, 429);
+      assert.equal(historicalReads, limitedCount);
+      revealHistoricalReaction = true;
+      const later = Date.now() + 61_000;
+      const now = t.mock.method(Date, "now", () => later);
+      const fixed = await post(auditPath, "admin", {}).finally(() =>
+        now.mock.restore(),
+      );
+      assert.equal(fixed.status, 200);
+      assert.equal((await fixed.json()).ownerReceipt.reaction.reactionId, 779);
+      assert.equal(eyes.filter((p) => p.endsWith("/503/reactions")).length, 1);
+    },
+  );
 });

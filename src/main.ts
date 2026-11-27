@@ -9,6 +9,7 @@ import { TaskStore } from "./store.js";
 import { OctokitGitHubClient } from "./github.js";
 import { PullCoordinator } from "./pull.js";
 import { DeliveryWorker } from "./worker.js";
+import { ReactionWorker } from "./reaction-worker.js";
 import { createChannelServer } from "./server.js";
 import { resolveSecrets } from "./secrets.js";
 import { StorageSchemaError } from "./store-schema.js";
@@ -23,6 +24,13 @@ try {
     dbPath: config.dataFile + ".devices",
     adminToken: secrets.adminToken,
     registry: store.registry,
+    runtimeLastSeen: store.runtimeLastSeen.bind(store),
+    recentActivities: store.activitiesForDevice.bind(store),
+    confirmActivities: store.confirmActivities.bind(store),
+    hasWriteProfile: (i, r) =>
+      !!config.writeProfiles?.some(
+        (p) => p.installationId === i && p.repositoryId === r,
+      ),
     appId: config.github.appId,
     privateKey: secrets.privateKey,
   });
@@ -55,7 +63,7 @@ try {
       )
         throw new AccessDenied("Binding is no longer active");
       try {
-        const verified = await verifier.verifyPaired(device, {
+        const { who: verified } = await verifier.verifyPaired(device, {
           owner: task.owner,
           repo: task.repo,
         });
@@ -76,6 +84,9 @@ try {
         throw error;
       }
     },
+    fetch,
+    (id) => store.publicationAllowed(id),
+    (id) => store.reviewPublicationCurrent(id),
   );
   const coordinator = new PullCoordinator(
     store,
@@ -84,6 +95,7 @@ try {
     (credential) => devices.authenticate(credential),
   );
   const worker = new DeliveryWorker(store, github);
+  const reactions = new ReactionWorker(store, github);
   const server = createChannelServer(
     config,
     store,
@@ -98,6 +110,10 @@ try {
       },
     },
     lookup,
+    github.reconcileReview.bind(github),
+    github.readMergeFacts.bind(github),
+    github.reconcileOwnerReaction.bind(github),
+    github.reconcileClarification.bind(github),
   );
   server.listen(config.server.port, config.server.host, () =>
     console.log(
@@ -113,6 +129,11 @@ try {
     void worker
       .tick()
       .catch(() => console.error(JSON.stringify({ event: "worker_failure" })));
+    void reactions
+      .tick()
+      .catch(() =>
+        console.error(JSON.stringify({ event: "reaction_worker_failure" })),
+      );
   }, 500);
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.on(signal, () => {

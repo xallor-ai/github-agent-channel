@@ -1,4 +1,11 @@
-import { AccessDenied, type GitHubClient } from "./contracts.js";
+import {
+  AccessDenied,
+  observedReviewDrift,
+  PullTargetRejected,
+  type GitHubClient,
+} from "./contracts.js";
+import { DraftPublicationUncertain } from "./github-publication.js";
+import { noticeFailureCode } from "./runtime-failure.js";
 import { TaskStore } from "./store.js";
 
 /** Cloud-side publication only. Agent execution belongs to the outbound client. */
@@ -14,12 +21,32 @@ export class DeliveryWorker {
     try {
       const delivery = this.store.pendingDelivery();
       if (!delivery) return false;
+      const obsoleteSelection = () =>
+        !!delivery.questionChoices &&
+        !this.store.publicationAllowed(delivery.id);
+      const staleSelectionMessage =
+        "Clarification choices are no longer current; selection prompt not published";
       try {
+        if (obsoleteSelection()) {
+          this.store.markDelivery(
+            delivery.id,
+            "failed",
+            undefined,
+            staleSelectionMessage,
+          );
+          return true;
+        }
         try {
           await this.github.authorize(delivery);
-        } catch {
+        } catch (error) {
+          if (observedReviewDrift(delivery, error)) throw error;
           // No publication call has been made. Do not block the queue as an unknown write.
-          this.store.markDelivery(delivery.id, "failed");
+          this.store.markDelivery(
+            delivery.id,
+            "failed",
+            undefined,
+            obsoleteSelection() ? staleSelectionMessage : undefined,
+          );
           return true;
         }
         // Authorization may have awaited GitHub while this binding was disabled.
@@ -30,22 +57,87 @@ export class DeliveryWorker {
           )?.id !== delivery.bindingId
         )
           throw new AccessDenied("Binding changed before publication");
+        if (delivery.status === "failed") {
+          const code = noticeFailureCode(delivery.error);
+          if (!code || delivery.target.kind === "repository")
+            throw new AccessDenied("No failure notice requested");
+          const result = await this.github.publishComment(
+            delivery,
+            code === "review_diff_unavailable" &&
+              delivery.target.kind === "pull_request" &&
+              delivery.target.revision
+              ? `代码评审未完成：没有取得本次提交的可用差异。base ${delivery.target.revision.baseSha}，head ${delivery.target.revision.headSha}。本通知不是评审结论。任务 ID：${delivery.id}`
+              : `本次任务未生成可发布的分析。原因：\`${code}\`。维护者可按任务 ID ${delivery.id} 查看执行记录。`,
+          );
+          this.store.markDelivery(delivery.id, "sent", {
+            kind: "comment",
+            ...result,
+          });
+          return true;
+        }
         if (!delivery.outcome) throw Error("Missing publication outcome");
         const publication = delivery.outcome.publication;
-        if (publication.kind === "none")
-          throw new AccessDenied("No publication requested");
-        const result =
-          publication.kind === "pull_request"
-            ? await this.github.publishPullRequest(delivery, publication)
-            : await this.github.publishComment(delivery, delivery.outcome.text);
+        let result: { id: number; url: string };
+        switch (publication.kind) {
+          case "clarification": {
+            if (!this.github.publishClarification)
+              throw new AccessDenied("Clarification publication unavailable");
+            const receipt = await this.github.publishClarification(delivery);
+            this.store.markDelivery(delivery.id, "sent", {
+              kind: "comment",
+              ...receipt,
+            });
+            return true;
+          }
+          case "none":
+            throw new AccessDenied("No publication requested");
+          case "review":
+            if (!this.github.publishReview)
+              throw new AccessDenied("Native reviews unavailable");
+            result = await this.github.publishReview(
+              delivery,
+              delivery.outcome.text,
+            );
+            break;
+          case "pull_request":
+            result = await this.github.publishPullRequest(
+              delivery,
+              publication,
+            );
+            break;
+          case "comment":
+            result = await this.github.publishComment(
+              delivery,
+              delivery.outcome.text,
+            );
+            break;
+        }
         this.store.markDelivery(delivery.id, "sent", {
           kind: publication.kind,
           ...result,
         });
       } catch (error) {
+        const observed = observedReviewDrift(delivery, error);
+        if (observed)
+          this.store.recordReviewDrift(
+            delivery.id,
+            observed.revision,
+            observed.githubAt,
+          );
         this.store.markDelivery(
           delivery.id,
           error instanceof AccessDenied ? "failed" : "unknown",
+          undefined,
+          error instanceof DraftPublicationUncertain
+            ? error.message
+            : observed
+              ? "PR revision changed before publication"
+              : error instanceof PullTargetRejected &&
+                  error.reason === "pr_review_generation_changed"
+                ? "A later PR review generation prevents publication"
+                : error instanceof AccessDenied && obsoleteSelection()
+                  ? staleSelectionMessage
+                  : undefined,
         );
       }
       return true;

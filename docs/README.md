@@ -5,6 +5,10 @@ GitHub Agent Channel 是通用 GitHub 通道。当前实现严格 v2 契约、Op
 | 目的                                  | 当前入口                                                                                                 |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | 成熟版范围与验收条件 | [产品契约](product-contract.md) |
+| 收件、续办、复评与合并门禁的社区依据 | [固定版本源码、官方资料与取舍](community-workflow-decisions.md) |
+| PR 评审配置、限制与分期验收 | [使用指南](pr-review.md) · [实施方案](superpowers/plans/2026-11-25-pr-review-context.md) |
+| 产品功能细则与规划 | [功能地图与实施顺序](product-features.md) · [负责人反馈与收件回执](owner-feedback-spec.md) · [PR 合并判断](pr-merge-assessment.md) |
+| 负责人、活动与执行边界 | [#20 产品对照](repository-owner-boundary.md) |
 | 设备配对与仓库自助登记 | [命令与示例](agent-self-service.md) |
 | 仓库动态接入设计与交付边界 | [绑定生命周期](binding-lifecycle.md) |
 | Agent 如何委派、请求评审和核验回执 | [GitHub Agent Channel skill](../.agents/skills/github-agent-channel/SKILL.md) |

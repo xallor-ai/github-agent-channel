@@ -4,9 +4,18 @@ import {
   type ServerResponse,
 } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import type { ChannelConfig } from "./contracts.js";
+import type {
+  ChannelConfig,
+  BindingLookup,
+  GitHubClient,
+  PublicationReceipt,
+} from "./contracts.js";
 import { StaleBinding, TaskStore } from "./store.js";
 import { normalizeWebhook } from "./webhook.js";
+import { AccessDenied } from "./contracts.js";
+import { assessMerge } from "./merge-assessment.js";
+import { reactionFailure } from "./github-reaction.js";
+import { isAutomaticReview } from "./contracts.js";
 function authorized(header: string | undefined, token: string) {
   const a = Buffer.from(header ?? "");
   const b = Buffer.from(`Bearer ${token}`);
@@ -31,7 +40,11 @@ export function createChannelServer(
   coordinator?: {
     handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   },
-  lookup = store.activeBinding.bind(store),
+  lookup: BindingLookup = store.activeBinding.bind(store),
+  reconcileReview?: GitHubClient["reconcileReview"],
+  readMergeFacts?: GitHubClient["readMergeFacts"],
+  reconcileOwnerReaction?: GitHubClient["reconcileOwnerReaction"],
+  reconcileClarification?: GitHubClient["reconcileClarification"],
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -71,22 +84,112 @@ export function createChannelServer(
         }
         let accepted;
         try {
-          accepted = store.accept(task);
+          if ("closure" in task) {
+            store.closeThread(task.closure);
+            send(200, { ignored: true });
+            return;
+          }
+          accepted = store.observe(task);
         } catch (e) {
           if (!(e instanceof StaleBinding)) throw e;
           send(200, { ignored: true });
           return;
         }
-        send(202, { taskId: accepted.task.id, duplicate: accepted.duplicate });
+        if (accepted.taskId)
+          send(202, { taskId: accepted.taskId, duplicate: accepted.duplicate });
+        else
+          send(200, {
+            observed: true,
+            reason: accepted.reason,
+            taskId: null,
+            duplicate: accepted.duplicate,
+          });
         return;
       }
-      if (path.startsWith("/tasks/")) {
+      if (path.startsWith("/activities/")) {
         if (!authorized(req.headers.authorization, adminToken)) {
           send(401, { error: "Unauthorized" });
           return;
         }
+        const match = /^\/activities\/([0-9a-f-]{36})(\/thread)?$/i.exec(path);
+        const receipt =
+          req.method === "GET" && match && store.activityReceipt(match[1]);
+        if (!receipt) {
+          send(404, { error: "Not found" });
+          return;
+        }
+        if (match[2]) {
+          if (!receipt.activity) {
+            send(410, { error: "Activity details expired" });
+            return;
+          }
+          send(200, {
+            activities: store.recentThread({
+              ...receipt.activity,
+              deliveryId: "",
+            }),
+          });
+        } else
+          send(200, {
+            ...receipt,
+            requestedDeliveryId: match![1],
+            ownerReceipt: store.ownerReceipt(match![1]),
+            reviewLineage:
+              receipt.taskId &&
+              store.get(receipt.taskId)?.bindingId === receipt.bindingId
+                ? store.reviewLineage(receipt.taskId)
+                : null,
+          });
+        return;
+      }
+      const byComment =
+        /^\/repositories\/([1-9]\d{0,15})\/comments\/([1-9]\d{0,15})\/(task|receipts)$/.exec(
+          path,
+        );
+      if (byComment || path.startsWith("/tasks/")) {
+        if (!authorized(req.headers.authorization, adminToken)) {
+          send(401, { error: "Unauthorized" });
+          return;
+        }
+        if (byComment) {
+          const repo = Number(byComment[1]),
+            comment = Number(byComment[2]);
+          if (byComment[3] === "receipts") {
+            if (
+              req.method !== "GET" ||
+              !Number.isSafeInteger(repo) ||
+              !Number.isSafeInteger(comment)
+            )
+              send(404, { error: "Not found" });
+            else
+              send(200, {
+                receipts: store.ownerReceiptForComment(repo, comment),
+              });
+            return;
+          }
+          const task =
+            req.method === "GET" &&
+            Number.isSafeInteger(repo) &&
+            Number.isSafeInteger(comment) &&
+            store.taskForComment(repo, comment);
+          if (!task) send(404, { error: "Not found" });
+          else
+            send(200, {
+              id: task.id,
+              target: task.target,
+              source: task.source,
+              runtime: task.runtime,
+              status: task.status,
+              deliveryStatus: task.deliveryStatus,
+              publicationReceipt: task.publicationReceipt,
+              toolAudit: store.toolAudit(task.id),
+              ownerReceipt: store.ownerReceipt(task.deliveryId),
+              clarification: store.clarificationState(task.id),
+            });
+          return;
+        }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/conversation|\/review-lineage|\/lookup-review|\/merge-facts|\/reconcile-reaction|\/reconcile-clarification)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -95,6 +198,112 @@ export function createChannelServer(
         const task = store.get(match[1]);
         if (!task) {
           send(404, { error: "Not found" });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/thread") {
+          send(200, { activities: store.recentThread(task) });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/review-lineage") {
+          if (!isAutomaticReview(task)) {
+            send(409, { error: "Not an automatic PR review" });
+          } else {
+            send(200, {
+              taskId: task.id,
+              reviewLineage: store.reviewLineage(task.id),
+              reviewInput: store.reviewInput(task.id),
+              previousPublishedReview: store.previousPublishedReview(task.id),
+            });
+          }
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/conversation") {
+          send(200, store.conversation(task.id));
+          return;
+        }
+        if (req.method === "POST" && match[2] === "/reconcile-clarification") {
+          if (
+            !reconcileClarification ||
+            task.deliveryStatus !== "unknown" ||
+            task.outcome?.publication.kind !== "clarification"
+          ) {
+            send(409, { error: "No unknown clarification to reconcile" });
+            return;
+          }
+          try {
+            const verified = await reconcileClarification(task);
+            store.resolveUnknownDelivery(task.id, "sent", {
+              kind: "comment",
+              ...verified,
+            });
+            send(200, { clarification: store.clarificationState(task.id) });
+          } catch {
+            send(409, {
+              error:
+                "Could not uniquely verify published question; check current delivery state",
+            });
+          }
+          return;
+        }
+        if (req.method === "POST" && match[2] === "/reconcile-reaction") {
+          if (!reconcileOwnerReaction || !store.reactionUnknown(task.id)) {
+            send(409, { error: "No unknown owner reaction to reconcile" });
+            return;
+          }
+          const retryAt = store.reactionLookupRetryAt(task.id);
+          if (retryAt !== null) {
+            send(429, {
+              error: "GitHub reaction lookup rate limited; check later",
+              retryAt,
+            });
+            return;
+          }
+          try {
+            const reactionId = await reconcileOwnerReaction(task);
+            if (!reactionId) {
+              send(409, {
+                error: "No verified bot reaction; receipt remains unknown",
+              });
+            } else {
+              store.reconcileReaction(task.id, reactionId);
+              send(200, { ownerReceipt: store.ownerReceipt(task.deliveryId) });
+            }
+          } catch (e) {
+            const failure = reactionFailure(e);
+            if (failure.reason === "rate_limited") {
+              store.noteReactionLookupLimit(
+                task.id,
+                failure.retryAt ?? Date.now() + 60_000,
+              );
+              send(429, {
+                error: "GitHub reaction lookup rate limited; check later",
+              });
+            } else
+              send(409, {
+                error:
+                  "Cannot confirm bot reaction; inspect the current receipt",
+              });
+          }
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/merge-facts") {
+          if (task.target.kind !== "pull_request" || !task.target.revision) {
+            send(409, { error: "No pinned pull request" });
+          } else if (!readMergeFacts) {
+            send(503, { error: "Merge facts unavailable" });
+          } else
+            try {
+              const facts = await readMergeFacts(task);
+              send(200, {
+                source: "current_readback",
+                facts,
+                assessment: assessMerge(facts),
+              });
+            } catch (error) {
+              if (error instanceof AccessDenied)
+                send(403, { error: "Task authorization denied" });
+              else send(503, { error: "Merge facts unavailable" });
+            }
           return;
         }
         if (req.method === "GET" && !match[2]) {
@@ -107,8 +316,31 @@ export function createChannelServer(
             target: task.target,
             source: task.source,
             runtime: task.runtime,
+            toolAudit: store.toolAudit(task.id),
+            ownerReceipt: store.ownerReceipt(task.deliveryId),
+            clarification: store.clarificationState(task.id),
             outcome: task.outcome,
           });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/lookup-review") {
+          if (
+            !reconcileReview ||
+            task.deliveryStatus !== "unknown" ||
+            task.outcome?.publication.kind !== "review"
+          ) {
+            send(409, { error: "No unknown native review to verify" });
+            return;
+          }
+          try {
+            const receipt = await reconcileReview(task);
+            send(200, { kind: "review", ...receipt });
+          } catch {
+            send(409, {
+              error:
+                "Could not uniquely verify native review; delivery remains unknown",
+            });
+          }
           return;
         }
         if (req.method === "POST" && match[2] === "/resolve-delivery") {
@@ -138,6 +370,18 @@ export function createChannelServer(
             });
             return;
           }
+          const publicationKind = task.outcome?.publication.kind;
+          if (
+            publicationKind === "clarification" &&
+            fields.resolution === "sent"
+          ) {
+            send(409, {
+              error:
+                "Use reconcile-clarification to verify the original GitHub question",
+            });
+            return;
+          }
+          let reviewId: number | undefined;
           let validUrl =
             fields.url === undefined && fields.resolution === "failed";
           if (typeof fields.url === "string") {
@@ -151,25 +395,37 @@ export function createChannelServer(
                 `/${task.owner}/${task.repo}/issues/${issueNumber}`,
                 `/${task.owner}/${task.repo}/pull/${issueNumber}`,
               ];
-              validUrl =
-                url.protocol === "https:" &&
-                url.hostname === "github.com" &&
-                !url.port &&
-                !url.username &&
-                !url.password &&
-                !url.search &&
-                (task.outcome?.publication?.kind === "pull_request"
-                  ? url.pathname.startsWith(
-                      `/${task.owner}/${task.repo}/pull/`,
-                    ) &&
-                    /^[1-9][0-9]*$/.test(
-                      url.pathname.slice(
-                        `/${task.owner}/${task.repo}/pull/`.length,
-                      ),
-                    ) &&
-                    !url.hash
-                  : paths.includes(url.pathname) &&
-                    /^#issuecomment-[1-9][0-9]*$/.test(url.hash));
+              if (publicationKind === "review") {
+                reviewId = /^#pullrequestreview-[1-9][0-9]*$/.test(url.hash)
+                  ? Number(url.hash.slice("#pullrequestreview-".length))
+                  : undefined;
+                validUrl =
+                  fields.resolution === "sent" &&
+                  task.target.kind === "pull_request" &&
+                  Number.isSafeInteger(reviewId) &&
+                  fields.url ===
+                    `https://github.com${paths[1]}#pullrequestreview-${reviewId}`;
+              } else {
+                validUrl =
+                  url.protocol === "https:" &&
+                  url.hostname === "github.com" &&
+                  !url.port &&
+                  !url.username &&
+                  !url.password &&
+                  !url.search &&
+                  (publicationKind === "pull_request"
+                    ? url.pathname.startsWith(
+                        `/${task.owner}/${task.repo}/pull/`,
+                      ) &&
+                      /^[1-9][0-9]*$/.test(
+                        url.pathname.slice(
+                          `/${task.owner}/${task.repo}/pull/`.length,
+                        ),
+                      ) &&
+                      !url.hash
+                    : paths.includes(url.pathname) &&
+                      /^#issuecomment-[1-9][0-9]*$/.test(url.hash));
+              }
             } catch {
               validUrl = false;
             }
@@ -182,19 +438,30 @@ export function createChannelServer(
             return;
           }
           try {
-            store.resolveUnknownDelivery(
-              task.id,
-              fields.resolution as "sent" | "failed",
-              fields.url
-                ? {
-                    kind:
-                      task.outcome?.publication.kind === "pull_request"
-                        ? "pull_request"
-                        : "comment",
-                    url: fields.url as string,
-                  }
-                : undefined,
-            );
+            let receipt: PublicationReceipt | undefined;
+            if (typeof fields.url === "string") {
+              if (publicationKind === "review") {
+                if (
+                  !reconcileReview ||
+                  reviewId === undefined ||
+                  task.deliveryStatus !== "unknown"
+                )
+                  throw Error("Cannot verify review");
+                const verified = await reconcileReview(task, reviewId);
+                if (verified.url !== fields.url || verified.id !== reviewId)
+                  throw Error("Review identity mismatch");
+                receipt = { kind: "review", ...verified };
+              } else {
+                receipt = {
+                  kind:
+                    publicationKind === "pull_request"
+                      ? "pull_request"
+                      : "comment",
+                  url: fields.url,
+                };
+              }
+            }
+            store.resolveUnknownDelivery(task.id, fields.resolution, receipt);
             send(200, { resolved: true });
           } catch {
             send(409, { error: "Delivery cannot be resolved" });

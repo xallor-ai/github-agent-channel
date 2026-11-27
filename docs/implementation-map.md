@@ -1,19 +1,31 @@
 # 当前实现地图：Channel v2
 
-状态：本次实现纠偏后的源码地图，2026-11-22。目标是通用 GitHub Channel；目前实现 OpenClaw 分析适配器和 ACP 编码适配器。真实模型/仓库验收范围单列在[能力台账](capabilities.md)。
+状态：本次实现纠偏后的源码地图，2026-11-25。目标是通用 GitHub Channel；目前实现 OpenClaw 分析适配器和 ACP 编码适配器。真实模型/仓库验收范围单列在[能力台账](capabilities.md)。
+
+仓库负责人、活动持久化、线程上下文与执行授权的区别见[产品边界对照](repository-owner-boundary.md)。
 
 ## 数据与调用链
+
+[自动评审版本账本](../src/review-lineage.ts)关联同一 PR、同一绑定和生命周期内的评审。GitHub 的版本观察、[准备的差异摘要](../src/review-input.ts)和 GitHub 发布回执分别记录；不能用其中任意一项代替另外两项。
+
+[澄清账本](../src/clarification-ledger.ts)只在[问题发布器](../src/github-clarification.ts)核验原评论后打开等待窗口。根任务 ID 不变，每轮有独立执行和发布记录。模糊回答只提示可选问题；不把 Runtime 的自然语言、GitHub 引用文字或一条未核实的 URL 当作授权。
+
+收件独立于执行和最终发布：[本机 inbox](../src/agent-inbox.ts) 与游标一起落盘后发送逐条确认；[云端账本](../src/owner-receipts.ts)校验绑定并为合格的原评论登记待发表情；[独立 worker](../src/reaction-worker.ts)通过 [GitHub Reactions](../src/github-reaction.ts) 写入及对账。收件过程不会调用模型。
 
 1. GitHub → server/webhook 验签与触发规则 → SQLite 保存 source、target、授权范围 → 202。
 2. 用户执行环境中的 agent 主动调用 v2 claim；服务端持久化 assignment 并校验 actor 后下发。
 3. agent 写本地 journal，通过 runtime-factory 调用选定 Runtime；运行标识先落盘并回传 execution。
 4. Runtime 编辑与执行归已有 harness；Channel 只收集有界产物和受控验证结果，不实现模型规划循环。
 5. result 必须为 status + 嵌套 outcome。云端保存摘要和 outcome 后 ACK；重复相同结果只确认，冲突拒绝。
-6. publication=none → skipped；comment/PR → worker 重新授权，按 policy 发布并保存 publicationReceipt；不确定则 unknown。
+6. publication=none → skipped；comment/review/pull_request → worker 重新授权，按 policy 发布并保存 publicationReceipt；不确定则 unknown。
 
 规范模型没有 task 根级 commentId/issueNumber/result/commentUrl。commentId 只作为原始评论事件的 source.commentId；目标号在 target.number；文本在 outcome.text；外部地址在 publicationReceipt.url。产物必须明确包含 artifacts 和 publication，不做兼容推断。
 
 [DeviceService](../src/device-service.ts) 核验设备凭据，[BindingPrincipalVerifier](../src/binding-principal.ts) 核对安装和管理员权限，[BindingRegistry](../src/binding-registry.ts) 与任务同库；[客户端命令](../src/self-service-cli.ts) 显式登记/停用。任务库已按首次受理时间拒绝排队满 24 小时的任务，独立于执行租约。
+
+自动 PR 评审在 OpenClaw 调用前检查固定差异中的变更行。Compare 读取失败须重新验证权限与版本；可确定缺少材料时记录失败并按原发布栅栏发送未完成通知，明确拒绝或失去权限时不这样转换。
+
+合并查询（C3/C6/C7/C8、W3/W4）：OpenClaw 对明确的 PR 状态提问直接调用 `read_merge_facts({})`；一般 PR 分析也可向模型提供该工具。云端取原任务版本和仓库，以当前绑定、安装与 actor 角色授权查询。采集模块将 GitHub 的规则和观察结果按提交、App 与时间整理；判定模块分别给出生命周期、平台门禁与工程建议。结果中的 `merge_assessment` 是判断产物，GitHub 评论是另一项需重新授权的发布动作。[实测范围](pr-merge-assessment.md#实测真实-github-只读对照)单列。
 
 ## 全部生产模块
 
@@ -25,18 +37,24 @@
 | [contracts.ts](../src/contracts.ts)                   | 规范 Task、RuntimeResult、Artifact、PublicationRequest/Receipt 和适配器接口                               |
 | [config.ts](../src/config.ts)                         | 云端服务级配置与可选 writeProfiles；仓库和事件走设备登记 API                                       |
 | [secrets.ts](../src/secrets.ts)                       | File/Env 互斥引用；PEM 原样和 token trim；不含凭据轮换功能                                                |
-| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 3、bridge journal schema 2；旧格式拒绝，绝不转换或删除旧数据                                                        |
+| [store-schema.ts](../src/store-schema.ts)             | 云任务库 schema 8、本机活动收件箱 schema 2、bridge journal schema 3；旧格式拒绝，绝不转换或删除旧数据                                                        |
 | [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
 | [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
 | [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |
+| [github-merge-facts.ts](../src/github-merge-facts.ts) | 固定两端仓库与 SHA；读取 PR、活动 ruleset、传统保护、审核决定与 head/测试合并检查；收尾复核，权限不足或截断报告缺项 |
+| [merge-assessment.ts](../src/merge-assessment.ts) | 验证事实契约，按检查适用对象与来源匹配门禁，生成三项独立结论 |
+| [github-pull-context.ts](../src/github-pull-context.ts) | 同仓开放 PR 的双方身份与版本核对，按固定 base...head 读取有界变更 |
+| [review-snapshot.ts](../src/review-snapshot.ts) | OpenClaw 每任务的只读 head 搜索及文件读取，关闭后不可用 |
+| [github-review.ts](../src/github-review.ts) | 固定 commit 的 COMMENT、按 bot/任务/版本标记核验真实回执 |
 | [github-publication.ts](../src/github-publication.ts) | 显式 writePolicy；基线/路径/模式检查；服务端分支、Git Data commit 和 draft PR；每次写入重授权             |
-| [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment 或 pull_request；none 已在存储置 skipped                                  |
+| [worker.ts](../src/worker.ts)                         | 只发布已持久化 outcome：comment、review 或 pull_request；none 已在存储置 skipped                                  |
 | [outcomes.ts](../src/outcomes.ts)                     | source/target/runtime/产物/发布 schema；有界 payload，拒绝额外身份字段                                    |
 | [agent-config.ts](../src/agent-config.ts)             | type 必填；类型从 schema 推导，加载一次返回分离的 config/secrets；命令与工作区由管理员配置                |
-| [agent-store.ts](../src/agent-store.ts)               | schema v2 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
+| [agent-store.ts](../src/agent-store.ts)               | schema v3 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
 | [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
 | [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，接收已解析 token，不再读取凭据或保留空能力声明                            |
-| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），返回明确评论/none outcome                          |
+| [review-cache.ts](../src/review-cache.ts) | 桥接进程维护隔离的 Git 对象库，按授权获取固定版本，不更新共享工作树；下载退出不明时隔离 staging，仍可读取已验证的旧版本。 |
+| [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），PR 自动装入有界 diff，可选任务快照和正文型原生 Review                          |
 | [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
 | [runtime-workspace.ts](../src/runtime-workspace.ts)   | 干净 clone 的 origin/目标 SHA/元数据检查；共用索引校验拒绝隐藏修改；收集实际变更，不 clone/reset/push     |
 | [cli.ts](../src/cli.ts)                               | 初始化、校验、渲染、生命周期、agent run；不安装 harness/App 或替用户开启 writePolicy                      |
@@ -57,7 +75,7 @@
 | 旧数据/旧配置/旧协议         | 直接拒绝；无迁移、无别名、无 fallback。新版本使用新状态目录和卷                           |
 | 工作区安全                   | 原生 ACP 不是 OS sandbox，独立 clone 与专用账户由管理员准备；不支持多个 bridge 共享工作区 |
 
-Webhook 的 `requireMention` 只改变评论/Issue 创建事件的提及条件；签名、actor、事件和 PR 状态检查仍生效。
+Webhook 先分类观察，再判断行动；同一事务保存活动、线程关联及可选任务。设备活动接口和管理诊断不触发模型。
 
 ## 配置与验证入口
 
@@ -68,3 +86,7 @@ Webhook 的 `requireMention` 只改变评论/Issue 创建事件的提及条件�
 - [Docker smoke](../scripts/smoke-deployment.mjs) 使用隔离容器、Nginx、Caddy 本地 CA、真实出站协议；[fixture server](../scripts/smoke-fixture-server.mjs) 的合成发布计数存入独立 smoke.db。
 - [OpenClaw smoke](../scripts/smoke-openclaw.mjs) 使用真实模型、合成读取工具；不能证明 GitHub PR。
 - [CI](../.github/workflows/checks.yml) 执行格式、类型、单元/HTTP、构建与 Docker smoke。当前实测见[v2 验证记录](runtime-neutral-validation-20261122.md)。
+
+工具读取与失败通知（C3/C5/C8）：github.ts 区分无文件材料与上游错误；连接器上报固定原因码，pull / store 记录结果并去重。worker 只对明确的模型输出失败发布状态通知，并单独记录发布结果。详见[运维](operations.md#工具读取和失败回执)。
+
+PR 模型未派发前因只读准备中断的结果为 failed；派发后传输不明仍为 unknown。领取响应携带该仓库有效修订的深评和原生 Review 权限。原生 Review 回执可凭唯一标记只读查找。

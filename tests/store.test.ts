@@ -1,4 +1,4 @@
-import { seedBinding } from "./binding-fixture.js";
+import { fixtureAgent, seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -153,11 +153,11 @@ test("restart preserves queued work and blocks unknown execution and delivery", 
   reopened.resolveUnknownDelivery(c.id, "failed");
   assert.equal(reopened.pendingDelivery(), undefined);
 });
-test("fresh schema is version 3 and contains no legacy columns", (t) => {
+test("fresh schema is version 8 and contains no legacy columns", (t) => {
   const { path } = fixture(t);
   const db = new DatabaseSync(path);
   try {
-    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 3);
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 8);
     const columns = db
       .prepare("PRAGMA table_info(tasks)")
       .all()
@@ -315,7 +315,11 @@ test("a concurrent declaration change fences old work in the same durable queue 
       1001,
     ),
   );
-  peer.registry.apply(proof, 2, { enabled: true, events: ["push"] });
+  peer.registry.apply(proof, 2, {
+    enabled: true,
+    responsibleAgent: fixtureAgent,
+    events: ["push"],
+  });
   const binding = store.activeBinding(installationId, repositoryId)!;
   assert.notEqual(binding.id, current.bindingId);
   assert.throws(
@@ -374,7 +378,7 @@ test("device revocation stops pending publication and denies previously verified
           deviceId: "w",
         },
         0,
-        { enabled: true, events: ["push"] },
+        { enabled: true, responsibleAgent: fixtureAgent, events: ["push"] },
       ),
     /revoked/,
   );
@@ -404,6 +408,7 @@ test("a binding change cannot cancel an issued publication or admit the next rev
   };
   store.registry.apply(proof, 1, {
     enabled: true,
+    responsibleAgent: fixtureAgent,
     events: ["issue_comment.created"],
   });
   const binding = store.activeBinding(1, 2)!;
@@ -420,4 +425,132 @@ test("a binding change cannot cancel an issued publication or admit the next rev
   store.resolveUnknownDelivery(first.id, "sent", receipt);
   assert.deepEqual(store.get(first.id)?.publicationReceipt, receipt);
   assert.equal(store.claimAssignment("w", "next", 2000, 1001)?.id, next.id);
+});
+
+test("cloud tool counters persist across connections and restart without changing runtime evidence", (t) => {
+  const { store, path, stores } = fixture(t);
+  const peer = new TaskStore(path);
+  stores.push(peer);
+  const task = store.accept(input()).task;
+  assert.deepEqual(store.toolAudit(task.id), []);
+  assert.throws(() => store.recordToolCall(task.id, "read_file", "requested"));
+  store.claimAssignment("w", "h", 2000, 1000);
+  assert.throws(() =>
+    store.recordToolCall(task.id, "read_file", "failed", "unknown"),
+  );
+  store.recordToolCall(task.id, "read_file", "requested");
+  peer.recordToolCall(task.id, "read_file", "requested");
+  assert.throws(() =>
+    store.recordToolCall(
+      task.id,
+      "read_file",
+      "failed",
+      "private raw failure" as never,
+    ),
+  );
+  peer.recordToolCall(task.id, "read_file", "failed", "scope");
+  store.recordToolCall(task.id, "read_file", "succeeded");
+  // A third request was initiated, but no terminal observation was made.
+  peer.recordToolCall(task.id, "read_file", "requested");
+  assert.throws(() =>
+    store.recordToolCall(task.id, "secret-token-as-name" as never, "requested"),
+  );
+  assert.throws(() =>
+    store.recordToolCall(
+      task.id,
+      "read_file",
+      "secret-token-as-phase" as never,
+    ),
+  );
+  assert.equal(store.get(task.id)?.runtime, null);
+  store.close();
+  peer.close();
+  const reopened = new TaskStore(path);
+  stores.push(reopened);
+  const [audit] = reopened.toolAudit(task.id);
+  assert.deepEqual(
+    [audit.name, audit.requested, audit.succeeded, audit.failed],
+    ["read_file", 3, 1, 1],
+  );
+  assert.ok(audit.firstRequestedAt <= audit.lastRequestedAt);
+  assert.ok(audit.lastSucceededAt && audit.lastFailedAt);
+  assert.equal(audit.lastFailure, "scope");
+  assert.deepEqual(
+    Object.keys(audit).sort(),
+    [
+      "name",
+      "requested",
+      "succeeded",
+      "failed",
+      "firstRequestedAt",
+      "lastRequestedAt",
+      "lastSucceededAt",
+      "lastFailedAt",
+      "lastFailure",
+      "buildSha",
+    ].sort(),
+  );
+});
+test("comment audit lookup stays scoped to a repository and triggering comment", (t) => {
+  const { store } = fixture(t);
+  const a = store.accept(input()).task;
+  const b = store.accept({
+    ...input(1, 3),
+    deliveryId: "other-repo-delivery",
+  }).task;
+  assert.equal(store.taskForComment(2, 1)?.id, a.id);
+  assert.equal(store.taskForComment(3, 1)?.id, b.id);
+  assert.equal(store.taskForComment(9, 1), undefined);
+});
+test("the audit records only a full server build SHA; invalid values never enter the receipt", (t) => {
+  const previous = process.env.CHANNEL_BUILD_SHA;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CHANNEL_BUILD_SHA;
+    else process.env.CHANNEL_BUILD_SHA = previous;
+  });
+  for (const value of ["a".repeat(40), "not-a-sha-or-secret"]) {
+    process.env.CHANNEL_BUILD_SHA = value;
+    const { store } = fixture(t);
+    const task = store.accept(input()).task;
+    store.claimAssignment("w", "h", 2000, 1000);
+    store.recordToolCall(task.id, "read_issue", "requested");
+    assert.equal(
+      store.toolAudit(task.id)[0].buildSha,
+      value.length === 40 ? value : null,
+    );
+  }
+});
+
+test("an incompatible companion audit database is rejected without dropping its data or changing the v8 tasks", (t) => {
+  const { path, store } = fixture(t);
+  const task = store.accept(input()).task;
+  store.close();
+  const sidecar = path + ".tool-audit.sqlite";
+  const db = new DatabaseSync(sidecar);
+  try {
+    db.exec(
+      "PRAGMA user_version=1; ALTER TABLE toolAudit DROP COLUMN lastFailure; INSERT INTO toolAudit(taskId,name,requested,succeeded,failed,firstRequestedAt,lastRequestedAt) VALUES ('historical','read_file',1,0,1,1000,1000)",
+    );
+  } finally {
+    db.close();
+  }
+  assert.throws(() => new TaskStore(path), StorageSchemaError);
+  const audit = new DatabaseSync(sidecar);
+  const tasks = new DatabaseSync(path);
+  try {
+    assert.equal(
+      audit
+        .prepare("SELECT failed FROM toolAudit WHERE taskId='historical'")
+        .get()?.failed,
+      1,
+    );
+    assert.equal(
+      tasks.prepare("SELECT status FROM tasks WHERE id=?").get(task.id)?.status,
+      "queued",
+    );
+    assert.equal(tasks.prepare("PRAGMA user_version").get()?.user_version, 8);
+  } finally {
+    audit.close();
+    tasks.close();
+  }
 });

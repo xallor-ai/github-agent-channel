@@ -170,6 +170,35 @@ test("push target mismatch rejects a clean workspace before harness launch", asy
   assert.equal(f.git("status", "--porcelain"), "");
 });
 
+test("ACP refuses an unpinned, stale or cross-repository PR before dispatch", async () => {
+  const f = fixture("permission");
+  const sha = f.git("rev-parse", "HEAD");
+  const pin = {
+    headSha: sha,
+    baseSha: "f".repeat(40),
+    baseRepoId: 2,
+    headRepoId: 2,
+  };
+  for (const revision of [
+    undefined,
+    { ...pin, headSha: pin.baseSha },
+    { ...pin, baseRepoId: 3 },
+    { ...pin, headRepoId: 3 },
+  ]) {
+    await assert.rejects(
+      f.connector.run(
+        { ...task, target: { kind: "pull_request", number: 1, revision } },
+        async () => ({}),
+      ),
+      /pinned PR head/i,
+    );
+    assert.equal(
+      existsSync(join(f.dir, ".git", "received-prompt.json")),
+      false,
+    );
+    assert.equal(f.git("rev-parse", "HEAD"), sha);
+  }
+});
 test("matching push SHA runs from its pinned detached workspace", async () => {
   const f = fixture();
   const sha = f.git("rev-parse", "HEAD");
@@ -265,6 +294,7 @@ function fixture(mode = "edit") {
   git("commit", "-m", "initial");
   const config: any = {
     type: "acp",
+    agentId: "coding",
     command: process.execPath,
     args: [peer, mode],
     workspaces: { "2": dir },
@@ -514,7 +544,22 @@ test("every ACP result explicitly declares artifacts and target-based publicatio
     const f = fixture("permission");
     delete f.config.publication;
     delete f.config.verification;
-    const target = kind === "repository" ? { kind } : { kind, number: 1 };
+    const sha = f.git("rev-parse", "HEAD");
+    const target =
+      kind === "repository"
+        ? { kind }
+        : kind === "pull_request"
+          ? {
+              kind,
+              number: 1,
+              revision: {
+                headSha: sha,
+                baseSha: "f".repeat(40),
+                baseRepoId: 2,
+                headRepoId: 2,
+              },
+            }
+          : { kind, number: 1 };
     const result = await f.connector.run({ ...task, target }, async () => ({
       title: "issue",
     }));

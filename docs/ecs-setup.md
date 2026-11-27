@@ -4,7 +4,7 @@
 
 已有管理员提供的Channel地址和配对邀请时，无需执行本篇，直接回到[完整接入主线](setup.md)。本篇面向要自己运行服务端的人：ECS保存GitHub凭据、验签、任务和回帖，内网连接器主动连接它；ECS不配置内网OpenClaw地址或Gateway token。
 
-当前服务使用 v2 协议、云端任务库 schema 3；已有旧部署必须使用新状态库/数据卷，流程见[v2 契约](protocol-v2.md)。要启用 PR 发布，还需按该文配置 writeProfiles 与 App Contents 写权限。
+当前服务使用 v2 协议、云端任务库 schema 8；已有旧部署必须使用新状态库/数据卷，流程见[v2 契约](protocol-v2.md)。要启用 PR 发布，还需按该文配置 writeProfiles 与 App Contents 写权限。
 
 ## 1. 前置条件与 GitHub App
 
@@ -148,6 +148,6 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://channel.example.com/co
 
 让内网连接器启动后，用有仓库写权限的账号新发一条 `@your-app` 评论。核对GitHub delivery202、后台任务succeeded/sent和机器人回帖；同delivery重投不应产生第二条回复。仅200/204或health正常都不构成闭环成功。
 
-`deploy down`保留数据卷；配置变更渲染新 bundle；仅相同云端 schema 3 的版本可以复用任务卷，旧任务库须保留并换用新卷。等待任务结束，先停Agent再停Cloud并备份；启动时先Cloud后Agent。同名项目替换后不要再对旧bundle执行down。未知任务须人工对账，不能通过删库或重启盲目重试。完整命令和数据恢复见[运维文档](operations.md)。
+`deploy down`保留数据卷；配置变更渲染新 bundle；仅相同云端 schema 8 的版本可以复用任务卷，旧任务库须保留并换用新卷。等待任务结束，先停Agent再停Cloud并备份；启动时先Cloud后Agent。同名项目替换后不要再对旧bundle执行down。未知任务须人工对账，不能通过删库或重启盲目重试。完整命令和数据恢复见[运维文档](operations.md)。
 
 可选的 `deployment.image` 允许使用你已构建并分发的镜像；项目当前没有承诺一个公共可拉取的发布镜像，不要照抄不存在的registry地址。目标机没有Node时，可用该镜像运行render：把配置与输出目录按同一绝对路径挂入一次性容器，随后在宿主运行Docker Compose。默认源码构建路径是本篇已给出的流程。

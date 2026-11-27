@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenClawConnector } from "../src/connector.js";
+import { validateTaskOutcome } from "../src/outcomes.js";
 import { AmbiguousExecution, type Task } from "../src/contracts.js";
+import {
+  renderMergeAssessment,
+  type MergeFacts,
+} from "../src/merge-assessment.js";
 const task: Task = {
   id: "task-1",
   bindingId: "binding",
@@ -31,6 +36,155 @@ const settings = {
   timeoutMs: 100,
   maxToolRounds: 3,
 };
+const continuation = {
+  rootTaskId: "a0000000-0000-4000-8000-000000000001",
+  questionTaskId: "a0000000-0000-4000-8000-000000000002",
+  originalPrompt: "Diagnose the component",
+  history: [],
+  question: "Which platform?",
+};
+test("final clarification round retains all earlier answers and cannot ask again", async () => {
+  const history = [
+    { question: "Component?", answer: "Renderer only." },
+    { question: "Version?", answer: "2.0." },
+    { question: "Constraint?", answer: "Offline." },
+  ];
+  const resumed = {
+    ...task,
+    continuation: { ...continuation, history },
+    prompt: "Linux",
+  };
+  const c = new OpenClawConnector(settings, "secret", async (_url, init) => {
+    const req = JSON.parse(String(init?.body));
+    assert.ok(req.input[0].content.includes(JSON.stringify(history)));
+    assert.equal(req.input[1].content, "Linux");
+    assert.match(req.instructions, /final clarification round/);
+    assert.ok(
+      !req.tools.some(
+        (t: { name: string }) => t.name === "request_clarification",
+      ),
+    );
+    return Response.json(summary);
+  });
+  assert.equal(
+    (await c.run(resumed, async () => null)).publication.kind,
+    "comment",
+  );
+  assert.throws(() =>
+    validateTaskOutcome(resumed, {
+      text: "One more?",
+      artifacts: [],
+      publication: { kind: "clarification" },
+    }),
+  );
+});
+test("scoped clarification is a single terminal proposal, not a GitHub write or a second model dispatch", async () => {
+  const q = "Which platform?";
+  let requests = 0;
+  const connector = new OpenClawConnector(
+    settings,
+    "secret",
+    async (_url, opts) => {
+      const req = JSON.parse(String(opts?.body));
+      requests++;
+      assert.ok(
+        req.tools.some(
+          (t: { name: string }) => t.name === "request_clarification",
+        ),
+      );
+      return Response.json(call("request_clarification", { question: q }));
+    },
+  );
+  const result = await connector.run(task, async () =>
+    assert.fail("local proposal invoked cloud tool"),
+  );
+  assert.equal(requests, 1);
+  assert.deepEqual(result, {
+    text: q,
+    artifacts: [],
+    publication: { kind: "clarification" },
+    responseId: "tool",
+  });
+  validateTaskOutcome(task, result);
+  assert.throws(() =>
+    validateTaskOutcome(
+      { ...task, source: { event: "issues", action: "opened" } },
+      result,
+    ),
+  );
+  for (const question of [" ", "a".repeat(2001)]) {
+    const bad = new OpenClawConnector(settings, "secret", async () =>
+      Response.json(call("request_clarification", { question })),
+    );
+    await assert.rejects(
+      bad.run(task, async () => null),
+      /Invalid scoped tool arguments/,
+    );
+  }
+});
+test("clarification rejects mixed calls, destination overrides and unsolicited requests before any cloud call", async () => {
+  const ask = call("request_clarification", { question: "Which platform?" });
+  const mixed = {
+    ...ask,
+    output: [...call("read_issue", {}).output, ...ask.output],
+  };
+  for (const [scope, output] of [
+    [task, mixed],
+    [
+      task,
+      call("request_clarification", {
+        question: "Which?",
+        repository: "elsewhere",
+      }),
+    ],
+    [{ ...task, source: { event: "issues", action: "opened" } }, ask],
+  ] as const) {
+    let cloud = 0;
+    await assert.rejects(
+      new OpenClawConnector(settings, "secret", async () =>
+        Response.json(output),
+      ).run(scope, async () => {
+        cloud++;
+        return null;
+      }),
+      /sole tool call|Invalid .*tool/,
+    );
+    assert.equal(cloud, 0);
+  }
+});
+test("resume supplies the bounded original request and question to a fresh model session; selection dispatches no model", async () => {
+  const resumed = { ...task, continuation, prompt: "Linux" };
+  const connector = new OpenClawConnector(
+    settings,
+    "secret",
+    async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      assert.ok(req.input[0].content.includes(continuation.question));
+      assert.ok(req.input[0].content.includes(continuation.originalPrompt));
+      assert.equal(req.input[1].content, "Linux");
+      return Response.json(summary);
+    },
+  );
+  const answer = await connector.run(resumed, async () => null);
+  assert.equal(answer.publication.kind, "comment");
+  assert.throws(() =>
+    validateTaskOutcome(resumed, { ...answer, publication: { kind: "none" } }),
+  );
+  const choice = {
+    ...task,
+    questionChoices: [continuation.rootTaskId, continuation.questionTaskId],
+  };
+  const result = await new OpenClawConnector(settings, "secret", async () =>
+    assert.fail("selection dispatched a model"),
+  ).run(choice, async () => assert.fail("selection read GitHub"));
+  validateTaskOutcome(choice, result);
+  assert.ok(
+    result.text.includes("/answer " + continuation.questionTaskId + " "),
+  );
+  assert.throws(() =>
+    validateTaskOutcome(choice, { ...result, text: "Something else" }),
+  );
+});
 test("repository tasks expose only file reads and retain analysis without a comment", async () => {
   const requests: Array<{
     tools: Array<{ name: string }>;
@@ -402,4 +556,622 @@ test("malformed completed output is rejected before any tool call", async () => 
       /Runtime output is invalid/,
     );
   }
+});
+
+test("completed oversized answer is a confirmed invalid response", async () => {
+  const c = new OpenClawConnector(settings, "secret", async () =>
+    Response.json({
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "x".repeat(18001) }],
+        },
+      ],
+    }),
+  );
+  await assert.rejects(
+    c.run(task, async () => ({})),
+    { code: "runtime_response_invalid" },
+  );
+});
+
+const revision = {
+  baseRepoId: 2,
+  headRepoId: 2,
+  baseSha: "a".repeat(40),
+  headSha: "b".repeat(40),
+};
+const pr: Task = {
+  ...task,
+  reviewPolicy: { deepReview: false, nativeReview: false },
+  target: { kind: "pull_request", number: 1, revision },
+};
+const openFacts: MergeFacts = {
+  repository: "org/repo",
+  number: 1,
+  stable: true,
+  base: { repository: "org/repo", id: 2, sha: revision.baseSha },
+  head: { repository: "org/repo", id: 2, sha: revision.headSha },
+  observedAt: "2026-11-26T07:22:04Z",
+  state: "open",
+  draft: false,
+  conflict: "none",
+  testMergeSha: null,
+  baseRefName: "main",
+  observedRevision: {
+    baseSha: revision.baseSha,
+    headSha: revision.headSha,
+    baseRefName: "main",
+  },
+  testMergeChecksKnown: false,
+  headChecksKnown: false,
+  rules: {
+    known: true,
+    checks: [],
+    reviewRequired: false,
+    queueRequired: false,
+  },
+  checks: [],
+  review: "unknown",
+  otherGates: "clear",
+  queue: { entry: "unknown", candidateSha: null, candidateStatus: "unknown" },
+  missing: [],
+};
+test("standalone merge questions use scoped facts before any diff, snapshot or model; terminal outcomes cannot publish", async () => {
+  for (const [prompt, state] of [
+    ["@xallor-robot is enable merged?", "open"], // incident #213 verbatim
+    ["@xallor-robot 能否合并？", "closed"],
+    ["可以合入吗", "merged"],
+    ["can we merge?", "open"],
+    ["already merged?", "unknown"],
+    ["/merge-status", "open"],
+  ] as const) {
+    const events: unknown[] = [],
+      tools: string[] = [];
+    const facts = { ...openFacts, state };
+    const connector = new OpenClawConnector(
+      settings,
+      "runtimeSecret",
+      async () => {
+        throw Error("unexpected model dispatch");
+      },
+    );
+    const result = await connector.run(
+      { ...pr, prompt, reviewPolicy: { deepReview: true, nativeReview: true } },
+      async (name, args) => {
+        tools.push(name);
+        assert.deepEqual(args, {});
+        return facts;
+      },
+      undefined,
+      async (event) => {
+        events.push(event);
+      },
+    );
+    assert.deepEqual(tools, ["read_merge_facts"]);
+    assert.deepEqual(events, [
+      {
+        kind: "started",
+        provider: "channel-merge-assessment",
+        modelTools: [],
+        runId: "github-channel:task-1",
+      },
+    ]);
+    assert.equal(result.text, renderMergeAssessment(facts));
+    assert.deepEqual(result.artifacts, [
+      { kind: "text", name: "merge_assessment", text: result.text },
+    ]);
+    assert.equal(
+      result.publication.kind,
+      state === "open" ? "comment" : "none",
+    );
+  }
+});
+test("merge assessment rejects mismatched targets, IDs, revisions and unvalidated payloads before using them", async () => {
+  const c = new OpenClawConnector(settings, "token", async () => {
+    throw Error("unexpected model dispatch");
+  });
+  for (const facts of [
+    { ...openFacts, repository: "other/repo" },
+    { ...openFacts, number: 2 },
+    { ...openFacts, head: { ...openFacts.head, id: 19 } },
+    { ...openFacts, base: { ...openFacts.base, sha: "c".repeat(40) } },
+    { ...openFacts, head: { ...openFacts.head, repository: "fork/repo" } },
+    { ...openFacts, unexpected: "unknown payload" },
+  ])
+    await assert.rejects(
+      c.run({ ...pr, prompt: "/merge-status" }, async () => facts),
+      /assigned PR and revision|Invalid merge facts/,
+    );
+});
+test("quoted requests, action requests and historical merge questions do not replace the current task", async () => {
+  for (const prompt of [
+    "> can we merge?",
+    "Review the docs",
+    "Merge this PR",
+    "合并这个 PR",
+    "explain `/merge-status`",
+  ]) {
+    const tools: string[] = [];
+    const c = new OpenClawConnector(settings, "token", async () =>
+      Response.json(summary),
+    );
+    const result = await c.run(
+      {
+        ...pr,
+        prompt,
+        threadContext: [
+          {
+            actor: "alice",
+            event: "comment",
+            excerpt: "能否合并",
+            truncated: false,
+          },
+        ],
+      },
+      async (name) => {
+        tools.push(name);
+        return diff;
+      },
+    );
+    assert.deepEqual(tools, ["read_pull_diff"]);
+    assert.equal(result.responseId, "result");
+  }
+});
+test("optional model tool is PR scoped, rejects arguments and returns only validated facts with terminal publication suppressed", async () => {
+  const facts = { ...openFacts, state: "closed" as const };
+  let turns = 0;
+  const tools: string[] = [];
+  const c = new OpenClawConnector(settings, "token", async (_url, init) => {
+    if (!turns++) return Response.json(call("read_merge_facts", {}));
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(JSON.parse(body.input[0].output), {
+      assessment: renderMergeAssessment(facts),
+    });
+    return Response.json(summary);
+  });
+  const result = await c.run(pr, async (name) => {
+    tools.push(name);
+    return name === "read_pull_diff" ? diff : facts;
+  });
+  assert.deepEqual(tools, ["read_pull_diff", "read_merge_facts"]);
+  assert.equal(result.publication.kind, "none");
+  assert.equal(result.artifacts[0].name, "merge_assessment");
+  for (const [assignment, args] of [
+    [task, {}],
+    [pr, { number: 2 }],
+  ] as const) {
+    const invoked: string[] = [];
+    const connector = new OpenClawConnector(settings, "token", async () =>
+      Response.json(call("read_merge_facts", args)),
+    );
+    await assert.rejects(
+      connector.run(assignment, async (name) => {
+        invoked.push(name);
+        return diff;
+      }),
+      { code: "tool_call_invalid" },
+    );
+    assert.ok(!invoked.includes("read_merge_facts"));
+  }
+});
+const diff = {
+  untrusted: true,
+  revision,
+  changedFiles: 1,
+  files: [
+    {
+      path: "impl.ts",
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      patch: "+newImplementation()",
+      patchStatus: "provided",
+    },
+  ],
+  limitations: [],
+};
+const summary = {
+  status: "completed",
+  id: "result",
+  output: [
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Observed at the pinned head." }],
+    },
+  ],
+};
+function call(name: string, args: unknown) {
+  return {
+    status: "completed",
+    id: "tool",
+    output: [
+      {
+        type: "function_call",
+        call_id: "call",
+        name,
+        arguments: JSON.stringify(args),
+      },
+    ],
+  };
+}
+
+test("PR first input contains the assigned diff and exposes only scoped public tools", async () => {
+  let turn = 0;
+  const calls: string[] = [];
+  const connector = new OpenClawConnector(
+    { ...settings, timeoutMs: 5000 },
+    "secret",
+    async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      if (!turn++) {
+        assert.deepEqual(calls, ["read_pull_diff"]);
+        assert.deepEqual(JSON.parse(req.input[1].content), diff);
+        assert.deepEqual(
+          req.tools.map((t: { name: string }) => t.name),
+          [
+            "read_issue",
+            "read_file",
+            "read_merge_facts",
+            "request_clarification",
+          ],
+        );
+        assert.match(req.tools[1].description, /PR head/);
+        return Response.json(call("read_file", { path: "impl.ts" }));
+      }
+      assert.match(req.input[0].output, /only-at-head/);
+      return Response.json(summary);
+    },
+  );
+  const result = await connector.run(pr, async (name, args) => {
+    calls.push(name);
+    if (name === "read_pull_diff") return diff;
+    assert.deepEqual(args, { path: "impl.ts" });
+    return { content: "only-at-head", revision };
+  });
+  assert.deepEqual(result.publication, { kind: "comment" });
+  assert.match(result.text, /1\/1 changed files/);
+  assert.ok(result.text.includes("head " + revision.headSha));
+  assert.ok(result.text.includes("base " + revision.baseSha));
+});
+
+test("missing or mixed PR revision fails before dispatch to OpenClaw", async () => {
+  let requests = 0;
+  const connector = new OpenClawConnector(settings, "secret", async () => {
+    requests++;
+    return Response.json(summary);
+  });
+  await assert.rejects(
+    connector.run(
+      { ...pr, target: { kind: "pull_request", number: 1 } },
+      async () => diff,
+    ),
+    /pinned pull request/,
+  );
+  await assert.rejects(
+    connector.run(pr, async () => ({
+      ...diff,
+      revision: { ...revision, headSha: "d".repeat(40) },
+    })),
+    /assigned revision/,
+  );
+  assert.equal(requests, 0);
+});
+
+async function prepareView() {
+  const sha = revision.headSha;
+  const path = "unchanged.ts";
+  const text = "return impl();";
+  return {
+    close() {},
+    async read() {
+      return { sha, path, text, truncated: false };
+    },
+    async search() {
+      return { sha, matches: [{ path, line: 2, text }], truncated: false };
+    },
+  };
+}
+
+test("deep review searches then reads an unchanged file locally under fresh authorization", async () => {
+  const calls: string[] = [];
+  let turn = 0;
+  const connector = new OpenClawConnector(
+    { ...settings, timeoutMs: 5000 },
+    "secret",
+    async (_url, init) => {
+      const req = JSON.parse(String(init?.body));
+      if (turn++ === 0) {
+        assert.deepEqual(
+          req.tools.map((t: { name: string }) => t.name),
+          [
+            "read_issue",
+            "read_file",
+            "read_merge_facts",
+            "search_repo",
+            "request_clarification",
+          ],
+        );
+        assert.ok(!JSON.stringify(req.input).includes("unchanged.ts"));
+        return Response.json(call("search_repo", { query: "impl()" }));
+      }
+      const output = JSON.parse(req.input[0].output);
+      if (turn === 2) {
+        assert.deepEqual(output.matches, [
+          { path: "unchanged.ts", line: 2, text: "return impl();" },
+        ]);
+        return Response.json(
+          call("read_file", { path: output.matches[0].path }),
+        );
+      }
+      assert.match(output.text, /return impl/);
+      return Response.json(summary);
+    },
+  );
+  const result = await connector
+    .withReviewSource(prepareView)
+    .run(
+      { ...pr, reviewPolicy: { deepReview: true, nativeReview: true } },
+      async (name) => {
+        calls.push(name);
+        if (name === "read_pull_diff") return diff;
+        assert.equal(name, "review_access");
+        return { authorized: true };
+      },
+    );
+  assert.deepEqual(calls, [
+    "read_pull_diff",
+    "review_access",
+    "review_access",
+    "review_access",
+    "review_access",
+    "review_access",
+    "review_access",
+  ]);
+  assert.deepEqual(result.publication, { kind: "review" });
+  assert.match(result.text, /snapshot searches: 1, files read: 1/);
+});
+
+test("revocation after local search withholds results and prevents another model request", async () => {
+  let grants = 0,
+    requests = 0;
+  const connector = new OpenClawConnector(
+    { ...settings, timeoutMs: 5000 },
+    "secret",
+    async () => {
+      requests++;
+      return Response.json(call("search_repo", { query: "private" }));
+    },
+  );
+  await assert.rejects(
+    connector
+      .withReviewSource(prepareView)
+      .run(
+        { ...pr, reviewPolicy: { deepReview: true, nativeReview: true } },
+        async (name) => {
+          if (name === "read_pull_diff") return diff;
+          return { authorized: ++grants < 4 };
+        },
+      ),
+    /access not confirmed/,
+  );
+  assert.equal(grants, 4);
+  assert.equal(requests, 1);
+});
+
+test("invalid local snapshot calls are classified as model tool errors", async () => {
+  for (const [name, args] of [
+    ["read_source_grant", {}],
+    ["search_repo", {}],
+    ["search_repo", { query: "one\ntwo" }],
+    ["read_file", { path: "../x" }],
+    ["read_file", { path: ".Git/config" }],
+    ["read_file", { path: "foo//x" }],
+    ["read_file", { path: "ok", ref: "HEAD" }],
+  ] as const) {
+    const c = new OpenClawConnector(
+      { ...settings, timeoutMs: 5000 },
+      "secret",
+      async () => Response.json(call(name, args)),
+    );
+    await assert.rejects(
+      c
+        .withReviewSource(prepareView)
+        .run(
+          { ...pr, reviewPolicy: { deepReview: true, nativeReview: true } },
+          async (name) => {
+            if (name === "read_pull_diff") return diff;
+            assert.equal(name, "review_access");
+            return { authorized: true };
+          },
+        ),
+      { code: "tool_call_invalid" },
+    );
+  }
+});
+
+test("PR output preserves scope at the presentation limit and rejects oversized model answers", async () => {
+  async function run(text: string) {
+    const c = new OpenClawConnector(
+      { ...settings, timeoutMs: 5000 },
+      "secret",
+      async () =>
+        Response.json({
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text }],
+            },
+          ],
+        }),
+    );
+    return (await c.run(pr, async () => diff)).text;
+  }
+  for (const text of ["🌲".repeat(9000), "a" + "🌲".repeat(8999) + "z"]) {
+    const result = await run(text);
+    assert.ok(result.length <= 18000);
+    assert.ok(result.isWellFormed());
+    assert.match(result, /truncated/);
+    assert.ok(result.includes("head " + revision.headSha));
+    assert.ok(result.includes("base " + revision.baseSha));
+    assert.match(result, /1\/1 changed files/);
+  }
+  await assert.rejects(run("x".repeat(18001)), {
+    code: "runtime_response_invalid",
+  });
+});
+
+test("automatic review without any pinned patch cannot turn PR prose into a clean verdict", async () => {
+  let models = 0;
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    models++;
+    return Response.json(summary);
+  });
+  const auto = {
+    ...pr,
+    prompt: "Old version deadbeef: all checks passed",
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  for (const files of [
+    [],
+    ...["provided", "truncated"].flatMap((patchStatus) =>
+      ["+", "-"].map((marker) => [
+        {
+          ...diff.files[0],
+          patch: "@@ -1 +1 @@\n" + marker + "\n",
+          patchStatus,
+        },
+      ]),
+    ),
+    [{ ...diff.files[0], patch: undefined, patchStatus: "unavailable" }],
+    [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,2 +1,2 @@\n ".padEnd(12286, "a") + "\n-",
+        patchStatus: "truncated",
+      },
+    ],
+    [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,2 +1,2 @@\n " + "a".repeat(12000),
+        patchStatus: "truncated",
+      },
+    ],
+  ]) {
+    await assert.rejects(
+      c.run(auto, async () => ({
+        ...diff,
+        files,
+        limitations: ["No usable patch"],
+      })),
+      { code: "review_diff_unavailable" },
+    );
+  }
+  assert.equal(models, 0);
+  const answer = await c.run(pr, async () => ({
+    ...diff,
+    files: [],
+    limitations: ["No usable patch"],
+  }));
+  assert.equal(answer.publication.kind, "comment");
+  assert.equal(models, 1);
+});
+
+test("automatic review with verified empty comparison reports scope without a model verdict", async () => {
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    throw Error("unexpected model call");
+  });
+  const result = await c.run(
+    { ...pr, source: { event: "pull_request", action: "opened" } },
+    async () => ({ ...diff, changedFiles: 0, files: [] }),
+  );
+  assert.match(result.text, /未执行代码评审/);
+  assert.ok(result.text.includes(revision.headSha));
+  assert.equal(result.publication.kind, "comment");
+});
+
+test("a changed line of spaces is substantive source data even without another changed token", async () => {
+  let called = 0;
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    called++;
+    return Response.json(summary);
+  });
+  const auto = {
+    ...pr,
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  await c.run(auto, async () => ({
+    ...diff,
+    files: [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,3 +1,3 @@\n const value = `head\n-  \n+    \n tail`;",
+      },
+    ],
+  }));
+  assert.equal(called, 1);
+});
+
+for (const [status, marker, adds, dels] of [
+  ["modified", "+", 1, 0],
+  ["added", "+", 1, 0],
+  ["removed", "-", 0, 1],
+] as const) {
+  test(
+    "verified empty-line " +
+      status +
+      " is a factual notice rather than missing code",
+    async () => {
+      const c = new OpenClawConnector(settings, "secret", async () => {
+        throw Error("Unexpected model call");
+      });
+      const patch =
+        (adds ? "@@ -1,0 +1 @@" : "@@ -1 +1,0 @@") + "\n" + marker + "\n";
+      const result = await c.run(
+        { ...pr, source: { event: "pull_request", action: "opened" } },
+        async () => ({
+          ...diff,
+          files: [
+            {
+              ...diff.files[0],
+              status,
+              patch,
+              additions: adds,
+              deletions: dels,
+            },
+          ],
+        }),
+      );
+      assert.match(result.text, /已取得完整补丁/);
+      assert.ok(result.text.includes(status + ": 1"));
+      assert.match(result.text, /未执行语义评审/);
+      assert.equal(result.publication.kind, "comment");
+    },
+  );
+}
+test("a device with enhanced review enabled retains basic analysis on a comment-only binding", async () => {
+  let calls = 0;
+  const c = new OpenClawConnector(settings, "secret", async (_url, init) => {
+    const offered = JSON.parse(String(init?.body)).tools.map(
+      (x: { name: string }) => x.name,
+    );
+    assert.ok(!offered.includes("search_repo"));
+    calls++;
+    return Response.json(summary);
+  });
+  const result = await c.run(
+    { ...pr, reviewPolicy: { deepReview: false, nativeReview: false } },
+    async (name) => {
+      assert.equal(name, "read_pull_diff");
+      return diff;
+    },
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.publication.kind, "comment");
 });

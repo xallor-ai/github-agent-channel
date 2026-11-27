@@ -1,6 +1,7 @@
 import { App } from "@octokit/app";
 import { Octokit } from "@octokit/core";
 import { z } from "zod";
+import { installationEvidence } from "./binding-coverage.js";
 import type { BindingRegistry } from "./binding-registry.js";
 import { AccessDenied } from "./contracts.js";
 
@@ -59,10 +60,7 @@ export class BindingPrincipalVerifier {
     this.#app = new App({ appId, privateKey, Octokit: this.#Octokit });
   }
 
-  async verify(
-    credential: string,
-    input: unknown,
-  ): Promise<Parameters<BindingRegistry["apply"]>[0]> {
+  async verify(credential: string, input: unknown) {
     const target = selectionSchema.parse(input);
     const device = pairedDevice.safeParse(await this.authenticate(credential));
     if (!device.success) throw new AccessDenied("Device is not paired");
@@ -71,7 +69,10 @@ export class BindingPrincipalVerifier {
   async verifyPaired(
     principal: z.infer<typeof pairedDevice>,
     input: unknown,
-  ): Promise<Parameters<BindingRegistry["apply"]>[0]> {
+  ): Promise<{
+    who: Parameters<BindingRegistry["apply"]>[0];
+    installation: ReturnType<typeof installationEvidence>;
+  }> {
     const { deviceId, githubUserId } = pairedDevice.parse(principal);
     const target = selectionSchema.parse(input);
     const app = this.#app.octokit;
@@ -134,12 +135,15 @@ export class BindingPrincipalVerifier {
       throw new AccessDenied("Could not confirm administrator permission");
     }
     return {
-      deviceId,
-      owner: current.owner.login,
-      repo: current.name,
-      administratorId: githubUserId,
-      installationId: installationId.data,
-      repositoryId: selected.id,
+      installation: installationEvidence(installed),
+      who: {
+        deviceId,
+        owner: current.owner.login,
+        repo: current.name,
+        administratorId: githubUserId,
+        installationId: installationId.data,
+        repositoryId: selected.id,
+      },
     };
   }
 }

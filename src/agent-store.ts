@@ -3,6 +3,7 @@ import { mkdirSync, chmodSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Task, RuntimeResult, RuntimeEvent } from "./contracts.js";
 
+import { failureCodes, type RuntimeFailureCode } from "./runtime-failure.js";
 import { validateOutcome } from "./outcomes.js";
 import { requireSchemaVersion } from "./store-schema.js";
 
@@ -13,7 +14,10 @@ export interface Assignment {
 }
 export type AgentResult = { leaseToken: string } & (
   | { status: "succeeded"; outcome: RuntimeResult }
-  | { status: "failed" | "unknown" }
+  | {
+      status: "failed" | "unknown";
+      failure?: RuntimeFailureCode;
+    }
 );
 export interface JournalEntry {
   id: string;
@@ -45,16 +49,20 @@ export class AgentStore {
     }
     try {
       this.db = new DatabaseSync(path);
-      const exists = requireSchemaVersion(this.db, {
-        journal: ["id", "assignment", "result", "phase", "runtime"],
-      });
+      const exists = requireSchemaVersion(
+        this.db,
+        {
+          journal: ["id", "assignment", "result", "phase", "runtime"],
+        },
+        3,
+      );
       if (path !== ":memory:") chmodSync(path, 0o600);
       this.db.exec(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;",
       );
       if (!exists)
         this.db.exec(
-          "BEGIN IMMEDIATE; CREATE TABLE journal(id TEXT PRIMARY KEY,assignment TEXT NOT NULL,result TEXT,phase TEXT NOT NULL CHECK(phase IN ('running','pending','reported')),runtime TEXT); PRAGMA user_version=2; COMMIT;",
+          "BEGIN IMMEDIATE; CREATE TABLE journal(id TEXT PRIMARY KEY,assignment TEXT NOT NULL,result TEXT,phase TEXT NOT NULL CHECK(phase IN ('running','pending','reported')),runtime TEXT); PRAGMA user_version=3; COMMIT;",
         );
       this.transaction(() => {
         const running = this.db
@@ -107,6 +115,11 @@ export class AgentStore {
       Object.keys(result).some(
         (key) =>
           key !== "status" &&
+          !(
+            result.status !== "succeeded" &&
+            key === "failure" &&
+            failureCodes[result.status].safeParse(result.failure).success
+          ) &&
           key !== "leaseToken" &&
           !(result.status === "succeeded" && key === "outcome"),
       )

@@ -111,7 +111,7 @@ test("startup reports incompatible storage without exposing config secrets", (t)
     },
   );
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /Storage schema version 3 required/);
+  assert.match(result.stderr, /Storage schema version 8 required/);
   assert.doesNotMatch(
     result.stdout + result.stderr,
     /secret-admin|secret-key|secret-hook|secret-token/,

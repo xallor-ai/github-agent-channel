@@ -37,11 +37,27 @@ function github(overrides: Partial<GitHubClient> = {}): GitHubClient {
     ...overrides,
   };
 }
-function ready(t: test.TestContext) {
+function ready(t: test.TestContext, native = false) {
   const store = new TaskStore(":memory:");
   t.after(() => store.close());
   seedBinding(store, input, "worker");
-  const task = store.accept(input).task;
+  const task = store.accept(
+    native
+      ? {
+          ...input,
+          target: {
+            kind: "pull_request",
+            number: 4,
+            revision: {
+              baseRepoId: 2,
+              headRepoId: 2,
+              baseSha: "a".repeat(40),
+              headSha: "b".repeat(40),
+            },
+          },
+        }
+      : input,
+  ).task;
   store.claimAssignment("worker", "hash", Date.now() + 60000);
   store.finishAssignment(
     task.id,
@@ -52,7 +68,7 @@ function ready(t: test.TestContext) {
       outcome: {
         text: "answer",
         artifacts: [],
-        publication: { kind: "comment" },
+        publication: { kind: native ? "review" : "comment" },
       },
     },
     "digest",
@@ -85,6 +101,80 @@ test("delivery worker publishes persisted connector result once", async (t) => {
     id: 10,
     url: "https://github.com/org/repo/issues/4#issuecomment-10",
   });
+});
+test("generation change after dispatch cannot erase a confirmed receipt or replay an uncertain POST", async (t) => {
+  for (const lost of [false, true]) {
+    const s = new TaskStore(":memory:");
+    t.after(() => s.close());
+    seedBinding(s, input, "worker", ["pull_request.synchronize"]);
+    const receive = (head: string, time: number) =>
+      s.observe({
+        input: {
+          ...input,
+          deliveryId: "d" + time,
+          source: { event: "pull_request", action: "synchronize" },
+          target: {
+            kind: "pull_request",
+            number: 4,
+            revision: {
+              baseRepoId: 2,
+              headRepoId: 2,
+              baseSha: "a".repeat(40),
+              headSha: head.repeat(40),
+            },
+          },
+        },
+        reason: "review",
+        execute: true,
+        githubTime: time,
+      }).taskId!;
+    const old = receive("b", 1000);
+    s.claimAssignment("worker", "lease", Date.now() + 60_000);
+    s.finishAssignment(
+      old,
+      "worker",
+      "lease",
+      {
+        status: "succeeded",
+        outcome: {
+          text: "First B findings",
+          artifacts: [],
+          publication: { kind: "review" },
+        },
+      },
+      "old",
+    );
+    let next = "",
+      writes = 0;
+    const receipt = {
+      id: 123,
+      url: "https://github.com/org/repo/pull/4#pullrequestreview-123",
+    };
+    const worker = new DeliveryWorker(
+      s,
+      github({
+        publishReview: async () => {
+          writes++;
+          assert.equal(s.get(old)?.deliveryStatus, "sending");
+          receive("c", 2000);
+          next = receive("b", 3000);
+          if (lost) throw new AmbiguousExecution("lost acknowledgement");
+          return receipt;
+        },
+      }),
+    );
+    await worker.tick();
+    assert.notEqual(next, old);
+    assert.equal(s.publicationAllowed(old), false);
+    assert.equal(s.get(old)?.deliveryStatus, lost ? "unknown" : "sent");
+    assert.deepEqual(
+      s.get(old)?.publicationReceipt,
+      lost ? null : { kind: "review", ...receipt },
+    );
+    assert.equal(s.get(next)?.publicationReceipt, null);
+    assert.equal(await worker.tick(), false);
+    assert.equal(writes, 1);
+  }
 });
 test("lost publication result becomes unknown and is never retried automatically", async (t) => {
   const { store, task } = ready(t);
@@ -199,4 +289,89 @@ test("disabling a binding during authorization prevents the reserved publication
   ).tick();
   assert.equal(attempts, 0);
   assert.equal(store.get(task.id)?.deliveryStatus, "failed");
+});
+
+test("native review is never downgraded or replayed", async (t) => {
+  for (const mode of ["missing", "lost", "ok"] as const) {
+    const { store, task } = ready(t, true);
+    let reviews = 0;
+    let comments = 0;
+    const url = "https://github.com/org/repo/pull/4#pullrequestreview-12";
+    const worker = new DeliveryWorker(
+      store,
+      github({
+        publishComment: async () => {
+          comments++;
+          throw Error("unexpected");
+        },
+        ...(mode === "missing"
+          ? {}
+          : {
+              publishReview: async () => {
+                reviews++;
+                if (mode === "lost") throw new AmbiguousExecution();
+                return { id: 12, url };
+              },
+            }),
+      }),
+    );
+    await worker.tick();
+    await worker.tick();
+    assert.equal(comments, 0);
+    assert.equal(reviews, mode === "missing" ? 0 : 1);
+    const current = store.get(task.id);
+    assert.equal(
+      current?.deliveryStatus,
+      mode === "ok" ? "sent" : mode === "lost" ? "unknown" : "failed",
+    );
+    if (mode === "ok")
+      assert.deepEqual(current?.publicationReceipt, {
+        kind: "review",
+        id: 12,
+        url,
+      });
+  }
+});
+
+test("a confirmed analysis failure sends one status notice without inventing an outcome; unknown execution is silent", async (t) => {
+  for (const status of ["failed", "unknown"] as const) {
+    const store = new TaskStore(":memory:");
+    t.after(() => store.close());
+    seedBinding(store, input, "worker");
+    const task = store.accept(input).task;
+    store.claimAssignment("worker", "hash", Date.now() + 60000);
+    store.finishAssignment(
+      task.id,
+      "worker",
+      "hash",
+      {
+        status,
+        failure: status === "failed" ? "no_final_answer" : "runtime_transport",
+      },
+      "digest",
+    );
+    if (status === "unknown") store.resolveUnknown(task.id, "failed");
+    const notices: string[] = [];
+    const worker = new DeliveryWorker(
+      store,
+      github({
+        publishComment: async (_, body) => {
+          notices.push(body);
+          return {
+            id: 10,
+            url: "https://github.com/org/repo/issues/4#issuecomment-10",
+          };
+        },
+      }),
+    );
+    await worker.tick();
+    await worker.tick();
+    assert.equal(notices.length, status === "failed" ? 1 : 0);
+    if (status === "failed") {
+      assert.match(notices[0]!, /no_final_answer/);
+      assert.equal(store.get(task.id)?.deliveryStatus, "sent");
+    }
+    assert.equal(store.get(task.id)?.status, "failed");
+    assert.equal(store.get(task.id)?.outcome, null);
+  }
 });

@@ -4,7 +4,25 @@
 
 目标是让 GitHub 任务进入用户的 Agent 执行环境并产生可验证的工作成果。当前优先闭环为 **Issue → 修改代码 → 测试 → 创建 PR**。评论是交互与反馈方式之一，分析回帖成功不代表这个目标已经实现。
 
-本表适用当前 v2 实现（2026-11-24 更新设备绑定与离线恢复证据）。配置、协议、状态库均不兼容旧版。代码路径在本地测试；真实环境列明确区分实际验收、故障注入测试与未实现范围。
+本表适用当前 v2 实现（2026-11-25 增补版本化 PR 评审的源码与本地测试入口；真实验收按行记录）。配置、协议、状态库均不兼容旧版。代码路径在本地测试；真实环境列明确区分实际验收、故障注入测试与未实现范围。
+
+**待交付的功能不计入现有证据：** #21 的自动评审版本取代与澄清续办的生产验收，及 #22 的生产 App 收件表情验收，见[功能地图](product-features.md)。已收到活动、能读 diff 或已发评论均不能替代这些验收。
+
+合并问答（#23）的固定版本采集器已与真实开放 PR 对照；生产身份下的任务与回帖链路仍待验收，见 R07c。
+
+自动评审取代（#21）：[联测](../tests/pr-review-e2e.test.ts)覆盖 H1 运行中连续推送 H2/H3、仅发布 H3，以及相同补丁的新提交和改写后的 head 各有独立回执。[账本回归](../tests/review-lineage.test.ts)覆盖重复、乱序与关闭边界。GitHub 和模型为合成传输。
+
+另外，北京时间 2026-11-27 08:00 用操作者身份对真实开放的 [PR #31](https://github.com/xallor-ai/github-agent-channel/pull/31) 调用取证代码：任务原 head `c25b5e94`，实际读到 `f6c3b814`，共同 base `65d2bf17`。独立 GitHub 查询前后版本一致。GitHub 报 39 个变更文件，本次实际准备 16 个（15 个补丁标为完整，1 个截断，23 个文件未提供）。这是读取和限量的证据，没有触发线上任务或 Review。
+
+| 原线程澄清（C4/C5/C6/C7、W1/W3） | 开发分支证据 | 未验收或不支持 |
+| --- | --- | --- |
+| 分析缺少输入时提问 | OpenClaw 只能在已受理的人类会话评论中提出结构化问题；[发布核验](../tests/github-clarification.test.ts)区分请求与实际发出的 Bot 评论，并保留 GitHub 创建时间。 | 其他 Runtime、自动 PR 总评、Issue 正文和仓库观察不开放此能力。 |
+| 不带 @ 续办 | [签名 HTTP / SQLite 联测](../tests/pr-review-e2e.test.ts)覆盖 H1 提问、未知写入只读核实、H2 同人作答、新版本回帖；[账本测试](../tests/clarification-ledger.test.ts)覆盖多问选择、重复投递和原任务追踪。 | GitHub 与模型采用替身。真实生产问答和 #21 的跨版本评审取代仍需独立证据。 |
+
+| 负责人收件（C1/C5/C6） | 当前实现及验收证据 | 仍缺少什么 |
+| --- | --- | --- |
+| 普通讨论和明确提及 | [双设备 HTTP/SQLite 联测](../tests/self-service-e2e.test.ts)：按事件持久接收；离线、只领取或只读活动均不生成公开回执。 | 普通讨论收件时才写入策略决定 silent_by_policy；生产现场未验。 |
+| 原评论 👀 | 同一联测中，明确提及在确认收件后获得一个 App reaction ID；普通讨论没有。重启和重复投递不重复写，最终评论有独立 ID。[异常分支](../tests/github-reaction.test.ts)覆盖不明写入及只读对账。 | GitHub HTTP 为合成传输；仍需当前版本的真实原评论、离线恢复及 Bot 身份回执。 |
 
 ## 状态和证据口径
 
@@ -21,12 +39,13 @@
 | ID  | 能力                                 | 实现状态与限制                                                                | 证据                                                                         | 真实环境状态                       |
 | --- | ------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------- |
 | E01 | 接收签名 Webhook                     | 已实现；验签原始正文后解析                                                    | [webhook.ts](../src/webhook.ts)、[webhook.test.ts](../tests/webhook.test.ts) | v2真实投递/签名通过                |
-| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；默认要求提及，可按仓库关闭                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
-| E03 | PR 会话区评论 @App | 部分实现；沿用 issue_comment 读取标题/正文与回帖。仅接收 open PR，领取与发帖前向 GitHub 复核；不产生原生 Review | [webhook.test.ts](../tests/webhook.test.ts)、[github.test.ts](../tests/github.test.ts) | v2 PR #4 真实回帖通过；关闭/合并拦截至今仅有本地回归证据 |
-| E04 | Issue 创建/标签触发                  | 显式启用 issues.opened（默认需提及）、issues.labeled（指定标签）；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
-| E05 | PR 创建/更新触发                     | 显式启用 pull_request.opened/synchronize；其他 action 未实现                  | generic-tasks/webhook 测试                                                   | v2 PR #6 opened/synchronize 均通过 |
+| E00 | 只观察与补领 | 签名活动与可选任务原子保存；按设备、负责人、绑定修订分页。自身回执不启动模型 | [活动库测试](../tests/activity-store.test.ts) | 新策略本地验证，未生产验收 |
+| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；明确提及时执行，普通评论只记活动                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
+| E03 | PR 会话区评论 @App | 按绑定触发；授权领取时固定 PR 版本，开放状态或版本不匹配即拒绝 | [pull.ts](../src/pull.ts)、[GitHub 测试](../tests/github.test.ts) | 旧版 PR #4 真实回帖；固定版本路径待验收 |
+| E04 | Issue 创建/标签触发                  | 新建时提及或显式 autoTriage；设置 triggerLabel 才按标签启动；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
+| E05 | PR 创建/更新 | 默认观察；显式 autoReview 才自动执行；签名事件保留原始 base/head 身份 | [webhook.ts](../src/webhook.ts) | 旧版 PR #6 真实触发；H1/H2 版本验收待做 |
 | E06 | PR review / 行内 review comment 触发 | 未实现；两个 review 事件被忽略                                                | 同上                                                                         | 待实现                             |
-| E07 | push 触发                            | 显式启用有效非删除分支 push，产生 repository target                           | generic-tasks/webhook 测试                                                   | 修复后 v2 真实 push succeeded/skipped，无评论 |
+| E07 | 非删除分支 push | 记录 ref/SHA，只观察不执行 | [Webhook 策略](../src/webhook.ts) | 本版待真实验收，旧版的 push 执行不是本版承诺 |
 | E08 | check_run / check_suite 触发         | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
 | E09 | workflow_run / workflow_job 触发     | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
 | E10 | discussion / discussion_comment 触发 | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
@@ -34,7 +53,7 @@
 | E12 | 防止机器人回复触发自身               | 已实现；忽略 Bot、自己的消息和不匹配的提及                                    | webhook.test.ts                                                              | v2两条机器人事件200 ignored        |
 | E13 | 重复投递只对应一个任务               | 已实现；delivery 和 scoped comment 去重                                       | [store.test.ts](../tests/store.test.ts)                                      | v2 GitHub Redeliver 同任务、单回帖 |
 
-GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明非空 `events`；仅接收提及评论时选 `[issue_comment.created]` 并保持 `requireMention: true`。可显式启用已实现的 `issues.opened/labeled`、`pull_request.opened/synchronize` 和 `push`，并满足对应触发规则。未启用或未实现的事件会被忽略，通常返回 `200 {ignored:true}`；这个 HTTP 200 不代表任务执行成功。
+默认关注支持范围与当前安装、订阅的交集；`events` 仅收窄观察范围。观察不等于委派：默认明确提及才执行，自动分诊/评审另行选择。当前新策略的真实 GitHub 验收未完成。详见[绑定指南](agent-self-service.md)。
 
 ## 2. 上下文、模型和执行环境
 
@@ -44,10 +63,13 @@ GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明
 | R02 | Runtime 调用                       | 已实现 OpenClaw 与官方 ACP SDK 适配器；type 必填                                                                     | [runtime-factory.ts](../src/runtime-factory.ts)、runtime-factory/acp-connector 测试 | OpenClaw v2 真实评审、OpenCode 1.3.17 ACP 编码均通过 |
 | R03 | 多轮客户端工具调用                 | 已实现；边界结构校验后处理工具/文本，限定工具、轮数、响应大小和执行期限                                              | [connector.ts](../src/connector.ts)、connector.test.ts                              | OpenClaw v2真实Issue读取续调用通过；双工具模型探针使用合成数据 |
 | R04 | 读取任务 Issue/PR                  | 部分实现；标题与正文，不含完整评论历史、diff 或审查历史                                                              | [github.ts](../src/github.ts)、[github.test.ts](../tests/github.test.ts)            | v2 真实 Issue/PR 正文读取通过 |
-| R05 | 读取单个仓库文件                   | 部分实现；默认分支、指定路径、文件至多 128 KiB                                                                       | 同上                                                                                | v2 真实 package.json 读取通过；仍限定默认分支 |
-| R06 | 列目录、搜索代码、读取仓库树       | ACP 委托已安装 harness 的原生工具；核心未暴露此类 GitHub read API                                                    | [ACP 适配器](../src/acp-connector.ts)                                               | 真实 OpenCode harness 读取并修改测试文件通过 |
-| R07 | 读取 PR diff、head/base 和检查日志 | 未实现；read_issue 不提供这些数据                                                                                    | github.ts；本次 read_diff 请求被拒绝                                                | 待实现                                                         |
-| R08 | 固定任务 base SHA                  | ACP 捕获 HEAD，并在 repository target.sha 存在时强制匹配；PR 发布校验远端 base HEAD；OpenClaw read_file 仍读默认分支 | runtime-workspace/github-publication 测试                                           | 真实 PR #4 parent/base 为 9592d8c；push SHA 不匹配拒绝仍为本地测试 |
+| R05 | 读取单个仓库文件 | PR 按固定 head 读取；非 PR 沿用默认分支。GitHub Contents 单文件至多 128 KiB | [github.ts](../src/github.ts)、[测试](../tests/github.test.ts) | 旧版默认分支读取通过；PR 版本读取待真实验收 |
+| R06 | 搜索代码与上下文 | OpenClaw 深评可对任务快照搜索字面量、返回路径与行号；ACP 使用现有 harness 工具 | [快照测试](../tests/review-snapshot.test.ts) | ACP 编码曾实测；OpenClaw 深评待验收 |
+| R07 | 读取 PR 差异 | 同仓开放 PR 按指定 base/head 比较语义列文件、状态、改名与可用补丁；文件数量和字节上限有遗漏提示。无 CI 日志 | [变更采集](../src/github-pull-context.ts)、[GitHub 测试](../tests/github.test.ts) | 待真实 opened/synchronize |
+| R07b | 自动评审材料不足 | 固定比较不可用或没有可见 hunk 增删行时不启动模型；已核验空比较单列。状态通知不计为完成代码评审。 | [连接器回归](../tests/connector.test.ts)、[HTTP 发布链路](../tests/pr-review-e2e.test.ts) | #24 仍待真实 H1/H2 验收 |
+| R07a | 深评只读源码 | 连接器按授权自动获取同仓 PR 指定提交并复用本地 Git 对象库；可读未改文件，搜索结果有截断标志 | [范围及限制](pr-review.md)、[快照测试](../tests/review-snapshot.test.ts) | 待真实未改调用方和跨版本隔离验收 |
+| R07c | PR 合并问答 | 按同仓任务版本分别查询生命周期、冲突、规则、必需检查与有效审核；明确缺项，工程建议单列。OpenClaw 支持明确状态查询，无合并写入 | [查询路径与真实证据](pr-merge-assessment.md)、[采集测试](../tests/github-merge-facts.test.ts)、[判断测试](../tests/merge-assessment.test.ts) | #25 真实 API 只读对照；未验证生产 App 安装权限与该功能真实任务/回帖 |
+| R08 | 固定版本 | PR 校验双方仓库和 base/head；ACP 编码要求工作区符合目标版本，不自动切换；仓库任务 OpenClaw 读取仍走默认分支 | [GitHub 客户端](../src/github.ts)、[工作区](../src/runtime-workspace.ts) | 旧版 draft PR parent/base 有实证；PR 评审路径仅本地 |
 | R09 | 仓库与工作区                       | 部分实现；映射干净独立 clone，校验 origin，拒绝隐藏修改的索引标志；不自动 clone/重置/分配 sandbox                    | [runtime-workspace.ts](../src/runtime-workspace.ts)                                 | 本地通过；不是多租户隔离                                       |
 | R10 | 修改文件并收集 diff                | ACP 委托 harness 编辑，保留 BOM 收集实际 UTF-8 文件变更；拒绝改 HEAD、特殊模式/超限文件                              | acp-connector.test.ts                                                               | 真实 OpenCode 修改单文件并发布 PR #4 |
 | R11 | 执行项目验证                       | 运行管理员配置的验证命令，记录退出码/日志；失败、未知或验证前后候选文件变化均禁止发布                                | acp-connector.test.ts                                                               | 真实项目独立 typecheck/format/test exit 0；CI 155 项通过 |
@@ -64,7 +86,7 @@ GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明
 | O04 | 提交文件变更                  | 已实现 Octokit blob/tree/commit/ref；只为显式 writePolicy 申请写权限       | github-publication.test.ts                            | 真实 App Git Data 提交 ccf672dd 通过 |
 | O05 | 创建关联 Issue 的 PR          | 已实现默认拒绝、基线/路径/权限校验后创建 draft PR；不自动合并              | github-publication/generic-outbound 测试              | Issue #3 → 实际修改 → 验证 → PR #4 通过 |
 | O06 | 记录代码和 PR 成果            | 已实现 change_set/test_report/outcome/publicationReceipt；无旧文本/URL别名 | store/generic-outbound 测试                           | 真实云端 outcome/receipt、内网 journal reported |
-| O07 | 发布代码 review / 行内建议    | 未实现；普通 PR 会话评论不能替代 review                                    | github.ts                                             | 待实现                                 |
+| O07 | 代码 Review / 行内意见 | 部分实现：按仓库显式授权对固定提交发正文型 COMMENT；回执含 GitHub ID/URL，未知结果先读回核实。无行内、审批、请求修改 | [原生 Review 测试](../tests/github-review.test.ts)、[对账](operations.md) | 待真实 commit/Review 回执；普通评论不计 |
 | O08 | 合并 PR、修改工作流、发布版本 | 未实现；不属于本次 Issue→PR 的默认授权                                     | github.ts、架构边界                                   | 不纳入本次闭环                         |
 
 ## 4. 权限、持久性和部署
@@ -102,3 +124,9 @@ GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明
 当前接口与职责见 [实现地图](implementation-map.md)，使用方式见 [OpenClaw](setup.md) 和 [ACP](acp-setup.md)。每项能力独立维护源码、本地证据与真实验收，禁止用单一“完成”标志代替。
 
 2026-11-24 免提及测试：只读 OpenClaw、仅 github-agent-channel 绑定启用 issues.opened、issue_comment.created、pull_request.opened/synchronize；[Issue 创建](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127861955)、[普通评论](https://github.com/xallor-ai/github-agent-channel/issues/15#issuecomment-7127878845)、[PR 会话评论](https://github.com/xallor-ai/github-agent-channel/pull/16#issuecomment-7127972710) 已回帖。PR #16 的第一次 opened 已受理，但第三次工具请求 503，执行失败，无发布回执；其后普通评论成功是独立任务，不覆盖该失败。
+
+**工具读取降级与失败说明（C3/C5/C8）：** 已授权读取不能提供文件时返回有界原因；确认的模型输出失败可在开放线程给出状态通知；未知状态不重跑。本地 GitHub、Pull 和发布 worker 回归；运维边界见[失败回执](operations.md#工具读取和失败回执)。
+
+固定 PR 准备阶段与模型派发阶段的失败分类、同设备不同仓库的基础回复隔离、按标记查找不明 Review 回执均有本地回归；尚非生产故障注入验证。
+
+#20 补充证据：以 GitHub API 取得的真实 Issue #20 正文及其 Bot 评论重建事件，在隔离数据库使用本地测试签名回放；分别记录 observed / self_receipt，两条均没有任务。这不是公网原始 Webhook 投递或在线 Agent 逐条确认。乱序关闭、跨绑定去重、收件退避另由本地 HTTP/SQLite 回归验证。

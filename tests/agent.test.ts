@@ -2,13 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+import { OpenClawConnector } from "../src/connector.js";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Agent } from "../src/agent.js";
 import { AgentStore } from "../src/agent-store.js";
 import type { AgentConfig } from "../src/agent-config.js";
 import type { Task, RuntimeResult } from "../src/contracts.js";
+import { buildRevision } from "../src/build-revision.js";
 
 const task: Task = {
   id: "a0000000-0000-4000-8000-000000000001",
@@ -86,7 +90,10 @@ const outcome = (text: string): RuntimeResult => ({
   publication: { kind: "comment" },
 });
 const assignment = () => ({
-  task,
+  task: {
+    ...task,
+    threadContext: [],
+  },
   leaseToken: "lease-value",
   expiresAt: Date.now() + 10000,
 });
@@ -94,6 +101,20 @@ const respond = (res: any, value: unknown) => {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify(value));
 };
+test("build revision accepts only a full SHA and never exposes arbitrary environment text", () => {
+  const previous = process.env.CHANNEL_BUILD_SHA;
+  try {
+    process.env.CHANNEL_BUILD_SHA = "a".repeat(40);
+    assert.equal(buildRevision(), "a".repeat(40));
+    process.env.CHANNEL_BUILD_SHA = "latest";
+    assert.equal(buildRevision(), null);
+    delete process.env.CHANNEL_BUILD_SHA;
+    assert.equal(buildRevision(), null);
+  } finally {
+    if (previous === undefined) delete process.env.CHANNEL_BUILD_SHA;
+    else process.env.CHANNEL_BUILD_SHA = previous;
+  }
+});
 
 test("lost result acknowledgement retries identical payload and never reruns model", async (t) => {
   const received: any[] = [];
@@ -361,6 +382,20 @@ test("assignments with missing canonical fields or obsolete aliases are rejected
       commentId: 1,
     },
     { ...task, result: null, commentUrl: null },
+    {
+      ...task,
+      target: {
+        kind: "pull_request",
+        number: 1,
+        revision: {
+          baseRepoId: 2,
+          headRepoId: 2,
+          headSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+        },
+      },
+    },
+    { ...task, reviewPolicy: { deepReview: true, nativeReview: true } },
   ]) {
     let calls = 0;
     const f = await fixture(t, (_path, _body, res) =>
@@ -399,5 +434,254 @@ test("text-only runtime results are rejected without fabricating publication or 
     "dedicated-cloud-token",
   );
   await agent.once();
-  assert.deepEqual(reported, { leaseToken: "lease-value", status: "failed" });
+  assert.equal(reported.leaseToken, "lease-value");
+  assert.equal(reported.status, "failed");
+  assert.equal(reported.failure, "runtime_response_invalid");
+});
+
+test("runtime cannot request a repository grant through its tool invoker", async (t) => {
+  const paths: string[] = [];
+  const f = await fixture(t, (path, _body, res) => {
+    paths.push(path);
+    respond(
+      res,
+      path.endsWith("/claim")
+        ? assignment()
+        : { accepted: true, duplicate: false },
+    );
+  });
+  const agent = new Agent(
+    config(f.base),
+    f.store(),
+    {
+      run: async (_task, invoke) => {
+        await assert.rejects(invoke("read_source_grant", {}), {
+          code: "tool_call_invalid",
+        });
+        await assert.rejects(invoke("read_merge_facts", {}), {
+          code: "tool_call_invalid",
+        });
+        return outcome("summary");
+      },
+    },
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.deepEqual(
+    paths.map((p) => p.split("/").pop()),
+    ["claim", "result"],
+  );
+});
+test("a failed merge query records its deployed bridge SHA and empty model tool list before the authorized read", async (t) => {
+  const previous = process.env.CHANNEL_BUILD_SHA;
+  process.env.CHANNEL_BUILD_SHA = "A".repeat(40);
+  t.after(() => {
+    if (previous === undefined) delete process.env.CHANNEL_BUILD_SHA;
+    else process.env.CHANNEL_BUILD_SHA = previous;
+  });
+  const actions: string[] = [];
+  const expected = {
+    kind: "started",
+    provider: "channel-merge-assessment",
+    runId: "github-channel:" + task.id,
+    bridgeBuildSha: "a".repeat(40),
+    modelTools: [],
+  };
+  const f = await fixture(t, (path, body, res) => {
+    actions.push(path.split("/").pop()!);
+    if (path.endsWith("/claim"))
+      return respond(res, {
+        ...assignment(),
+        task: {
+          ...task,
+          prompt: "@bot /merge-status",
+          threadContext: [],
+          reviewPolicy: { deepReview: false, nativeReview: false },
+          target: {
+            kind: "pull_request",
+            number: 1,
+            revision: {
+              baseRepoId: 2,
+              headRepoId: 2,
+              baseSha: "1".repeat(40),
+              headSha: "2".repeat(40),
+            },
+          },
+        },
+      });
+    if (path.endsWith("/execution")) {
+      assert.deepEqual(body.event, expected);
+      return respond(res, { accepted: true });
+    }
+    if (path.endsWith("/tool")) {
+      assert.deepEqual(body, {
+        leaseToken: "lease-value",
+        name: "read_merge_facts",
+        args: {},
+      });
+      res.writeHead(403);
+      return res.end();
+    }
+    assert.equal(body.status, "failed");
+    assert.equal(body.failure, "tool_call_failed");
+    respond(res, { accepted: true, duplicate: false });
+  });
+  const cfg = config(f.base);
+  assert.ok(cfg.runtime.type === "openclaw");
+  const agent = new Agent(
+    cfg,
+    f.store(),
+    new OpenClawConnector(cfg.runtime, "model-token", async () => {
+      throw Error("unexpected dispatch");
+    }),
+    "dedicated-cloud-token",
+  );
+  await agent.once();
+  assert.deepEqual(actions, ["claim", "execution", "tool", "result"]);
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  try {
+    const row = db
+      .prepare("SELECT runtime, phase FROM journal WHERE id=?")
+      .get(task.id);
+    assert.equal(row?.phase, "reported");
+    assert.deepEqual(JSON.parse(String(row.runtime)), expected);
+  } finally {
+    db.close();
+  }
+});
+test("pinned review grants stay in the cache preparer, outside model requests, journal and results", async (t) => {
+  const token = "installation-read-fixture";
+  let sha = "",
+    grants = 0,
+    requests = 0;
+  const revision = () => ({
+    baseRepoId: 2,
+    headRepoId: 2,
+    baseSha: sha,
+    headSha: sha,
+  });
+  const reports: unknown[] = [];
+  const f = await fixture(t, (path, body, res) => {
+    assert.ok(!JSON.stringify(body).includes(token));
+    if (path.endsWith("/claim"))
+      return respond(res, {
+        ...assignment(),
+        expiresAt: Date.now() + 60000,
+        task: {
+          ...task,
+          threadContext: [],
+          reviewPolicy: { nativeReview: false, deepReview: true },
+          target: { kind: "pull_request", number: 4, revision: revision() },
+        },
+      });
+    if (path.endsWith("/source-grant")) {
+      grants++;
+      assert.deepEqual(body, { leaseToken: "lease-value" });
+      return respond(res, {
+        token,
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+      });
+    }
+    if (path.endsWith("/tool")) {
+      if (body.name === "read_pull_diff")
+        return respond(res, {
+          untrusted: true,
+          revision: revision(),
+          changedFiles: 0,
+          files: [],
+          limitations: [],
+        });
+      assert.equal(body.name, "review_access");
+      return respond(res, { authorized: true });
+    }
+    if (path.endsWith("/execution")) {
+      assert.deepEqual(body.event.modelTools, [
+        "read_issue",
+        "read_file",
+        "read_merge_facts",
+        "search_repo",
+        "request_clarification",
+      ]);
+      return respond(res, { accepted: true });
+    }
+    reports.push(body);
+    respond(res, { accepted: true, duplicate: false });
+  });
+  const bare = join(realpathSync.native(dirname(f.path)), "fixture.git");
+  const git = (args: string[]) =>
+    execFileSync("git", args, {
+      input: "",
+      encoding: "utf8",
+      windowsHide: true,
+    }).trim();
+  git(["init", "--bare", "-q", bare]);
+  git([
+    "--git-dir",
+    bare,
+    "config",
+    "remote.origin.url",
+    "https://github.com/org/repo.git",
+  ]);
+  const tree = git(["--git-dir", bare, "mktree"]);
+  sha = git([
+    "--git-dir",
+    bare,
+    "-c",
+    "user.name=fixture",
+    "-c",
+    "user.email=test@example.org",
+    "commit-tree",
+    tree,
+    "-m",
+    "fixture",
+  ]);
+  const cfg = config(f.base);
+  assert.ok(cfg.runtime.type === "openclaw");
+  cfg.stateFile = f.path;
+
+  cfg.runtime.timeoutMs = 60000;
+  const runtime = new OpenClawConnector(
+    cfg.runtime,
+    "model-token",
+    async (_url, init) => {
+      requests++;
+      assert.ok(!JSON.stringify(init).includes(token));
+      return Response.json({
+        id: "r1",
+        status: "completed",
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Reviewed." }],
+          },
+        ],
+      });
+    },
+  );
+  const agent = new Agent(
+    cfg,
+    f.store(),
+    runtime,
+    "dedicated-cloud-token",
+    fetch,
+    async (root, assigned, grant) => {
+      assert.equal(root, join(dirname(f.path), "review-cache"));
+      assert.equal(assigned.id, task.id);
+      assert.equal((await grant()).token, token);
+      return bare;
+    },
+  );
+  await agent.once();
+  assert.match(JSON.stringify(reports), /"status":"succeeded"/);
+  assert.equal(grants, 1);
+  assert.equal(requests, 1);
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  try {
+    const row = db.prepare("SELECT * FROM journal WHERE id=?").get(task.id);
+    assert.ok(row);
+    assert.ok(!JSON.stringify(row).includes(token));
+  } finally {
+    db.close();
+  }
 });

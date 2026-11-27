@@ -1,3 +1,5 @@
+import { fixtureAgent } from "./binding-fixture.js";
+import { createHmac, randomUUID } from "node:crypto";
 import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -62,7 +64,7 @@ async function fixture(t: any, runtime: RuntimeConnector) {
       credential === "connector" ? { deviceId: "worker" } : undefined,
   );
   const server = createChannelServer(
-    {} as ChannelConfig,
+    { github: { botLogin: "fixture[bot]" } } as ChannelConfig,
     cloud,
     "webhook",
     "admin",
@@ -114,6 +116,46 @@ async function fixture(t: any, runtime: RuntimeConnector) {
       }),
   };
 }
+test("a signed push is observable without a model call or publication", async (t) => {
+  let runs = 0;
+  const f = await fixture(t, {
+    run: async () => {
+      runs++;
+      throw new Error("Repository push must not invoke the runtime");
+    },
+  });
+  const raw = JSON.stringify({
+    installation: { id: 1 },
+    repository: { id: 2, name: "repo", owner: { login: "org" } },
+    sender: { type: "User", id: 3, login: "alice" },
+    ref: "refs/heads/main",
+    after: "a".repeat(40),
+    deleted: false,
+  });
+  const response = await fetch(f.base + "/webhooks/github", {
+    method: "POST",
+    body: raw,
+    headers: {
+      "content-type": "application/json",
+      "x-github-event": "push",
+      "x-github-delivery": randomUUID(),
+      "x-hub-signature-256":
+        "sha256=" + createHmac("sha256", "webhook").update(raw).digest("hex"),
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    observed: true,
+    duplicate: false,
+    taskId: null,
+    reason: "observed",
+  });
+  await f.agent.once();
+  assert.equal(runs, 0);
+  assert.equal(await f.worker.tick(), false);
+  assert.deepEqual(f.counts(), { comments: 0, prs: 0 });
+});
+// Direct store admission below exercises the runtime's repository-target protocol independent of webhook activation.
 test("repository-target artifacts traverse real outbound HTTP without creating an issue comment", async (t) => {
   const f = await fixture(t, {
     run: async (task, _invoke, _signal, onEvent) => {
@@ -199,7 +241,9 @@ test("structured result replay is canonical and cannot add identity overrides", 
     ...input,
     source: { event: "issue_comment", action: "created", commentId: 4 },
   }).task;
-  const lease = (await f.post("claim", {}).then((r) => r.json())) as any;
+  const lease = (await f
+    .post("claim", { runtime: fixtureAgent })
+    .then((r) => r.json())) as any;
   const body = {
     leaseToken: lease.leaseToken,
     status: "succeeded",

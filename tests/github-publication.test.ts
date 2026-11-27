@@ -3,6 +3,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { OctokitGitHubClient } from "../src/github.js";
+import { TaskStore } from "../src/store.js";
+import { DeliveryWorker } from "../src/worker.js";
+import { seedBinding } from "./binding-fixture.js";
 import {
   AccessDenied,
   AmbiguousExecution,
@@ -46,6 +49,9 @@ function fixture(
     maxBytes?: number;
     writeStatus?: number;
     incomplete?: boolean;
+    bindingId?: string;
+    publicationAllowed?: (id: string) => boolean;
+    afterRef?: () => void;
   } = {},
 ) {
   const calls: { path: string; method: string; body: any }[] = [];
@@ -54,7 +60,7 @@ function fixture(
     github: { appId: "123", botLogin: "helper[bot]" },
     bindings: [
       {
-        id: "b",
+        id: opts.bindingId ?? "b",
         installationId: 1,
         repositoryId: 2,
         owner: "org",
@@ -91,8 +97,16 @@ function fixture(
       };
     else if (path === "/repos/org/repo")
       data = { id: 2, name: "repo", owner: { login: "org" } };
+    else if (method === "GET" && path === "/repos/org/repo/issues/5")
+      data = { number: 5, state: "open" };
     else if (method === "GET" && path === "/repos/org/repo/pulls/5")
-      data = { state: "open", merged: false };
+      data = {
+        state: "open",
+        merged: false,
+        number: 5,
+        base: { sha: "a".repeat(40), repo: { id: 2 } },
+        head: { sha: "b".repeat(40), repo: { id: 2 } },
+      };
     else if (path.endsWith("/permission"))
       data = {
         permission: ++checks >= (opts.revokeAt ?? Infinity) ? "read" : "write",
@@ -117,9 +131,14 @@ function fixture(
         });
       if (opts.lost && path.endsWith(opts.lost))
         throw new Error("lost response");
+      if (path.endsWith("/git/refs")) opts.afterRef?.();
       data = path.endsWith("/pulls")
         ? { id: 7, html_url: "https://github.com/org/repo/pull/7" }
-        : { sha: "d".repeat(40), object: { sha: "d".repeat(40) } };
+        : {
+            sha: "d".repeat(40),
+            object: { sha: "d".repeat(40) },
+            ...(path.endsWith("/git/refs") ? { ref: body.ref } : {}),
+          };
     } else throw new Error("unexpected " + method + " " + path);
     return new Response(JSON.stringify(data), {
       status: 200,
@@ -136,6 +155,7 @@ function fixture(
         ),
       async () => {},
       fetcher,
+      opts.publicationAllowed,
     ),
     calls,
     mutations: () =>
@@ -164,6 +184,62 @@ test("draft PR uses scoped token, fixed branch and authorized Git Data writes", 
   assert.equal(f.mutations().at(-1)?.body.draft, true);
   assert.equal(f.mutations().at(-1)?.body.base, "main");
   assert.ok(f.calls.filter((c) => c.path.endsWith("/permission")).length >= 6);
+});
+
+test("a close after publishing the branch preserves reconciliation evidence without sending a draft", async (t) => {
+  const store = new TaskStore(":memory:");
+  t.after(() => store.close());
+  const input = {
+    ...task,
+    bindingId: "1:2:worker:1",
+    deliveryId: "delivery",
+    target: { kind: "issue", number: 5 } as const,
+    source: { event: "issue_comment", action: "created", commentId: 10 },
+    prompt: "Implement",
+  };
+  seedBinding(store, input, "worker");
+  const publishedTask = store.accept(input).task;
+  assert.equal(
+    store.claimAssignment("worker", "hash", Date.now() + 60_000)?.id,
+    publishedTask.id,
+  );
+  store.finishAssignment(
+    publishedTask.id,
+    "worker",
+    "hash",
+    {
+      status: "succeeded",
+      outcome: { text: "Fix", artifacts: [], publication: proposal },
+    },
+    "digest",
+  );
+  const f = fixture({
+    bindingId: input.bindingId,
+    publicationAllowed: store.publicationAllowed.bind(store),
+    afterRef: () => store.closeThread(input),
+  });
+  const worker = new DeliveryWorker(store, f.client);
+  assert.equal(await worker.tick(), true);
+  assert.equal(await worker.tick(), false);
+  const result = store.get(publishedTask.id);
+  assert.equal(result?.deliveryStatus, "unknown");
+  assert.equal(result?.publicationReceipt, null);
+  assert.equal(
+    result?.error,
+    `Draft PR publication requires reconciliation: branch channel/${publishedTask.id} at ${"d".repeat(40)} (branch confirmed)`,
+  );
+  assert.deepEqual(
+    f.mutations().map((c) => c.path.split("/").at(-1)),
+    ["blobs", "trees", "commits", "refs"],
+  );
+});
+
+test("an ambiguous branch POST preserves the expected branch and commit", async () => {
+  const f = fixture({ lost: "/git/refs" });
+  await assert.rejects(f.client.publishPullRequest(task, proposal), {
+    message: `Draft PR publication requires reconciliation: branch channel/${task.id} at ${"d".repeat(40)} (branch unconfirmed)`,
+  });
+  assert.equal(f.mutations().at(-1)?.path, "/repos/org/repo/git/refs");
 });
 test("policy, base, branch and authorization denials perform no writes", async () => {
   for (const opts of [
@@ -349,7 +425,22 @@ test("PR linkage uses canonical task target", async () => {
   for (const kind of ["issue", "pull_request"] as const) {
     const f = fixture();
     await f.client.publishPullRequest(
-      { ...task, target: { kind, number: 5 } },
+      {
+        ...task,
+        target:
+          kind === "issue"
+            ? { kind, number: 5 }
+            : {
+                kind,
+                number: 5,
+                revision: {
+                  baseSha: "a".repeat(40),
+                  headSha: "b".repeat(40),
+                  baseRepoId: 2,
+                  headRepoId: 2,
+                },
+              },
+      },
       proposal,
     );
     assert.equal(

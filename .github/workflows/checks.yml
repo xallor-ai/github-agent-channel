@@ -7,6 +7,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -16,5 +19,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Fetch two pinned revisions into an empty bridge cache
+        if: github.event_name == 'push'
+        env:
+          CACHE_PROBE_TOKEN: ${{ github.token }}
+          CACHE_PROBE_REPOSITORY_ID: ${{ github.repository_id }}
+        run: node scripts/smoke-review-cache.mjs
       - name: Verify isolated Docker deployment and HTTPS routing
         run: node scripts/smoke-deployment.mjs

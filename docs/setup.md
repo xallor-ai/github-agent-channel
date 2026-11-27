@@ -4,6 +4,8 @@
 
 本篇是使用入口，按顺序完成后应能在绑定仓库评论 `@机器人`，由内网 OpenClaw 分析并回帖。自建 ECS 不是每个使用者都要做的事：已有 Channel 服务时，拿到服务地址和发给 GitHub 用户的一次性邀请即可；没有服务时，先完成[可选的 ECS 自建部署](ecs-setup.md)，再回到本文。
 
+需要自动审查 PR 时，按[PR 评审指南](pr-review.md)选择普通差异评审、只读深评或原生 Review；三者可用范围不同。
+
 当前实现是本仓库的独立连接器进程，不是在 OpenClaw 的 channels 列表里填一个 GitHub Webhook URL。连接器只向公网发起 HTTPS 请求；OpenClaw 留在本机或内网。
 
 当前 Channel 仅接受 v2 配置/协议和新状态库；从旧部署切换先读[v2 契约](protocol-v2.md)。
@@ -23,7 +25,7 @@
 
 还需要本地 OpenClaw 的模型 Provider/API凭据，以及 Gateway token。**模型 API key、OpenClaw Gateway token、Channel 连接器 token 是三件不同的东西**。GitHub PEM 私钥和Webhook Secret属于ECS，不放到内网连接器。
 
-GitHub App 的注册、安装、权限和事件订阅请阅读书稿[附录 B：GitHub CLI、API 和 GitHub App](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20B%20GitHub%20CLI%E3%80%81API%20%E5%92%8C%20GitHub%20App.md)，验签与投递概念见[附录 C：Webhook 与事件接收](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20C%20Webhook%20%E4%B8%8E%E4%BA%8B%E4%BB%B6%E6%8E%A5%E6%94%B6.md)。本站使用契约是：App已安装到目标仓库，订阅 `Issue comment`，签名Secret与ECS一致；服务端binding允许目标仓库，发评论的人拥有write/maintain/admin权限。这里不重复注册教程。
+GitHub App 的注册、安装、权限和事件订阅请阅读书稿[附录 B：GitHub CLI、API 和 GitHub App](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20B%20GitHub%20CLI%E3%80%81API%20%E5%92%8C%20GitHub%20App.md)，验签与投递概念见[附录 C：Webhook 与事件接收](https://github.com/xallor-ai/modern-github-book/blob/main/%E7%AC%94%E8%AE%B0/%E7%8E%B0%E4%BB%A3%20GitHub%EF%BC%9A%E9%99%84%E5%BD%95%20C%20Webhook%20%E4%B8%8E%E4%BA%8B%E4%BB%B6%E6%8E%A5%E6%94%B6.md)。本站使用契约是：App已安装到目标仓库，至少订阅 `Issue comment` 以接收提及；要观察新 Issue、PR 和 push 也须订阅对应事件，签名 Secret 与 Channel 服务端一致；服务端binding允许目标仓库，发评论的人拥有write/maintain/admin权限。这里不重复注册教程。
 
 下文命令以 Linux/macOS shell 或 WSL 为例，在运行OpenClaw或能私网访问它的机器上执行。PowerShell的环境变量示例在验证步骤另列。
 
@@ -118,7 +120,7 @@ JS
 }
 ```
 
-`agents.entries.github` 中的 **github就是agentId**。它默认继承已有模型配置；需要指定模型时，在这个entry里增加 `model`。`tools.deny`限制该Agent的内置工具，客户端提供的 `read_issue/read_file` 由连接器处理并交回ECS。repository/push 任务只提供 `read_file`，分析保存在任务 outcome 中，不尝试向不存在的 Issue 发评论；文件仍从默认分支读取，不能当作指定 push SHA 的代码审查。`tools.toolSearch=false`在2026.11.3中是全局设置，不是entry内字段；它直接提供少量客户端工具的定义。共享Gateway时先评估该全局修改对其他Agent的影响，或者使用独立profile。
+`agents.entries.github` 中的 **github就是agentId**。它默认继承已有模型配置；需要指定模型时，在这个entry里增加 `model`。`tools.deny`限制该Agent的内置工具，普通任务的 `read_issue/read_file` 由连接器转发服务端；PR 深评时 `read_file/search_repo` 在授权后的任务快照执行。默认 push 只登记分支与提交 SHA，不启动模型。`tools.toolSearch=false`在2026.11.3中是全局设置，不是entry内字段；它直接提供少量客户端工具的定义。共享Gateway时先评估该全局修改对其他Agent的影响，或者使用独立profile。
 
 先审阅片段并备份自己的配置，再执行（以下以新profile为例；已有专用默认实例去掉profile参数）：
 
@@ -185,7 +187,7 @@ gh auth token --hostname github.com | npm run channel -- agent pair ./agent-data
 npm run channel -- agent check ./agent-data/agent.local.yaml
 ```
 
-按[仓库自助接入指南](agent-self-service.md)创建本机声明并显式 apply，待 status 显示 active。上述 check 预期显示 `Agent configuration valid`。这只证明配置与secret引用有效，尚不代表模型或GitHub可用。
+设备所有者只配对一次。仓库管理员按[仓库自助接入指南](agent-self-service.md)提交仓库声明；CLI 读取当前修订，把该仓库绑定给此配置中的 `openclaw/github`，返回生效策略。新增仓库不必重配 Gateway 或 ECS。上述 check 预期显示 `Agent configuration valid`。这只证明配置与secret引用有效，尚不代表模型或GitHub可用。
 
 ## 5. 先验证本机模型与工具续调用
 
@@ -335,6 +337,10 @@ JS
 
 本教程不把版本升级、schema校验或一次health探测当作完整验收；主线终点是上一步的真实投递、模型执行和回帖证据。
 
-## 无需提及的只读接入
+## 验证观察与执行
 
-在要启用的仓库 binding 中设置 `requireMention: false` 和 `events: [issue_comment.created, issues.opened, pull_request.opened, pull_request.synchronize]`。在本机声明中填写最新 revision 并显式 apply。匹配的人类流量可能消耗模型资源；先用只读 Runtime、不配置云端 writeProfiles，检查普通评论、重复投递和机器人自身回帖。
+按[仓库自助接入指南](agent-self-service.md)的最小声明绑定仓库，省略 `events` 即关注支持的已投递事件。要为新 Issue 自动分诊，显式开启 `autoTriage`；要评审新建或更新的 PR，开启 `autoReview`。两者默认均关闭。深评、原生 Review 在绑定中分别授权，是否可用以状态里显示的适配器能力与仓库授权为准。
+
+在同一开放 Issue 先发表普通评论，再发一条明确提及机器人的评论。前者只留下活动，后者应关联一个执行任务；机器人回复自己的评论事件应记为回执。用 `npm run channel -- agent repo activities <声明文件> <agent配置文件>` 查看活动的 reason、关联 taskId 和游标。设备离线后可在保留期限内按游标续读；分页返回 truncated 时说明部分记录已超出窗口。另行核对模型调用、任务结果和 GitHub 真实回帖：普通评论、机器人回帖和 push 都不应增加调用次数。设置自动评审后，还需核对 PR 更新和关闭，以及同一 head 的重复投递。
+
+历史的真实提及/回帖记录不能证明本次新增的活动流已在实际仓库验收。当前证据与待验项见[能力台账](capabilities.md)。
