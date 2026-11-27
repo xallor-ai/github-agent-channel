@@ -30,7 +30,6 @@
 | [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
 | [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |
 | [github-pull-context.ts](../src/github-pull-context.ts) | 同仓开放 PR 的双方身份与版本核对，按固定 base...head 读取有界变更 |
-| [github-review-snapshot.ts](../src/github-review-snapshot.ts) | 对固定 head 使用 Git Data 读取完整有界文本树，核验 blob 内容与 Git 标识 |
 | [review-snapshot.ts](../src/review-snapshot.ts) | OpenClaw 每任务的只读 head 搜索及文件读取，关闭后不可用 |
 | [github-review.ts](../src/github-review.ts) | 固定 commit 的 COMMENT、按 bot/任务/版本标记核验真实回执 |
 | [github-publication.ts](../src/github-publication.ts) | 显式 writePolicy；基线/路径/模式检查；服务端分支、Git Data commit 和 draft PR；每次写入重授权             |
@@ -40,6 +39,7 @@
 | [agent-store.ts](../src/agent-store.ts)               | schema v3 journal 和排他锁；执行前持久化、保存运行 handle、未确认 outcome 重传；无迁移                    |
 | [agent.ts](../src/agent.ts)                           | 出站 bridge：claim→journal→适配器→保存 outcome→result ACK；不实现编码循环                                 |
 | [runtime-factory.ts](../src/runtime-factory.ts)       | 按显式 runtime.type 构造适配器，接收已解析 token，不再读取凭据或保留空能力声明                            |
+| [review-cache.ts](../src/review-cache.ts) | 桥接进程维护隔离的 Git 对象库，按授权获取固定版本，不更新共享工作树；下载退出不明时隔离 staging，仍可读取已验证的旧版本。 |
 | [connector.ts](../src/connector.ts)                   | OpenClaw Responses 边界 schema 校验；按目标暴露受控读取工具（仓库任务仅 read_file），PR 自动装入有界 diff，可选任务快照和正文型原生 Review                          |
 | [acp-connector.ts](../src/acp-connector.ts)           | 官方 ACP SDK 接入已有 harness；预取授权 Issue、session、权限请求、编辑结果与验证命令                      |
 | [runtime-workspace.ts](../src/runtime-workspace.ts)   | 干净 clone 的 origin/目标 SHA/元数据检查；共用索引校验拒绝隐藏修改；收集实际变更，不 clone/reset/push     |

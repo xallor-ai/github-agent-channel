@@ -1,6 +1,48 @@
 import { createHash } from "node:crypto";
 import type { Octokit } from "@octokit/core";
-import { boundedGitObjectFetch } from "./github-review-snapshot.js";
+// Bound even a misleading/truncated upstream response before Octokit parses it.
+// Neither redirect destinations nor URLs in Git tree entries are followed.
+function boundedGitObjectFetch(
+  fetchImpl: typeof fetch,
+  timeoutMs = 90_000,
+): typeof fetch {
+  let remaining = 3_000_000;
+  const deadline = AbortSignal.timeout(timeoutMs);
+  return async (input, init) => {
+    const response = await fetchImpl(input, {
+      ...init,
+      redirect: "error",
+      signal: init?.signal
+        ? AbortSignal.any([deadline, init.signal])
+        : deadline,
+    });
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      throw Error("Cannot fetch pinned Git object");
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.length;
+        remaining -= value.length;
+        if (size > 512_000 || remaining < 0) {
+          await reader.cancel();
+          throw Error("Git object response exceeds read budget");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return new Response(Buffer.concat(chunks), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+}
 
 const maxFileBytes = 128 * 1024;
 const maxSegments = 24;

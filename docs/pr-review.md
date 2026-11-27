@@ -31,22 +31,15 @@ runtime:
   publishReview: true
 ```
 
-没有本地源码时，bridge 可经已授权的 `read_snapshot` 接口取得当前 head 的完整文本树；只接受最多 128 个普通 UTF-8 文件、每文件最多 128 KiB、序列化快照不超过 1,000,000 字节。GitHub 树截断、二进制、符号链接、子模块、不支持的路径或超限均无法作为完整快照；云端读取对象还受 90 秒、总计 3,000,000 字节、单次响应 512,000 字节限制；最多同时读取 4 个 blob。大仓库可预备对象库。快照不可用时，深评请求失败。若只需要差异分析，请明确调整配置并发起新任务。
+**源码由谁同步。** 首次深评时，配对连接器在本机准备专用 bare Git 对象库，通过 HTTPS 从 GitHub 获取任务指定的 head。再次评审只补缺少的对象；缓存命中仍需有效租约、绑定和授权。无需填写仓库路径或在 OpenClaw 工作目录执行 git pull。普通差异分析不下载整仓，普通 push 不是自动同步任务。
 
-对于超出该范围的仓库，管理员可以自行在 bridge 可读的专用位置准备 bare Git 仓库，设置正确的 `https://github.com/OWNER/REPO.git` origin，并在事件发生前或领取前准备好对应 head 对象。在现有 runtime 中添加：
+私有仓库使用 App 的单仓短期只读 installation token。连接器为一次获取单独请求凭据，服务端核验设备、租约、绑定、发起人权限和当前 PR；App 私钥留在服务端，下载凭据不作为模型工具结果。GitHub 凭据能读授权仓库而非只读单个 SHA；只向信任的执行设备启用深评。按固定 SHA 读取是连接器的约束。停用绑定后，Channel 拒绝新凭据、后续模型读取和发布，不能远程收回已取得的源码。已签发的 GitHub 单仓只读令牌独立于 Channel 租约；仅在令牌到期（通常一小时）或 GitHub 撤销后失效。关闭任务不会即时撤销 GitHub 凭据，下载期间需信任设备。缓存目录须仅桥接进程可写，模型与 harness 不挂载该目录。缓存位于本地 journal 同级的 review-cache（容器内 /data/review-cache）。桥接进程使用专用私有目录；Windows 由管理员设置 ACL。缓存含 staging 的逻辑上限为 1 GiB / 50,000 个条目，下载中抽查用量；严格物理上限请用文件系统配额。只有确认不再有 Git 下载时才回收准备目录。下载进程树退出无法确认或下载时崩溃会保留 .fetch-in-flight 隔离标记：仍获准的已有提交可验证后读取，新下载拒绝；不能因锁已释放就删除现场。处理时先停用该桥接进程，确认相关 Git/HTTPS 子进程都已退出，再由管理员清理专用缓存或解除标记。不会自动删已发布对象。复制/提升增量对象时按条目检查取消，已提交的操作仍可能在途。
 
-```yaml
-  reviewRepositories:
-    "987654": /srv/channel/review/my-repo.git
-```
-
-映射键是仓库数字 ID。使用真实的绝对目录；不用 ACP 的可写工作区，不配置 alternates、部分克隆或重定向元数据。连接器不会 fetch 或 checkout，不把仓库路径、Token 或 Git 命令交给模型。容器中的路径须由管理员提供、只读挂载，并有可用的 Git。每个任务只读取固定 commit 树中的普通 blob；读取结束清理内存，不创建需要重启回收的检出目录。管理员维护的 bare 仓库在任务结束后保留。
-
-OpenClaw 的 `search_repo` 接收字面量查询并返回匹配路径、行号及片段；`read_file` 打开任务版本中的路径。bare 搜索每次最多检查 4,096 个文件、8 MiB，单文件最多 1 MiB；最多返回 50 项，每个片段最多 400 字符，读取最多返回 64 Ki 字符。检查 `truncated`；没有匹配不等于整个仓库没有该符号。快照的本地读取须先通过 `review_access` 检查租约、绑定、actor 和版本；云端的 `read_pull_diff`、`read_snapshot` 不接受模型自选仓库或提交。ACP 的编码工作区不提供这些 OpenClaw 选项；处理 PR 时要求预备干净 clone 的 HEAD 匹配固定 head，且双方仓库 ID 与绑定一致。
+OpenClaw 的 `search_repo` 接收字面量查询并返回匹配路径、行号及片段；`read_file` 打开任务版本中的路径。bare 搜索每次最多检查 4,096 个文件、8 MiB，单文件最多 1 MiB；最多返回 50 项，每个片段最多 400 字符，读取最多返回 64 Ki 字符。检查 `truncated`；没有匹配不等于整个仓库没有该符号。快照的本地读取须先通过 `review_access` 检查租约、绑定、actor 和版本；云端的 `read_pull_diff` 和下载凭据请求 不接受模型自选仓库或提交。ACP 的编码工作区不提供这些 OpenClaw 选项；处理 PR 时要求预备干净 clone 的 HEAD 匹配固定 head，且双方仓库 ID 与绑定一致。
 
 PR 的单文件补读从固定提交逐层遍历 Git 树（最多 24 段），只接受不超过 128 KiB 的普通 UTF-8 blob，并验证 Git 对象哈希。符号链接、目录和截断的树不会被当作文件证据。
 
-**超时。** 自动准备快照的 Git 对象请求总预算为 90 秒，另有授权检查。启用深评的 bridge 建议设置顶层 `requestTimeoutMs: 120000`，Runtime 超时和云端领取期限应再留出模型与发布余量。重新渲染的 Nginx 连接器路由读取超时为 150 秒；已有代理需同步检查。
+**超时。** 冷启动包含一次 Git 下载。执行机需能通过 HTTPS 访问 GitHub；请为模型处理和冷启动共同留出运行及领取时间。取不到指定提交、下载超时或超出配额时，不能切换为默认分支继续。
 
 **核验交付。** 查询原任务的 `target.revision`、`outcome.publication.kind`、`deliveryStatus`、`publicationReceipt`。普通评论是 W1；只有在 GitHub 打开对应 `#pullrequestreview-N` 且 commit_id 等于目标 head 的 COMMENTED Review 才有原生总评证据。发布器发起写入前复核权限、开放状态和双方版本，并传入固定 commit_id；GitHub 不提供锁住 base/head 的原子写入。行内意见尚不支持：不能把正文里的文件或行号当成已验证的行内评论。响应丢失按[对账流程](operations.md)处理，不自动重发。
 

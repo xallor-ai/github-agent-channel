@@ -10,10 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  openFetchedReviewSnapshot,
-  openReviewSnapshot,
-} from "../src/review-snapshot.js";
+import { openReviewSnapshot } from "../src/review-snapshot.js";
 
 test("bare review views pin two commits, search unchanged callers and release independently", async (t) => {
   const tmp = mkdtempSync(
@@ -64,10 +61,9 @@ test("bare review views pin two commits, search unchanged callers and release in
     "remote.origin.url",
     "https://github.com/acme/example.git",
   );
-  const pins = { repositoryId: 7, fullName: "acme/example" };
-  const repos = { "7": bare };
+  const pins = { fullName: "acme/example" };
   const [first, second] = await Promise.all(
-    [h1, h2].map((sha) => openReviewSnapshot(repos, { ...pins, sha })),
+    [h1, h2].map((sha) => openReviewSnapshot(bare, { ...pins, sha })),
   );
   assert.equal((await first.read("impl.ts")).text, "first version\n");
   assert.equal((await second.read("impl.ts")).text, "second version\n");
@@ -92,19 +88,15 @@ test("bare review views pin two commits, search unchanged callers and release in
   assert.equal((await second.search("first version")).matches.length, 0);
   second.close();
   await assert.rejects(
-    openReviewSnapshot(repos, { ...pins, sha: h1, fullName: "acme/wrong" }),
+    openReviewSnapshot(bare, { ...pins, sha: h1, fullName: "acme/wrong" }),
     /origin/,
   );
   await assert.rejects(
-    openReviewSnapshot(repos, { ...pins, sha: h1, repositoryId: 8 }),
+    openReviewSnapshot(bare, { ...pins, sha: "HEAD" }),
     /No review snapshot/,
   );
   await assert.rejects(
-    openReviewSnapshot(repos, { ...pins, sha: "HEAD" }),
-    /No review snapshot/,
-  );
-  await assert.rejects(
-    openReviewSnapshot(repos, {
+    openReviewSnapshot(bare, {
       ...pins,
       sha: git("rev-parse", "HEAD:impl.ts"),
     }),
@@ -112,74 +104,7 @@ test("bare review views pin two commits, search unchanged callers and release in
   );
   writeFileSync(join(bare, "objects", "info", "alternates"), src);
   await assert.rejects(
-    openReviewSnapshot(repos, { ...pins, sha: h1 }),
+    openReviewSnapshot(bare, { ...pins, sha: h1 }),
     /redirection/,
   );
-});
-
-test("fetched views reject incomplete material, validate pin/path uniqueness and release text", async () => {
-  const sha = "1".repeat(40);
-  const payload = {
-    sha,
-    complete: true,
-    files: [{ path: "test.ts", text: "alpha\nuse.impl();\n" }],
-  };
-  const view = openFetchedReviewSnapshot(payload, sha);
-  assert.deepEqual(await view.search("use.impl("), {
-    sha,
-    truncated: false,
-    matches: [{ path: "test.ts", line: 2, text: "use.impl();" }],
-  });
-  assert.equal((await view.search(".*")).matches.length, 0);
-  assert.equal((await view.read("test.ts")).text, payload.files[0].text);
-  await assert.rejects(view.read("../test.ts"), /regular file/);
-  assert.throws(
-    () => openFetchedReviewSnapshot({ ...payload, complete: false }, sha),
-    /Invalid/,
-  );
-  assert.throws(
-    () => openFetchedReviewSnapshot(payload, "2".repeat(40)),
-    /version/,
-  );
-  assert.throws(
-    () =>
-      openFetchedReviewSnapshot(
-        { ...payload, files: [...payload.files, ...payload.files] },
-        sha,
-      ),
-    /duplicate/,
-  );
-  assert.throws(
-    () =>
-      openFetchedReviewSnapshot(
-        { ...payload, files: [{ path: "../secret", text: "" }] },
-        sha,
-      ),
-    /Invalid/,
-  );
-  view.close();
-  await assert.rejects(view.read("test.ts"), /closed/);
-});
-
-test("search and read limits are visible and literal patterns cannot change the query mode", async () => {
-  const sha = "f".repeat(40);
-  const text = ("x".repeat(1000) + " [.*] end\n").repeat(80);
-  const view = openFetchedReviewSnapshot(
-    {
-      sha,
-      complete: true,
-      files: [{ path: "large", text }],
-    },
-    sha,
-  );
-  const hits = await view.search("[.*]");
-  assert.equal(hits.truncated, true);
-  assert.equal(hits.matches.length, 50);
-  assert.equal(hits.matches[49].line, 50);
-  assert.match(hits.matches[49].text, /\[\.\*\]/);
-  const file = await view.read("large");
-  assert.equal(file.truncated, true);
-  assert.ok(file.text.length < text.length);
-  await assert.rejects(view.search("\n"), /literal/);
-  view.close();
 });

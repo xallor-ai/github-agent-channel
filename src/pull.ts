@@ -20,13 +20,7 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const leaseSchema = z.string().min(32).max(256);
 const toolSchema = z.strictObject({
   leaseToken: leaseSchema,
-  name: z.enum([
-    "read_issue",
-    "read_file",
-    "read_pull_diff",
-    "read_snapshot",
-    "review_access",
-  ]),
+  name: z.enum(["read_issue", "read_file", "read_pull_diff", "review_access"]),
   args: z.unknown(),
 });
 const resultSchema = z.discriminatedUnion("status", [
@@ -87,6 +81,27 @@ export class PullCoordinator {
     const task = this.store.assignedTask(id, workerId, hash(lease));
     if (!task) throw new StaleAssignment();
     return task;
+  }
+  private checkReviewAccess(
+    task: Task,
+    workerId: string,
+    credential: string | undefined,
+  ) {
+    const binding = this.store.activeBinding(
+      task.installationId,
+      task.repositoryId,
+    );
+    if (
+      !credential ||
+      this.authenticate(credential)?.deviceId !== workerId ||
+      binding?.deviceId !== workerId ||
+      binding.id !== task.bindingId ||
+      binding.deepReview !== true ||
+      task.target.kind !== "pull_request" ||
+      task.target.revision?.headRepoId !== task.repositoryId ||
+      task.target.revision.baseRepoId !== task.repositoryId
+    )
+      throw new AccessDenied("Deep review unavailable for this assignment");
   }
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const path = req.url?.split("?")[0] ?? "";
@@ -182,13 +197,30 @@ export class PullCoordinator {
         return true;
       }
       const match = path.match(
-        /^\/connector\/v2\/tasks\/([0-9a-f-]{36})\/(tool|result|execution)$/,
+        /^\/connector\/v2\/tasks\/([0-9a-f-]{36})\/(source-grant|tool|result|execution)$/,
       );
       if (!match) {
         send(404, { error: "Not found" });
         return true;
       }
       const [, id, action] = match;
+      if (action === "source-grant") {
+        const { leaseToken } = z
+          .strictObject({ leaseToken: leaseSchema })
+          .parse(await jsonBody(req, 4096));
+        const task = this.assignment(id, leaseToken, workerId);
+        const checkAssignment = () => {
+          this.assignment(id, leaseToken, workerId);
+          this.checkReviewAccess(task, workerId, credential);
+        };
+        checkAssignment();
+        if (!this.github.issueSourceGrant)
+          throw new AccessDenied("Source grant unavailable");
+        const grant = await this.github.issueSourceGrant(task, checkAssignment);
+        checkAssignment();
+        send(200, grant);
+        return true;
+      }
       if (action === "execution") {
         const data = z
           .strictObject({ leaseToken: leaseSchema, event: runtimeEventSchema })
@@ -229,15 +261,9 @@ export class PullCoordinator {
             throw new AccessDenied("No pinned PR");
           if (data.name === "read_pull_diff" && this.github.readPullDiff)
             output = await this.github.readPullDiff(task);
-          else if (
-            (data.name === "review_access" || data.name === "read_snapshot") &&
-            this.store.activeBinding(task.installationId, task.repositoryId)
-              ?.deepReview === true
-          ) {
-            if (data.name === "review_access") output = { authorized: true };
-            else if (this.github.readReviewSnapshot)
-              output = await this.github.readReviewSnapshot(task);
-            else throw new AccessDenied("Snapshot unavailable");
+          else if (data.name === "review_access") {
+            this.checkReviewAccess(task, workerId, credential);
+            output = { authorized: true };
           } else throw new AccessDenied("Review capability not enabled");
         }
         this.assignment(id, data.leaseToken, workerId);

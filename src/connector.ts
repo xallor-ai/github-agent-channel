@@ -1,9 +1,6 @@
 import { RuntimeFailure } from "./runtime-failure.js";
 import { z } from "zod";
-import {
-  openReviewSnapshot,
-  openFetchedReviewSnapshot,
-} from "./review-snapshot.js";
+import type { ReviewSnapshot } from "./review-snapshot.js";
 import { revisionSchema } from "./outcomes.js";
 import type { OpenClawRuntimeConfig } from "./agent-config.js";
 import {
@@ -69,7 +66,6 @@ const diffSchema = z.strictObject({
     .max(100),
   limitations: z.array(z.string().max(256)).max(16),
 });
-type Snapshot = ReturnType<typeof openFetchedReviewSnapshot>;
 const maxAnswerLength = 18000;
 const searchArgs = z.strictObject({
   query: z
@@ -142,7 +138,17 @@ export class OpenClawConnector implements RuntimeConnector {
     private config: OpenClawRuntimeConfig,
     private token: string,
     private fetcher: typeof fetch = fetch,
+    private readonly prepareReview?: () => Promise<ReviewSnapshot>,
   ) {}
+
+  withReviewSource(prepare: () => Promise<ReviewSnapshot>) {
+    return new OpenClawConnector(
+      this.config,
+      this.token,
+      this.fetcher,
+      prepare,
+    );
+  }
 
   async run(
     task: Task,
@@ -152,7 +158,7 @@ export class OpenClawConnector implements RuntimeConnector {
   ): Promise<RuntimeResult> {
     const deadline = AbortSignal.timeout(this.config.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
-    let snapshot: Snapshot | undefined;
+    let snapshot: ReviewSnapshot | undefined;
     const access = async () => {
       combined.throwIfAborted();
       if (
@@ -196,21 +202,9 @@ export class OpenClawConnector implements RuntimeConnector {
           task.reviewPolicy?.deepReview === true
         ) {
           await access();
-          const repos = this.config.reviewRepositories;
-          snapshot = repos?.[String(pin.headRepoId)]
-            ? await openReviewSnapshot(
-                repos,
-                {
-                  repositoryId: pin.headRepoId,
-                  fullName: task.owner + "/" + task.repo,
-                  sha: pin.headSha,
-                },
-                combined,
-              )
-            : openFetchedReviewSnapshot(
-                await invoke("read_snapshot", {}),
-                pin.headSha,
-              );
+          if (!this.prepareReview)
+            throw Error("Managed review cache unavailable");
+          snapshot = await this.prepareReview();
           await access();
         }
         combined.throwIfAborted();
