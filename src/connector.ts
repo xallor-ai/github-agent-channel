@@ -66,6 +66,25 @@ const diffSchema = z.strictObject({
     .max(100),
   limitations: z.array(z.string().max(256)).max(16),
 });
+function hasVisibleChange(file: z.infer<typeof diffSchema>["files"][number]) {
+  if (!file.patch || file.patchStatus === "unavailable") return false;
+  const lines = file.patch.split("\n");
+  if (file.patchStatus === "truncated") lines.pop(); // final line may be cut, even at its first character
+  let inHunk = false;
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      inHunk = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line);
+      continue;
+    }
+    if (
+      inHunk &&
+      (line.startsWith("+") || line.startsWith("-")) &&
+      line.slice(1).replace(/\r$/, "").length > 0
+    )
+      return true;
+  }
+  return false;
+}
 const maxAnswerLength = 18000;
 const searchArgs = z.strictObject({
   query: z
@@ -197,6 +216,76 @@ export class OpenClawConnector implements RuntimeConnector {
           Buffer.byteLength(JSON.stringify(evidence)) > 80 * 1024
         )
           throw Error("PR diff does not match the assigned revision or limits");
+        // Automatic review is about the signed event's revision. PR prose is not a patch.
+        if (
+          task.source.event === "pull_request" &&
+          (task.source.action === "opened" ||
+            task.source.action === "synchronize")
+        ) {
+          combined.throwIfAborted();
+          if (evidence.changedFiles === 0 && !evidence.limitations.length) {
+            return {
+              text: `固定版本 ${pin.baseSha} → ${pin.headSha} 的差异中没有变更文件。未执行代码评审；未验证 CI 或合并条件。`,
+              artifacts: [],
+              publication: {
+                kind: task.reviewPolicy?.nativeReview ? "review" : "comment",
+              },
+            };
+          }
+          if (
+            evidence.changedFiles > 0 &&
+            evidence.files.length === evidence.changedFiles &&
+            !evidence.limitations.length &&
+            evidence.files.every((f) => {
+              if (
+                f.patchStatus !== "provided" ||
+                !f.patch ||
+                !f.patch.startsWith("@@ ")
+              )
+                return false;
+              const lines = f.patch.split("\n");
+              const adds = lines.filter((l) => l.startsWith("+")),
+                dels = lines.filter((l) => l.startsWith("-"));
+              return (
+                adds.length === f.additions &&
+                dels.length === f.deletions &&
+                adds.length + dels.length > 0 &&
+                [...adds, ...dels].every(
+                  (l) => l.slice(1).replace(/\r$/, "") === "",
+                )
+              );
+            })
+          ) {
+            // Empty source lines can affect literal data: report the observation, not approval.
+            const counts = new Map<string, number>();
+            for (const file of evidence.files) {
+              const status = [
+                "modified",
+                "added",
+                "removed",
+                "renamed",
+                "copied",
+                "changed",
+              ].includes(file.status)
+                ? file.status
+                : "other";
+              counts.set(status, (counts.get(status) ?? 0) + 1);
+            }
+            const actions = [...counts]
+              .map(([status, n]) => status + ": " + n)
+              .join(", ");
+            return {
+              text: `固定版本 ${pin.baseSha} → ${pin.headSha}：已取得完整补丁（文件状态：${actions}），可见文本增删均为空行。未执行语义评审，不能据此判定无影响或可合并。`,
+              artifacts: [],
+              publication: { kind: "comment" },
+            };
+          }
+          if (!evidence.files.some(hasVisibleChange))
+            throw new RuntimeFailure(
+              "review_diff_unavailable",
+              "No pinned patch available for automatic code review",
+            );
+        }
         if (task.reviewPolicy?.deepReview === true) {
           await access();
           if (!this.prepareReview)
@@ -446,6 +535,7 @@ export class OpenClawConnector implements RuntimeConnector {
             "/" +
             evidence.changedFiles +
             " changed files supplied" +
+            `; patches complete: ${evidence.files.filter((f) => f.patchStatus === "provided" && f.patch?.trim()).length}/${evidence.changedFiles} (input coverage, not a review verdict)` +
             limitations +
             reads +
             ".";

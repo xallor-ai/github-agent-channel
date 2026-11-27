@@ -692,6 +692,135 @@ test("PR output preserves scope at the presentation limit and rejects oversized 
   });
 });
 
+test("automatic review without any pinned patch cannot turn PR prose into a clean verdict", async () => {
+  let models = 0;
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    models++;
+    return Response.json(summary);
+  });
+  const auto = {
+    ...pr,
+    prompt: "Old version deadbeef: all checks passed",
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  for (const files of [
+    [],
+    ...["provided", "truncated"].flatMap((patchStatus) =>
+      ["+", "-"].map((marker) => [
+        {
+          ...diff.files[0],
+          patch: "@@ -1 +1 @@\n" + marker + "\n",
+          patchStatus,
+        },
+      ]),
+    ),
+    [{ ...diff.files[0], patch: undefined, patchStatus: "unavailable" }],
+    [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,2 +1,2 @@\n ".padEnd(12286, "a") + "\n-",
+        patchStatus: "truncated",
+      },
+    ],
+    [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,2 +1,2 @@\n " + "a".repeat(12000),
+        patchStatus: "truncated",
+      },
+    ],
+  ]) {
+    await assert.rejects(
+      c.run(auto, async () => ({
+        ...diff,
+        files,
+        limitations: ["No usable patch"],
+      })),
+      { code: "review_diff_unavailable" },
+    );
+  }
+  assert.equal(models, 0);
+  const answer = await c.run(pr, async () => ({
+    ...diff,
+    files: [],
+    limitations: ["No usable patch"],
+  }));
+  assert.equal(answer.publication.kind, "comment");
+  assert.equal(models, 1);
+});
+
+test("automatic review with verified empty comparison reports scope without a model verdict", async () => {
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    throw Error("unexpected model call");
+  });
+  const result = await c.run(
+    { ...pr, source: { event: "pull_request", action: "opened" } },
+    async () => ({ ...diff, changedFiles: 0, files: [] }),
+  );
+  assert.match(result.text, /未执行代码评审/);
+  assert.ok(result.text.includes(revision.headSha));
+  assert.equal(result.publication.kind, "comment");
+});
+
+test("a changed line of spaces is substantive source data even without another changed token", async () => {
+  let called = 0;
+  const c = new OpenClawConnector(settings, "secret", async () => {
+    called++;
+    return Response.json(summary);
+  });
+  const auto = {
+    ...pr,
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  await c.run(auto, async () => ({
+    ...diff,
+    files: [
+      {
+        ...diff.files[0],
+        patch: "@@ -1,3 +1,3 @@\n const value = `head\n-  \n+    \n tail`;",
+      },
+    ],
+  }));
+  assert.equal(called, 1);
+});
+
+for (const [status, marker, adds, dels] of [
+  ["modified", "+", 1, 0],
+  ["added", "+", 1, 0],
+  ["removed", "-", 0, 1],
+] as const) {
+  test(
+    "verified empty-line " +
+      status +
+      " is a factual notice rather than missing code",
+    async () => {
+      const c = new OpenClawConnector(settings, "secret", async () => {
+        throw Error("Unexpected model call");
+      });
+      const patch =
+        (adds ? "@@ -1,0 +1 @@" : "@@ -1 +1,0 @@") + "\n" + marker + "\n";
+      const result = await c.run(
+        { ...pr, source: { event: "pull_request", action: "opened" } },
+        async () => ({
+          ...diff,
+          files: [
+            {
+              ...diff.files[0],
+              status,
+              patch,
+              additions: adds,
+              deletions: dels,
+            },
+          ],
+        }),
+      );
+      assert.match(result.text, /已取得完整补丁/);
+      assert.ok(result.text.includes(status + ": 1"));
+      assert.match(result.text, /未执行语义评审/);
+      assert.equal(result.publication.kind, "comment");
+    },
+  );
+}
 test("a device with enhanced review enabled retains basic analysis on a comment-only binding", async () => {
   let calls = 0;
   const c = new OpenClawConnector(settings, "secret", async (_url, init) => {

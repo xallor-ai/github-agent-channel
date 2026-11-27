@@ -69,6 +69,7 @@ function fixture(
     revokeOnSecondCheck?: boolean;
     bindingEnabled?: () => boolean;
     pull?: () => { state: string; merged?: boolean } | null;
+    compareStatus?: number;
     files?: () => unknown[];
     fileAt?: (ref: string | null) => string;
     gitObject?: (path: string) => unknown;
@@ -121,6 +122,8 @@ function fixture(
       `/repos/org/repo/compare/${revision.baseSha}...${revision.headSha}`
     ) {
       assert.equal(url.searchParams.get("page"), "1");
+      if (options.compareStatus)
+        return new Response("{}", { status: options.compareStatus });
       assert.equal(url.searchParams.get("per_page"), "1");
       data = {
         base_commit: { sha: revision.baseSha },
@@ -755,4 +758,32 @@ test("source grants require deep binding, authorized actor and unchanged PR befo
     );
     assert.equal(minted, ["revocation", "new-head"].includes(scenario));
   }
+});
+
+test("unavailable comparison on an authorized automatic review exposes a coverage gap, never version drift or denial", async () => {
+  const auto = {
+    ...pinned,
+    source: { event: "pull_request", action: "synchronize" },
+  };
+  const a = fixture({ compareStatus: 503 });
+  const data = await a.client.readPullDiff(auto);
+  assert.equal(data.files.length, 0);
+  await assert.rejects(
+    fixture({ compareStatus: 404 }).client.readPullDiff(auto),
+  );
+  assert.ok(data.limitations.length);
+  assert.equal(
+    a.calls.filter((c) => c.path === "/repos/org/repo/pulls/5").length,
+    2,
+  );
+  await assert.rejects(
+    fixture({ compareStatus: 403 }).client.readPullDiff(auto),
+  );
+  await assert.rejects(
+    fixture({
+      compareStatus: 503,
+      revokeOnSecondCheck: true,
+    }).client.readPullDiff(auto),
+    AccessDenied,
+  );
 });

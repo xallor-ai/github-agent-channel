@@ -145,18 +145,46 @@ export async function collectPullDiff(
   const files: FileEvidence[] = [];
   const seen = new Set<string>();
   let remaining = MAX_FILE_JSON_BYTES;
-  const response = await client.request(
-    "GET /repos/{owner}/{repo}/compare/{basehead}",
-    {
-      owner,
-      repo,
-      basehead: `${revision.baseSha}...${revision.headSha}`,
-      page: 1,
-      per_page: 1,
-      request: { parseSuccessResponseBody: false, redirect: "error" },
-    },
-  );
-  const comparison = await readComparison(response.data);
+  let comparison: Awaited<ReturnType<typeof readComparison>>;
+  try {
+    const response = await client.request(
+      "GET /repos/{owner}/{repo}/compare/{basehead}",
+      {
+        owner,
+        repo,
+        basehead: `${revision.baseSha}...${revision.headSha}`,
+        page: 1,
+        per_page: 1,
+        request: { parseSuccessResponseBody: false, redirect: "error" },
+      },
+    );
+    comparison = await readComparison(response.data);
+  } catch (error) {
+    // Re-authorize independently of the failed read. Never turn a denied,
+    // stale or uncertain assignment into permission to publish.
+    if (
+      task.source.event !== "pull_request" ||
+      !["opened", "synchronize"].includes(task.source.action ?? "")
+    )
+      throw error;
+    const status =
+      error && typeof error === "object" && "status" in error
+        ? error.status
+        : undefined;
+    if (
+      (typeof status === "number" && status >= 400 && status < 500) ||
+      error instanceof AccessDenied
+    )
+      throw error;
+    await recheck();
+    return {
+      untrusted: true,
+      revision,
+      changedFiles,
+      files,
+      limitations: ["Pinned comparison could not be read or verified"],
+    };
+  }
   await recheck();
   if (
     comparison &&

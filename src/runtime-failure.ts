@@ -8,6 +8,7 @@ export const failureCodes = {
     "no_final_answer",
     "runtime_response_invalid",
     "runtime_failed",
+    "review_diff_unavailable",
     "preparation_interrupted",
   ]),
   unknown: z.enum([
@@ -28,12 +29,13 @@ export class RuntimeFailure extends Error {
   }
 }
 
-// Only definitive model-output failures qualify for a Channel-authored status notice.
+// Only definitive execution or input-evidence failures qualify for a Channel-authored status notice.
 export const notifiableFailures = [
   "tool_round_limit",
   "no_final_answer",
   "runtime_response_invalid",
   "tool_call_invalid",
+  "review_diff_unavailable",
 ] as const satisfies readonly RuntimeFailureCode[];
 export const failedExecutionMessage = (code: RuntimeFailureCode) =>
   `Connector execution failed (${code})`;
