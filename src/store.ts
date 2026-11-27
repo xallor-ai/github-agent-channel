@@ -40,6 +40,7 @@ import {
   type ToolFailureCode,
 } from "./tool-audit.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
+import { ClarificationLedger } from "./clarification-ledger.js";
 
 // Prior failed tasks also used pending. Only explicitly diagnosed model failures may enqueue a notice.
 const publishableStatus =
@@ -63,6 +64,7 @@ export class TaskStore {
   private readonly db: DatabaseSync;
   private readonly ownerReceipts: OwnerReceipts;
   private readonly ledger: ActivityLedger;
+  private readonly questions: ClarificationLedger;
   private readonly audit: ToolAuditStore;
   readonly registry: BindingRegistry;
   private closed = false;
@@ -72,6 +74,7 @@ export class TaskStore {
     try {
       initializeTaskSchema(this.db);
       this.ledger = new ActivityLedger(this.db);
+      this.questions = new ClarificationLedger(this.db);
       this.ownerReceipts = new OwnerReceipts(this.db, this.ledger);
       this.registry = new BindingRegistry(this.db);
       this.audit = new ToolAuditStore(
@@ -138,6 +141,12 @@ export class TaskStore {
   toolAudit(id: string) {
     return this.audit.rows(id);
   }
+  clarificationState(id: string) {
+    return this.questions.state(id);
+  }
+  conversation(id: string) {
+    return this.questions.conversation(id);
+  }
   private decodeTask(row: Record<string, unknown>): Task {
     const {
       eventKey: _eventKey,
@@ -147,6 +156,7 @@ export class TaskStore {
     } = row;
     return {
       ...data,
+      ...this.questions.context(String(row.id)),
       target: JSON.parse(String(row.target)),
       source: JSON.parse(String(row.source)),
       outcome: row.outcome === null ? null : JSON.parse(String(row.outcome)),
@@ -249,13 +259,29 @@ export class TaskStore {
       )
         throw new StaleBinding("Binding changed before acceptance");
       const scope = [input.repositoryId, threadKey(input.target)];
-      const closed = execute
-        ? this.db
-            .prepare(
-              "SELECT closedAt FROM threadClosures WHERE repositoryId=? AND thread=?",
-            )
-            .get(...scope)
+      const canAnswer =
+        binding.responsibleAgent?.type === "openclaw" &&
+        input.source.event === "issue_comment" &&
+        input.source.action === "created" &&
+        (reason === "observed" || reason === "mention");
+      if (canAnswer) this.expireQueuedAnswers(Date.now(), input);
+      const match = canAnswer
+        ? this.questions.match(input, githubTime, reason === "observed")
         : undefined;
+      if (match) {
+        reason = match.reason;
+        execute =
+          reason === "clarification_reply" ||
+          reason === "clarification_ambiguous";
+      }
+      const closed =
+        execute || reason === "clarification_pending"
+          ? this.db
+              .prepare(
+                "SELECT closedAt FROM threadClosures WHERE repositoryId=? AND thread=?",
+              )
+              .get(...scope)
+          : undefined;
       const isStale =
         closed &&
         (closed.closedAt === null ||
@@ -265,11 +291,32 @@ export class TaskStore {
         input,
         isStale ? "closed" : reason,
         execute && !isStale
-          ? (eventKey) => this.enqueue(input, eventKey, githubTime)
+          ? (eventKey) => {
+              const id = this.enqueue(
+                match?.reason === "clarification_reply"
+                  ? { ...input, prompt: match.answer }
+                  : input,
+                eventKey,
+                githubTime,
+              );
+              if (match) this.questions.link(match, id);
+              return id;
+            }
           : undefined,
         closed?.closedAt == null ? undefined : Number(closed.closedAt),
         githubTime,
       );
+      if (
+        !receipt.duplicate &&
+        !isStale &&
+        match?.reason === "clarification_pending"
+      )
+        this.questions.remember(
+          receipt.cursor,
+          match.questionId,
+          input,
+          githubTime!,
+        );
       if (
         !receipt.duplicate &&
         reason === "closed" &&
@@ -329,6 +376,11 @@ export class TaskStore {
   private fenceThread(input: ThreadClosure) {
     const { githubTime } = input;
     const scope = [input.repositoryId, threadKey(input.target)];
+    this.questions.fence(
+      input.repositoryId,
+      threadKey(input.target),
+      githubTime,
+    );
     // A missing close instant cannot be ordered relative to any later delivery.
     // Preserve that uncertainty rather than guessing from arrival order.
     this.db
@@ -344,7 +396,7 @@ export class TaskStore {
       githubTime ?? null,
     ];
     const target =
-      "repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND (? IS NULL OR githubTime IS NULL OR githubTime<=?)";
+      "repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND (? IS NULL OR githubTime IS NULL OR githubTime<=? OR id IN (SELECT answerTaskId FROM clarifications WHERE closed=1 AND answerTaskId IS NOT NULL))";
     const cutoff = this.db
       .prepare(
         "SELECT closedAt FROM threadClosures WHERE repositoryId=? AND thread=?",
@@ -448,6 +500,11 @@ export class TaskStore {
       .run(JSON.stringify(event), id);
   }
   expireTasks(now = Date.now()): void {
+    this.transaction(() => this.expireInTransaction(now));
+  }
+  private expireInTransaction(now: number): void {
+    this.questions.expireCandidates(now);
+    this.expireQueuedAnswers(now);
     this.db
       .prepare(
         `UPDATE tasks SET status='rejected', deliveryStatus='skipped', error='Queue deadline expired before execution'
@@ -460,6 +517,26 @@ export class TaskStore {
       WHERE status='running' AND id IN (SELECT taskId FROM assignments WHERE expiresAt<=?)`,
       )
       .run(now);
+  }
+  // Evaluate the deadline before matching a new comment, not only on the next
+  // device poll. Caller holds the write transaction through admission.
+  private expireQueuedAnswers(now: number, scope?: NewTask): void {
+    const args = scope
+      ? [scope.bindingId, threadKey(scope.target), scope.actorId]
+      : [];
+    const expired = this.db
+      .prepare(
+        "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Queue deadline expired before execution' WHERE status='queued' AND createdAt<=? AND id IN (SELECT answerTaskId FROM clarifications WHERE answerTaskId IS NOT NULL" +
+          (scope ? " AND bindingId=? AND thread=? AND actorId=?" : "") +
+          ") RETURNING id,createdAt",
+      )
+      .all(now - QUEUE_MAX_AGE_MS, ...args);
+    for (const row of expired)
+      this.questions.undelivered(
+        String(row.id),
+        false,
+        Number(row.createdAt) + QUEUE_MAX_AGE_MS,
+      );
   }
   claimAssignment(
     workerId: string,
@@ -476,7 +553,7 @@ export class TaskStore {
     )
       throw new Error("Invalid assignment");
     return this.transaction(() => {
-      this.expireTasks(now);
+      this.expireInTransaction(now);
       const busy = this.db
         .prepare(
           `SELECT 1 FROM assignments a JOIN tasks t ON t.id=a.taskId
@@ -497,6 +574,14 @@ export class TaskStore {
           ...noticeMessages,
         );
       if (!row) return undefined;
+      if (!this.questions.selectionValid(String(row.id), now)) {
+        this.db
+          .prepare(
+            "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Clarification choices changed before execution' WHERE id=? AND status='queued'",
+          )
+          .run(row.id!);
+        return undefined;
+      }
       this.db
         .prepare(
           "UPDATE tasks SET status='running' WHERE id=? AND status='queued'",
@@ -517,6 +602,14 @@ export class TaskStore {
     now = Date.now(),
   ): Task | undefined {
     this.expireTasks(now);
+    return this.readActiveAssignment(taskId, workerId, leaseHash, now);
+  }
+  private readActiveAssignment(
+    taskId: string,
+    workerId: string,
+    leaseHash: string,
+    now: number,
+  ) {
     const row = this.db
       .prepare(
         `SELECT t.* FROM tasks t JOIN assignments a ON a.taskId=t.id
@@ -532,7 +625,9 @@ export class TaskStore {
     revision: import("./contracts.js").PullRevision,
   ): Task {
     return this.transaction(() => {
-      const task = this.assignedTask(id, workerId, leaseHash);
+      const now = Date.now();
+      this.expireInTransaction(now);
+      const task = this.readActiveAssignment(id, workerId, leaseHash, now);
       if (
         !task ||
         task.target.kind !== "pull_request" ||
@@ -602,10 +697,23 @@ export class TaskStore {
         try {
           outcome = validateOutcome(result.outcome);
           validateTaskOutcome(task, outcome);
+          if (
+            outcome.publication.kind === "clarification" &&
+            this.activeBinding(task.installationId, task.repositoryId)
+              ?.responsibleAgent?.type !== "openclaw"
+          )
+            throw Error("Runtime does not support clarification");
         } catch {
           throw new InvalidAssignmentOutcome("Invalid assignment outcome");
         }
       }
+      const withheld =
+        task.continuation &&
+        this.db
+          .prepare(
+            "SELECT answerWithheldReason FROM clarifications WHERE answerTaskId=?",
+          )
+          .get(task.id)?.answerWithheldReason;
       this.db
         .prepare(
           "UPDATE tasks SET status=?,outcome=?,error=?,deliveryStatus=? WHERE id=? AND status='running'",
@@ -619,17 +727,21 @@ export class TaskStore {
               ? result.failure
                 ? failedExecutionMessage(result.failure)
                 : "Connector execution failed"
-              : null,
-          result.status === "succeeded"
-            ? outcome?.publication.kind === "none"
-              ? "skipped"
-              : "pending"
-            : result.status === "failed" &&
-                task.target.kind !== "repository" &&
-                result.failure &&
-                noticeFailureCode(failedExecutionMessage(result.failure))
-              ? "pending"
-              : "skipped",
+              : withheld
+                ? "Continuation retained; PR merge snapshot: " + withheld
+                : null,
+          withheld
+            ? "skipped"
+            : result.status === "succeeded"
+              ? outcome?.publication.kind === "none"
+                ? "skipped"
+                : "pending"
+              : result.status === "failed" &&
+                  task.target.kind !== "repository" &&
+                  result.failure &&
+                  noticeFailureCode(failedExecutionMessage(result.failure))
+                ? "pending"
+                : "skipped",
           taskId,
         );
       this.db
@@ -647,12 +759,15 @@ export class TaskStore {
   ): void {
     if (!["rejected", "failed"].includes(status) || !error)
       throw Error("Invalid assignment rejection");
-    const changed = this.db
-      .prepare(
-        "UPDATE tasks SET status=?,deliveryStatus='skipped',error=? WHERE id=? AND runtime IS NULL AND status IN ('running','unknown') AND EXISTS (SELECT 1 FROM assignments WHERE taskId=tasks.id AND workerId=? AND leaseHash=?)",
-      )
-      .run(status, error, id, workerId, leaseHash);
-    if (!changed.changes) throw new AssignmentConflict("Task is not running");
+    this.transaction(() => {
+      const changed = this.db
+        .prepare(
+          "UPDATE tasks SET status=?,deliveryStatus='skipped',error=? WHERE id=? AND runtime IS NULL AND status IN ('running','unknown') AND EXISTS (SELECT 1 FROM assignments WHERE taskId=tasks.id AND workerId=? AND leaseHash=?)",
+        )
+        .run(status, error, id, workerId, leaseHash);
+      if (!changed.changes) throw new AssignmentConflict("Task is not running");
+      this.questions.undelivered(id, error === "pr_open_unconfirmed");
+    });
   }
   confirmActivities(
     deviceId: string,
@@ -703,11 +818,29 @@ export class TaskStore {
     });
   }
   publicationAllowed(taskId: string) {
-    return !!this.db
-      .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
-      .get(taskId);
+    return (
+      this.questions.selectionValid(taskId) &&
+      !!this.db
+        .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
+        .get(taskId)
+    );
   }
-  pendingDelivery(): Task | undefined {
+  fenceContinuationPublication(
+    task: Task,
+    reason: "closed" | "merged" | "unconfirmed",
+  ) {
+    if (
+      this.activeBinding(task.installationId, task.repositoryId)?.id !==
+        task.bindingId ||
+      !this.db
+        .prepare(
+          "UPDATE clarifications SET answerWithheldReason=COALESCE(answerWithheldReason,?) WHERE answerTaskId=? AND bindingId=?",
+        )
+        .run(reason, task.id, task.bindingId).changes
+    )
+      throw new AssignmentConflict("Inactive continuation");
+  }
+  pendingDelivery(now = Date.now()): Task | undefined {
     return this.transaction(() => {
       const row = this.db
         .prepare(
@@ -715,6 +848,19 @@ export class TaskStore {
         )
         .get(...noticeMessages);
       if (!row) return undefined;
+      if (!this.questions.selectionValid(String(row.id), now)) {
+        this.db
+          .prepare(
+            "UPDATE tasks SET deliveryStatus='skipped',error='Clarification choices changed before publication' WHERE id=? AND deliveryStatus='pending'",
+          )
+          .run(row.id!);
+        return undefined;
+      }
+      this.db
+        .prepare(
+          "INSERT INTO clarificationAttempts SELECT id,? FROM tasks WHERE id=? AND json_extract(outcome,'$.publication.kind')='clarification'",
+        )
+        .run(now, row.id!);
       this.db
         .prepare("UPDATE tasks SET deliveryStatus='sending' WHERE id=?")
         .run(row.id!);
@@ -729,17 +875,39 @@ export class TaskStore {
   ): void {
     if (!["sent", "failed", "unknown"].includes(status))
       throw Error("Invalid delivery transition");
-    const changed = this.db
-      .prepare(
-        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=?,error=COALESCE(?,error) WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
-      )
-      .run(
-        status,
-        receipt ? JSON.stringify(receipt) : null,
-        diagnostic ?? null,
-        id,
-      );
-    if (!changed.changes) throw Error("Delivery is not sending");
+    this.transaction(() => {
+      const changed = this.db
+        .prepare(
+          "UPDATE tasks SET deliveryStatus=?,publicationReceipt=?,error=COALESCE(?,error) WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
+        )
+        .run(
+          status,
+          receipt ? JSON.stringify(receipt) : null,
+          diagnostic ?? null,
+          id,
+        );
+      if (!changed.changes) throw Error("Delivery is not sending");
+      this.settleQuestion(id, status, receipt);
+    });
+  }
+  private settleQuestion(
+    id: string,
+    status: DeliveryState,
+    receipt?: PublicationReceipt,
+  ) {
+    if (status === "unknown") return;
+    const task = this.get(id)!;
+    if (task.outcome?.publication.kind !== "clarification") return;
+    this.db.prepare("DELETE FROM clarificationAttempts WHERE taskId=?").run(id);
+    if (status === "sent") this.questions.open(task, receipt);
+    const binding = this.activeBinding(task.installationId, task.repositoryId);
+    this.questions.settle(
+      task,
+      status === "sent" &&
+        binding?.id === task.bindingId &&
+        binding.responsibleAgent?.type === "openclaw",
+      this.enqueue.bind(this),
+    );
   }
   recover(): void {
     this.transaction(() => {
@@ -755,12 +923,15 @@ export class TaskStore {
   ): void {
     if (!["sent", "failed"].includes(terminal))
       throw Error("Invalid delivery resolution");
-    const changed = this.db
-      .prepare(
-        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='unknown'",
-      )
-      .run(terminal, receipt ? JSON.stringify(receipt) : null, id);
-    if (!changed.changes) throw Error("Delivery is not unknown");
+    this.transaction(() => {
+      const changed = this.db
+        .prepare(
+          "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='unknown'",
+        )
+        .run(terminal, receipt ? JSON.stringify(receipt) : null, id);
+      if (!changed.changes) throw Error("Delivery is not unknown");
+      this.settleQuestion(id, terminal, receipt);
+    });
   }
   resolveUnknown(id: string, terminal: "failed"): void {
     if (terminal !== "failed") throw new Error("Invalid resolution");

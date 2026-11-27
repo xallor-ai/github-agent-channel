@@ -83,15 +83,33 @@ async function fixture(
     },
   );
   let head = h1;
+  let reviewerCanWrite = true;
   let closed = false;
   let baseRef = "main";
   const replies: string[] = [];
+  const postedAt = Math.floor(Date.now() / 1000) * 1000 - 5_000;
+  let loseNextComment = false;
+  const commentRow = (body: string, index: number) => ({
+    id: 31 + index,
+    body,
+    user: { type: "Bot", login: "fixture[bot]" },
+    issue_url: "https://api.github.com/repos/org/repo/issues/7",
+    html_url: "https://github.com/org/repo/pull/7#issuecomment-" + (31 + index),
+    created_at: new Date(postedAt + index * 1000).toISOString(),
+  });
   const reviews: { commit_id: string; body: string }[] = [];
   const filesRead: string[] = [];
   const gitTransport: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const path = url.pathname,
       method = init?.method ?? "GET";
+    if (path === "/app") return json({ id: 123, slug: "fixture" });
+    if (path === "/repos/org/repo/issues/comments/8")
+      return json({
+        id: 8,
+        user: sender,
+        issue_url: "https://api.github.com/repos/org/repo/issues/7",
+      });
     if (path === "/app/installations/1/access_tokens") {
       if (!JSON.parse(String(init?.body)).permissions.pull_requests)
         duringMint?.(store);
@@ -106,7 +124,10 @@ async function fixture(
     if (path === "/repos/org/repo")
       return json({ id: 2, name: "repo", owner: { login: "org" } });
     if (path.endsWith("/collaborators/alice/permission"))
-      return json({ permission: "write", user: sender });
+      return json({
+        permission: reviewerCanWrite ? "write" : "read",
+        user: sender,
+      });
     if (path.endsWith("/pulls/7"))
       return json({
         number: 7,
@@ -162,12 +183,15 @@ async function fixture(
     }
     if (path === "/repos/org/repo/rules/branches/main") return json([]);
     if (path.endsWith("/issues/7/comments")) {
-      if (method === "GET") return json([]);
+      if (method === "GET") return json(replies.map(commentRow));
       if (method === "POST") {
         replies.push(JSON.parse(String(init?.body)).body);
-        return json({
-          id: 31,
-          html_url: "https://github.com/org/repo/pull/7#issuecomment-31",
+        if (loseNextComment) {
+          loseNextComment = false;
+          return Response.json({}, { status: 503 });
+        }
+        return Response.json(commentRow(replies.at(-1)!, replies.length - 1), {
+          status: 201,
         });
       }
     }
@@ -231,6 +255,8 @@ async function fixture(
     undefined,
     undefined,
     github.readMergeFacts.bind(github),
+    undefined,
+    github.reconcileClarification.bind(github),
   );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -256,6 +282,7 @@ async function fixture(
     event: string,
     fields: object,
     delivery: string = randomUUID(),
+    expectedStatus = 202,
   ) => {
     const body = JSON.stringify({
       installation: { id: 1 },
@@ -274,7 +301,7 @@ async function fixture(
       },
       body,
     });
-    assert.equal(res.status, 202);
+    assert.equal(res.status, expectedStatus);
     return (await res.json()) as { taskId: string; duplicate: boolean };
   };
   const pr = (
@@ -335,6 +362,9 @@ async function fixture(
   };
   return {
     github,
+    setReviewerAccess: (allowed: boolean) => {
+      reviewerCanWrite = allowed;
+    },
     store,
     post,
     pr,
@@ -347,6 +377,34 @@ async function fixture(
     reviews,
     filesRead,
     replies,
+    postedAt,
+    loseNextComment: () => {
+      loseNextComment = true;
+    },
+    reply: (
+      id: number,
+      text: string,
+      time: number,
+      user = sender,
+      expected = 202,
+      delivery = randomUUID(),
+    ) =>
+      send(
+        "issue_comment",
+        {
+          sender: user,
+          action: "created",
+          issue: { number: 7, state: "open", pull_request: {} },
+          comment: {
+            id,
+            user,
+            body: text,
+            created_at: new Date(time).toISOString(),
+          },
+        },
+        delivery,
+        expected,
+      ),
     retarget: () => {
       baseRef = "release";
     },
@@ -358,6 +416,291 @@ async function fixture(
     database,
   };
 }
+
+for (const changed of ["closed", "new_head"] as const) {
+  test(
+    "a resumed PR keeps its merge snapshot without publishing after " + changed,
+    async (t) => {
+      const f = await fixture(t);
+      let turns = 0;
+      const agent = f.agentWith(async () => {
+        const first = ++turns === 1;
+        assert.ok(turns <= 2, "No model turn after the unpublishable read");
+        if (!first) {
+          if (changed === "closed") f.closePr();
+          else f.setHead(h2);
+        }
+        return json({
+          status: "completed",
+          id: "r" + turns,
+          output: [
+            {
+              type: "function_call",
+              call_id: "c" + turns,
+              name: first ? "request_clarification" : "read_merge_facts",
+              arguments: first
+                ? JSON.stringify({ question: "Which environment?" })
+                : "{}",
+            },
+          ],
+        });
+      });
+      await f.reply(8, "@fixture inspect this change", f.postedAt - 1000);
+      await agent.once();
+      await f.publisher.tick();
+      const { taskId } = await f.reply(9, "Linux", f.postedAt + 2000);
+      await agent.once();
+      const stored = f.store.get(taskId)!;
+      assert.equal(stored.status, "succeeded");
+      assert.equal(stored.deliveryStatus, "skipped");
+      assert.equal(stored.publicationReceipt, null);
+      assert.match(stored.error ?? "", /merge snapshot/);
+      assert.equal(stored.outcome?.artifacts[0]?.name, "merge_assessment");
+      assert.ok(
+        stored.outcome?.text.includes(
+          changed === "closed" ? "已关闭未合并" : h2,
+        ),
+      );
+      assert.equal(await f.publisher.tick(), false);
+      assert.equal(f.replies.length, 1);
+    },
+  );
+}
+
+test("a rejected undispatched answer leaves the original question open for a fresh authorized reply", async (t) => {
+  const f = await fixture(t);
+  let calls = 0;
+  const agent = f.agentWith(async () => {
+    if (++calls === 1)
+      return json({
+        status: "completed",
+        id: "q",
+        output: [
+          {
+            type: "function_call",
+            name: "request_clarification",
+            call_id: "q1",
+            arguments: JSON.stringify({ question: "Which system?" }),
+          },
+        ],
+      });
+    return json({
+      status: "completed",
+      id: "r",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Reviewed Linux." }],
+        },
+      ],
+    });
+  });
+  const root = (
+    await f.reply(8, "@fixture inspect this change", f.postedAt - 2000)
+  ).taskId;
+  await agent.once();
+  await f.publisher.tick();
+  f.setReviewerAccess(false);
+  const first = await f.reply(11, "Windows", f.postedAt + 1000);
+  assert.equal(await agent.once(), false);
+  assert.equal(f.store.get(first.taskId)?.status, "rejected");
+  assert.equal(f.store.clarificationState(root)?.status, "waiting");
+  assert.equal(calls, 1);
+  f.setReviewerAccess(true);
+  const duplicate = await f.reply(11, "Windows", f.postedAt + 1000);
+  assert.equal(duplicate.taskId, first.taskId);
+  assert.equal(await agent.once(), false);
+  const second = await f.reply(
+    12,
+    "/answer " + root + " Linux",
+    Date.now() + 2000,
+  );
+  assert.ok(second.taskId && second.taskId !== first.taskId);
+  await agent.once();
+  await f.publisher.tick();
+  assert.equal(f.store.get(second.taskId)?.deliveryStatus, "sent");
+  assert.equal(f.store.conversation(first.taskId)?.rootTaskId, root);
+  assert.equal(calls, 2);
+});
+
+test("an implicit answer delivered during an uncertain question write is only activated after verified readback", async (t) => {
+  const f = await fixture(t);
+  let calls = 0;
+  const agent = f.agentWith(async () => {
+    assert.equal(++calls, 1);
+    return json({
+      status: "completed",
+      id: "question",
+      output: [
+        {
+          type: "function_call",
+          name: "request_clarification",
+          call_id: "q",
+          arguments: JSON.stringify({ question: "Which browser?" }),
+        },
+      ],
+    });
+  });
+  const { taskId } = await f.reply(
+    8,
+    "@fixture check the login screen",
+    f.postedAt - 1000,
+  );
+  await agent.once();
+  f.loseNextComment();
+  await f.publisher.tick();
+  const delivery = randomUUID();
+  const early = await f.reply(
+    20,
+    "Firefox",
+    Date.now() + 1000,
+    sender,
+    200,
+    delivery,
+  );
+  assert.equal(early.taskId, null);
+  assert.equal(
+    f.store.activityReceipt(delivery)?.reason,
+    "clarification_pending",
+  );
+  assert.equal(await agent.once(), false);
+  const reconciled = await fetch(
+    f.url + "/tasks/" + taskId + "/reconcile-clarification",
+    { method: "POST", headers: { authorization: "Bearer admin" } },
+  );
+  assert.equal(reconciled.status, 200);
+  const answer = f.store.activityReceipt(delivery);
+  assert.equal(answer?.reason, "clarification_reply");
+  assert.ok(answer?.taskId);
+  assert.equal(f.store.get(answer.taskId)?.continuation?.rootTaskId, taskId);
+  const conversation = await (
+    await fetch(f.url + "/tasks/" + answer.taskId + "/conversation", {
+      headers: { authorization: "Bearer admin" },
+    })
+  ).json();
+  assert.equal(conversation.rootTaskId, taskId);
+  assert.deepEqual(
+    conversation.turns.map((v: { taskId: string }) => v.taskId),
+    [taskId, answer.taskId],
+  );
+  assert.equal(f.replies.length, 1);
+});
+
+test("an unmentioned answer resumes the original PR delegation after a verified question, even when the question POST acknowledgement was lost", async (t) => {
+  const f = await fixture(t);
+  const original = "@fixture inspect this change",
+    question = "Which platform reproduces it?",
+    answer = "Windows only.";
+  let modelRuns = 0;
+  const agent = f.agentWith(async (_, init) => {
+    const req = JSON.parse(String(init?.body));
+    if (++modelRuns === 1) {
+      assert.ok(
+        req.tools.some(
+          (tool: { name: string }) => tool.name === "request_clarification",
+        ),
+      );
+      return json({
+        id: "asking",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "request_clarification",
+            arguments: JSON.stringify({ question }),
+            call_id: "question-1",
+          },
+        ],
+      });
+    }
+    assert.equal(modelRuns, 2);
+    const messages = JSON.stringify(req.input);
+    for (const expected of [original, question, answer, "SECOND_ONLY", h2])
+      assert.ok(messages.includes(expected), expected);
+    return json({
+      id: "answering",
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "Reviewed the Windows path on the updated PR.",
+            },
+          ],
+        },
+      ],
+    });
+  });
+  const { taskId: root } = await f.reply(8, original, f.postedAt - 1000);
+  await agent.once();
+  assert.equal(f.store.get(root)?.outcome?.publication.kind, "clarification");
+  f.loseNextComment();
+  await f.publisher.tick();
+  assert.equal(f.store.get(root)?.deliveryStatus, "unknown");
+  assert.equal(f.store.clarificationState(root), null);
+  const admin = (action: string, data: object) =>
+    fetch(f.url + "/tasks/" + root + "/" + action, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(data),
+    });
+  assert.equal(
+    (
+      await admin("resolve-delivery", {
+        confirmedReconciled: true,
+        resolution: "sent",
+        url: "https://github.com/org/repo/pull/7#issuecomment-999",
+      })
+    ).status,
+    409,
+  );
+  assert.equal((await admin("reconcile-clarification", {})).status, 200);
+  assert.deepEqual(f.store.get(root)?.publicationReceipt, {
+    kind: "comment",
+    id: 31,
+    url: "https://github.com/org/repo/pull/7#issuecomment-31",
+    createdAt: f.postedAt,
+  });
+  assert.match(f.replies[0], new RegExp("/answer " + root));
+  assert.equal(f.store.clarificationState(root)?.status, "waiting");
+  await f.reply(9, "older discussion", f.postedAt, sender, 200);
+  await f.reply(
+    10,
+    "unrelated discussion",
+    f.postedAt + 1000,
+    { ...sender, id: 6, login: "bob" },
+    200,
+  );
+  assert.equal(await agent.once(), false);
+  f.setHead(h2);
+  const { taskId: child } = await f.reply(11, answer, f.postedAt + 2000);
+  assert.notEqual(child, root);
+  const duplicate = await f.reply(11, answer, f.postedAt + 2000);
+  assert.equal(duplicate.taskId, child);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(f.store.clarificationState(child)?.rootTaskId, root);
+  await agent.once();
+  await f.publisher.tick();
+  assert.equal(
+    f.store.get(child)?.publicationReceipt?.url,
+    "https://github.com/org/repo/pull/7#issuecomment-32",
+  );
+  assert.equal(f.store.get(child)?.outcome?.publication.kind, "comment");
+  assert.match(f.replies[1], /Windows/);
+  assert.deepEqual(f.filesRead, [h1, h2]);
+  assert.equal(f.reviews.length, 0);
+  assert.equal(f.replies.length, 2);
+  assert.equal(await agent.once(), false);
+  assert.equal(await f.publisher.tick(), false);
+  assert.equal(modelRuns, 2);
+});
 
 test("opened H1 returning after synchronize H2 cannot publish; only H2 produces a commit-bound review receipt", async (t) => {
   const f = await fixture(t);

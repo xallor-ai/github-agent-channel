@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
+import { mergeSnapshotPublishable } from "./merge-assessment.js";
 import { cloudToolNames, type ToolFailureCode } from "./tool-audit.js";
 import { z } from "zod";
 import {
@@ -315,6 +316,7 @@ export class PullCoordinator {
         const task = this.assignment(id, data.leaseToken, workerId);
         this.store.recordToolCall(id, data.name, "requested");
         let output: unknown;
+        let fenceReason: "closed" | "merged" | "unconfirmed" | undefined;
         try {
           // The merge reader checks the binding, manager and actor before and after its read.
           // Generic execution authorization also requires an open, unchanged target, which
@@ -339,9 +341,15 @@ export class PullCoordinator {
             else if (
               data.name === "read_merge_facts" &&
               this.github.readMergeFacts
-            )
-              output = await this.github.readMergeFacts(task);
-            else if (data.name === "review_access") {
+            ) {
+              const facts = await this.github.readMergeFacts(task);
+              if (task.continuation && !mergeSnapshotPublishable(facts))
+                fenceReason =
+                  facts.state === "closed" || facts.state === "merged"
+                    ? facts.state
+                    : "unconfirmed";
+              output = facts;
+            } else if (data.name === "review_access") {
               this.checkReviewAccess(task, workerId, credential);
               output = { authorized: true };
             } else throw new AccessDenied("Review capability not enabled");
@@ -352,6 +360,8 @@ export class PullCoordinator {
             this.authenticate(credential)?.deviceId !== workerId
           )
             throw new AccessDenied("Device no longer authorized");
+          if (fenceReason)
+            this.store.fenceContinuationPublication(task, fenceReason);
         } catch (error) {
           this.store.recordToolCall(
             id,

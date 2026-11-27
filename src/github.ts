@@ -1,4 +1,5 @@
 import { boundedMergeFetch, collectMergeFacts } from "./github-merge-facts.js";
+import { clarificationComment } from "./github-clarification.js";
 import { z } from "zod";
 import { readPinnedPullFile } from "./github-pinned-file.js";
 import { publishNativeReview, reconcileNativeReview } from "./github-review.js";
@@ -190,7 +191,7 @@ export class OctokitGitHubClient implements GitHubClient {
     )
       throw new AccessDenied("Repository identity changed");
   }
-  async #verifyReactionApp() {
+  async #verifyBotApp() {
     const { data: app } = await this.#app.octokit.request("GET /app");
     if (
       !app ||
@@ -203,7 +204,7 @@ export class OctokitGitHubClient implements GitHubClient {
   async #ownerReaction(task: Task, check?: () => void) {
     const mode = check ? "write" : "read";
     const client = await this.#authorized(task, true, mode);
-    await this.#verifyReactionApp();
+    await this.#verifyBotApp();
     const reactionId = await ownerReaction(
       client,
       task,
@@ -244,7 +245,7 @@ export class OctokitGitHubClient implements GitHubClient {
       true,
     );
     await this.#verifyRepository(client, task);
-    await this.#verifyReactionApp();
+    await this.#verifyBotApp();
     return ownerReaction(
       client,
       task,
@@ -473,6 +474,45 @@ export class OctokitGitHubClient implements GitHubClient {
       client,
       this.#config.github.botLogin,
     );
+  }
+  async publishClarification(task: Task) {
+    const client = await this.#authorized(task, false, "write").catch(() => {
+      throw new AccessDenied(
+        "Question authorization unavailable before dispatch",
+      );
+    });
+    await this.#verifyBotApp().catch(() => {
+      throw new AccessDenied(
+        "Question publisher identity unavailable before dispatch",
+      );
+    });
+    return clarificationComment(
+      client,
+      task,
+      this.#config.github.botLogin,
+      async () => {
+        await this.authorizeWrite(task);
+        this.#binding(task);
+      },
+    );
+  }
+  async reconcileClarification(task: Task) {
+    if (
+      task.deliveryStatus !== "unknown" ||
+      task.outcome?.publication.kind !== "clarification" ||
+      ![task.installationId, task.repositoryId].every(
+        (n) => Number.isSafeInteger(n) && n > 0,
+      )
+    )
+      throw new AccessDenied("Invalid persisted clarification");
+    const client = await this.#installationClient(
+      task,
+      { metadata: "read", issues: "read" },
+      true,
+    );
+    await this.#verifyRepository(client, task);
+    await this.#verifyBotApp();
+    return clarificationComment(client, task, this.#config.github.botLogin);
   }
   async publishComment(
     task: Task,

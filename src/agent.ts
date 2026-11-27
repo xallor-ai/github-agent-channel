@@ -11,6 +11,8 @@ import { z } from "zod";
 import { createRuntime } from "./runtime-factory.js";
 import {
   targetSchema,
+  questionChoicesSchema,
+  continuationSchema,
   sourceSchema,
   validateOutcome,
   validateTaskOutcome,
@@ -41,6 +43,8 @@ const assignmentSchema = z.strictObject({
       actorId: z.number().int().positive(),
       actorLogin: z.string(),
       target: targetSchema,
+      continuation: continuationSchema.optional(),
+      questionChoices: questionChoicesSchema.optional(),
       reviewPolicy: z
         .strictObject({ deepReview: z.boolean(), nativeReview: z.boolean() })
         .optional(),
@@ -207,6 +211,14 @@ export class Agent {
       const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
       try {
         const task = assignment.task;
+        if (
+          (task.continuation || task.questionChoices) &&
+          this.config.runtime.type !== "openclaw"
+        )
+          throw new RuntimeFailure(
+            "tool_call_invalid",
+            "Continuation requires analysis runtime",
+          );
         const pin = task.target.kind === "pull_request" && task.target.revision;
         const runtime =
           this.runtime instanceof OpenClawConnector &&
@@ -305,6 +317,11 @@ export class Agent {
         const validated = (() => {
           try {
             const valid = validateOutcome(output);
+            if (
+              valid.publication.kind === "clarification" &&
+              this.config.runtime.type !== "openclaw"
+            )
+              throw Error("Clarification requires analysis runtime");
             validateTaskOutcome(assignment.task, valid);
             return valid;
           } catch {

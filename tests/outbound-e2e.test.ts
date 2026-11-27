@@ -140,7 +140,7 @@ async function fixture(t: test.TestContext) {
         }
         assert.deepEqual(
           data.tools.map((x: { name: string }) => x.name),
-          ["read_issue", "read_file"],
+          ["read_issue", "read_file", "request_clarification"],
         );
         res.end(
           JSON.stringify({

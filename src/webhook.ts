@@ -5,8 +5,19 @@ import { bindingEvent } from "./binding-events.js";
 import type { BindingLookup, NewTask } from "./contracts.js";
 import { revisionSchema } from "./outcomes.js";
 
-type ActionReason = "mention" | "triage" | "label" | "review";
-type ObservationReason = "observed" | "self_receipt" | "closed";
+type ActionReason =
+  | "mention"
+  | "triage"
+  | "label"
+  | "review"
+  | "clarification_reply"
+  | "clarification_ambiguous";
+type ObservationReason =
+  | "observed"
+  | "self_receipt"
+  | "closed"
+  | "clarification_unmatched"
+  | "clarification_pending";
 export type WebhookDecision =
   | { githubTime?: number; input: NewTask; execute: true; reason: ActionReason }
   | {
@@ -248,8 +259,9 @@ export async function normalizeWebhook(
     if (isSelf) return observation(input, "self_receipt");
     if (target.state === "closed")
       return observation(input, "closed", target.closed_at);
-    if (body.length > 16000 || !mentionsBot(body, config.github.botLogin))
-      return observation(input);
+    if (body.length > 16000) return observation(input);
+    if (!mentionsBot(body, config.github.botLogin))
+      return observation(input, "observed", value.data.comment.created_at);
     return action(input, "mention", value.data.comment.created_at);
   }
   if (key === "push") {

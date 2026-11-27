@@ -153,11 +153,11 @@ test("restart preserves queued work and blocks unknown execution and delivery", 
   reopened.resolveUnknownDelivery(c.id, "failed");
   assert.equal(reopened.pendingDelivery(), undefined);
 });
-test("fresh schema is version 6 and contains no legacy columns", (t) => {
+test("fresh schema is version 7 and contains no legacy columns", (t) => {
   const { path } = fixture(t);
   const db = new DatabaseSync(path);
   try {
-    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 6);
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 7);
     const columns = db
       .prepare("PRAGMA table_info(tasks)")
       .all()
@@ -521,7 +521,7 @@ test("the audit records only a full server build SHA; invalid values never enter
   }
 });
 
-test("an incompatible companion audit database is rejected without dropping its data or changing the v6 tasks", (t) => {
+test("an incompatible companion audit database is rejected without dropping its data or changing the v7 tasks", (t) => {
   const { path, store } = fixture(t);
   const task = store.accept(input()).task;
   store.close();
@@ -548,7 +548,7 @@ test("an incompatible companion audit database is rejected without dropping its 
       tasks.prepare("SELECT status FROM tasks WHERE id=?").get(task.id)?.status,
       "queued",
     );
-    assert.equal(tasks.prepare("PRAGMA user_version").get()?.user_version, 6);
+    assert.equal(tasks.prepare("PRAGMA user_version").get()?.user_version, 7);
   } finally {
     audit.close();
     tasks.close();

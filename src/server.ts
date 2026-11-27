@@ -43,6 +43,7 @@ export function createChannelServer(
   reconcileReview?: GitHubClient["reconcileReview"],
   readMergeFacts?: GitHubClient["readMergeFacts"],
   reconcileOwnerReaction?: GitHubClient["reconcileOwnerReaction"],
+  reconcileClarification?: GitHubClient["reconcileClarification"],
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -177,11 +178,12 @@ export function createChannelServer(
               publicationReceipt: task.publicationReceipt,
               toolAudit: store.toolAudit(task.id),
               ownerReceipt: store.ownerReceipt(task.deliveryId),
+              clarification: store.clarificationState(task.id),
             });
           return;
         }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/lookup-review|\/merge-facts|\/reconcile-reaction)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/conversation|\/lookup-review|\/merge-facts|\/reconcile-reaction|\/reconcile-clarification)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -194,6 +196,34 @@ export function createChannelServer(
         }
         if (req.method === "GET" && match[2] === "/thread") {
           send(200, { activities: store.recentThread(task) });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/conversation") {
+          send(200, store.conversation(task.id));
+          return;
+        }
+        if (req.method === "POST" && match[2] === "/reconcile-clarification") {
+          if (
+            !reconcileClarification ||
+            task.deliveryStatus !== "unknown" ||
+            task.outcome?.publication.kind !== "clarification"
+          ) {
+            send(409, { error: "No unknown clarification to reconcile" });
+            return;
+          }
+          try {
+            const verified = await reconcileClarification(task);
+            store.resolveUnknownDelivery(task.id, "sent", {
+              kind: "comment",
+              ...verified,
+            });
+            send(200, { clarification: store.clarificationState(task.id) });
+          } catch {
+            send(409, {
+              error:
+                "Could not uniquely verify published question; check current delivery state",
+            });
+          }
           return;
         }
         if (req.method === "POST" && match[2] === "/reconcile-reaction") {
@@ -269,6 +299,7 @@ export function createChannelServer(
             runtime: task.runtime,
             toolAudit: store.toolAudit(task.id),
             ownerReceipt: store.ownerReceipt(task.deliveryId),
+            clarification: store.clarificationState(task.id),
             outcome: task.outcome,
           });
           return;
@@ -321,6 +352,16 @@ export function createChannelServer(
             return;
           }
           const publicationKind = task.outcome?.publication.kind;
+          if (
+            publicationKind === "clarification" &&
+            fields.resolution === "sent"
+          ) {
+            send(409, {
+              error:
+                "Use reconcile-clarification to verify the original GitHub question",
+            });
+            return;
+          }
           let reviewId: number | undefined;
           let validUrl =
             fields.url === undefined && fields.resolution === "failed";

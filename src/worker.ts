@@ -16,12 +16,31 @@ export class DeliveryWorker {
     try {
       const delivery = this.store.pendingDelivery();
       if (!delivery) return false;
+      const obsoleteSelection = () =>
+        !!delivery.questionChoices &&
+        !this.store.publicationAllowed(delivery.id);
+      const staleSelectionMessage =
+        "Clarification choices are no longer current; selection prompt not published";
       try {
+        if (obsoleteSelection()) {
+          this.store.markDelivery(
+            delivery.id,
+            "failed",
+            undefined,
+            staleSelectionMessage,
+          );
+          return true;
+        }
         try {
           await this.github.authorize(delivery);
         } catch {
           // No publication call has been made. Do not block the queue as an unknown write.
-          this.store.markDelivery(delivery.id, "failed");
+          this.store.markDelivery(
+            delivery.id,
+            "failed",
+            undefined,
+            obsoleteSelection() ? staleSelectionMessage : undefined,
+          );
           return true;
         }
         // Authorization may have awaited GitHub while this binding was disabled.
@@ -54,6 +73,16 @@ export class DeliveryWorker {
         const publication = delivery.outcome.publication;
         let result: { id: number; url: string };
         switch (publication.kind) {
+          case "clarification": {
+            if (!this.github.publishClarification)
+              throw new AccessDenied("Clarification publication unavailable");
+            const receipt = await this.github.publishClarification(delivery);
+            this.store.markDelivery(delivery.id, "sent", {
+              kind: "comment",
+              ...receipt,
+            });
+            return true;
+          }
           case "none":
             throw new AccessDenied("No publication requested");
           case "review":
@@ -88,7 +117,9 @@ export class DeliveryWorker {
           undefined,
           error instanceof DraftPublicationUncertain
             ? error.message
-            : undefined,
+            : error instanceof AccessDenied && obsoleteSelection()
+              ? staleSelectionMessage
+              : undefined,
         );
       }
       return true;
