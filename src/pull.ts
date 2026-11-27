@@ -237,9 +237,10 @@ export class PullCoordinator {
           this.assignment(task.id, leaseToken, workerId);
           if (
             isAutomaticReview(task) &&
-            !this.store.publicationAllowed(task.id)
+            (!this.store.publicationAllowed(task.id) ||
+              !this.store.reviewPublicationCurrent(task.id))
           )
-            throw new PullTargetRejected("pr_revision_changed");
+            throw new PullTargetRejected("pr_review_generation_changed");
         } catch (error) {
           // No request has reached the remote runtime; keep details out of the response.
           this.recordDrift(task, error, leaseToken, workerId, credential);

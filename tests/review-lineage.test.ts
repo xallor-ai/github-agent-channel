@@ -89,7 +89,9 @@ test("same-second revisions do not establish a successor and out-of-repo facts c
   const a = observe("b", 100).taskId!;
   observe("c", 100);
   s.recordReviewDrift(a, { ...pin("c"), headRepoId: 3 });
-  assert.equal(s.reviewLineage(a), null);
+  assert.equal(s.reviewLineage(a)?.observedRevision, null);
+  assert.equal(s.reviewPublicationCurrent(a), false);
+  assert.equal(s.reviewLineage(a)?.reason, "ambiguous_order");
   assert.ok(s.publicationAllowed(a));
   s.recordReviewDrift(a, pin("c"));
   assert.equal(s.reviewLineage(a)?.successorTaskId, null);
@@ -269,4 +271,39 @@ test("an undated published review prevents guessing which published revision was
   publish("c", undefined, 8);
   const current = observe("d", 300).taskId!;
   assert.equal(s.previousPublishedReview(current), null);
+});
+test("a same-second competing predecessor and later return cannot authorize the old task", (t) => {
+  const { s, observe } = fixture(t),
+    old = observe("b", 100).taskId!;
+  s.claimAssignment("device", "lease", Date.now() + 60000);
+  observe("c", 100);
+  const ret = observe("b", 300);
+  assert.equal(ret.taskId, null);
+  assert.equal(s.reviewPublicationCurrent(old), false);
+  assert.equal(s.reviewLineage(old)?.reason, "ambiguous_order");
+});
+test("an unassigned drifted return recovers from its own retained event when intermediate evidence arrives", (t) => {
+  const { s, observe } = fixture(t),
+    old = observe("b", 100).taskId!;
+  s.recordReviewDrift(old, pin("c"));
+  const ret = observe("b", 300, "returned");
+  assert.equal(ret.taskId, null);
+  observe("c", 200);
+  const recovered = s.activityReceipt("returned")?.taskId;
+  assert.ok(recovered && recovered !== old);
+  assert.equal(s.get(recovered)?.deliveryId, "returned");
+  assert.equal(observe("b", 300, "returned").taskId, recovered);
+  assert.equal(s.reviewPublicationCurrent(old), false);
+  assert.equal(s.reviewPublicationCurrent(recovered), true);
+});
+test("a strictly later signed different revision blocks the old write before a return webhook or drift GET", (t) => {
+  const { s, observe } = fixture(t),
+    old = observe("b", 100).taskId!;
+  s.claimAssignment("device", "lease", Date.now() + 60000);
+  const second = observe("c", 200, "next").taskId!;
+  assert.equal(s.reviewPublicationCurrent(old), false);
+  assert.equal(s.reviewLineage(old)?.observedRevision, null);
+  assert.equal(s.reviewLineage(old)?.reason, "signed_later_version");
+  assert.equal(s.reviewLineage(old)?.successorTaskId, second);
+  assert.equal(s.reviewPublicationCurrent(second), true);
 });

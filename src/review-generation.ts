@@ -38,7 +38,7 @@ export function admitReview(
   const floor = cutoff ?? -1,
     now = Date.now();
   db.prepare(
-    "INSERT INTO reviewEvents(deliveryId,bindingId,number,version,githubTime,receivedAt,actorId,input) VALUES(?,?,?,?,?,?,?,?)",
+    "INSERT INTO reviewEvents(deliveryId,bindingId,number,version,githubTime,receivedAt,actorId,input,priorTaskId) VALUES(?,?,?,?,?,?,?,?,?)",
   ).run(
     input.deliveryId,
     ...scope,
@@ -47,6 +47,7 @@ export function admitReview(
     now,
     input.actorId,
     JSON.stringify(input),
+    prior?.bindingId === input.bindingId ? prior.id : null,
   );
   // Keep compact version evidence indefinitely, but only bounded live payloads for
   // generation repair. An expired or evicted payload is never reconstructed from an excerpt.
@@ -110,7 +111,11 @@ export function admitReview(
     ) {
       task = create(version);
       fenceReviewGeneration(db, prior.id, String(pivot(lo)), githubTime, task);
-    } else reused = true;
+    } else {
+      reused = true;
+      if (prior.githubTime === lo && lo > floor)
+        fenceReviewGeneration(db, prior.id, null, githubTime, null);
+    }
   }
   function blocked(id: string) {
     return db
@@ -129,8 +134,8 @@ export function admitReview(
     const timePoint = githubTime ?? null;
     const stale = db
       .prepare(
-        `SELECT e.*,t.id oldId,t.githubTime oldTime,d.cursor FROM reviewEvents e JOIN deliveries d ON d.deliveryId=e.deliveryId JOIN tasks t ON t.id=d.taskId
-   WHERE e.bindingId=? AND e.number=? AND e.version!=? AND t.bindingId=e.bindingId AND d.duplicate=1 AND coalesce(e.githubTime,0)>? AND coalesce(t.githubTime,0)>?
+        `SELECT e.*,t.id oldId,t.githubTime oldTime,d.cursor,d.taskId linkedId FROM reviewEvents e JOIN deliveries d ON d.deliveryId=e.deliveryId JOIN tasks t ON t.id=coalesce(d.taskId,e.priorTaskId)
+   WHERE e.bindingId=? AND e.number=? AND e.version!=? AND t.bindingId=e.bindingId AND d.duplicate=1 AND d.reason='review' AND (d.taskId IS NOT NULL OR d.reviewFollowUp='review_generation_unconfirmed') AND coalesce(e.githubTime,0)>? AND coalesce(t.githubTime,0)>?
    AND (? IS NULL OR e.githubTime IS NULL OR t.githubTime IS NULL OR (t.githubTime<? AND e.githubTime>=?) OR (t.githubTime>? AND e.githubTime<=?) OR t.githubTime=?) ORDER BY e.githubTime,e.deliveryId`,
       )
       .all(
@@ -181,14 +186,14 @@ export function admitReview(
       )
         fenceReviewGeneration(db, oldId, null, time, null);
       db.prepare(
-        "UPDATE deliveries SET taskId=?,reviewFollowUp=?,duplicate=CASE WHEN deliveryId=? AND ? IS NOT NULL THEN 0 ELSE 1 END WHERE cursor=? AND taskId=?",
+        "UPDATE deliveries SET taskId=?,reviewFollowUp=?,duplicate=CASE WHEN deliveryId=? AND ? IS NOT NULL THEN 0 ELSE 1 END WHERE cursor=? AND taskId IS ?",
       ).run(
         fresh,
         fresh ? null : "review_generation_unconfirmed",
         fresh && source(String(r.deliveryId)) ? String(r.deliveryId) : "",
         fresh,
         r.cursor!,
-        oldId,
+        r.linkedId!,
       );
       db.prepare(
         "UPDATE activities SET data=json_set(data,'$.taskId',?) WHERE cursor=?",

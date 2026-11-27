@@ -15,6 +15,7 @@ import {
   AccessDenied,
   AmbiguousExecution,
   PullTargetRejected,
+  isAutomaticReview,
   type BindingLookup,
   type ChannelConfig,
   type GitHubClient,
@@ -41,6 +42,7 @@ export class OctokitGitHubClient implements GitHubClient {
     private readonly verifyManager: (task: Task) => Promise<void>,
     fetchImpl: typeof fetch = fetch,
     private readonly publicationAllowed: (id: string) => boolean = () => true,
+    private readonly reviewPublicationCurrent?: (id: string) => boolean,
   ) {
     this.#config = config;
     this.#fetch = fetchImpl;
@@ -70,6 +72,10 @@ export class OctokitGitHubClient implements GitHubClient {
     )
       throw new AccessDenied("Task scope is not enabled");
     return found;
+  }
+  #checkReviewGeneration(task: Task) {
+    if (isAutomaticReview(task) && !this.reviewPublicationCurrent?.(task.id))
+      throw new PullTargetRejected("pr_review_generation_changed");
   }
   async #client(task: Task, write = false): Promise<Octokit> {
     this.#binding(task);
@@ -459,6 +465,7 @@ export class OctokitGitHubClient implements GitHubClient {
       () => {
         if (this.#binding(task).nativeReview !== true)
           throw new AccessDenied("Native review publication is not enabled");
+        this.#checkReviewGeneration(task);
       },
     );
   }
@@ -599,6 +606,7 @@ export class OctokitGitHubClient implements GitHubClient {
     // Re-check after the paginated read, immediately before the outbound effect.
     await this.authorizeWrite(task);
     this.#binding(task);
+    this.#checkReviewGeneration(task);
     try {
       const { data } = await client.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",

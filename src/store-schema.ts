@@ -131,6 +131,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
         "receivedAt",
         "actorId",
         "input",
+        "priorTaskId",
       ],
       reviewDrifts: [
         "taskId",
@@ -250,7 +251,7 @@ export function initializeTaskSchema(db: DatabaseSync) {
     CREATE INDEX clarification_inflight ON clarificationCandidates(questionTaskId,githubTime,cursor);
     CREATE INDEX clarification_candidate_age ON clarificationCandidates(receivedAt,cursor);
     CREATE INDEX clarification_sending ON tasks(bindingId,actorId,json_extract(target,'$.kind'),json_extract(target,'$.number')) WHERE deliveryStatus IN ('sending','unknown') AND json_extract(outcome,'$.publication.kind')='clarification';
-    CREATE TABLE reviewEvents(deliveryId TEXT PRIMARY KEY,bindingId TEXT NOT NULL,number INTEGER NOT NULL,version TEXT NOT NULL,githubTime INTEGER,receivedAt INTEGER NOT NULL,actorId INTEGER NOT NULL,input TEXT) STRICT;
+    CREATE TABLE reviewEvents(deliveryId TEXT PRIMARY KEY,bindingId TEXT NOT NULL,number INTEGER NOT NULL,version TEXT NOT NULL,githubTime INTEGER,receivedAt INTEGER NOT NULL,actorId INTEGER NOT NULL,input TEXT,priorTaskId TEXT REFERENCES tasks(id)) STRICT;
     CREATE INDEX review_event_time ON reviewEvents(bindingId,number,githubTime,version);
     CREATE INDEX review_event_payload ON reviewEvents(receivedAt) WHERE input IS NOT NULL;
     CREATE TABLE reviewDrifts(taskId TEXT PRIMARY KEY REFERENCES tasks(id),observed TEXT NOT NULL,observedAt INTEGER NOT NULL,cursor INTEGER NOT NULL,githubObservedAt INTEGER) STRICT;

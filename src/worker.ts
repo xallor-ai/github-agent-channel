@@ -1,6 +1,7 @@
 import {
   AccessDenied,
   observedReviewDrift,
+  PullTargetRejected,
   type GitHubClient,
 } from "./contracts.js";
 import { DraftPublicationUncertain } from "./github-publication.js";
@@ -131,9 +132,12 @@ export class DeliveryWorker {
             ? error.message
             : observed
               ? "PR revision changed before publication"
-              : error instanceof AccessDenied && obsoleteSelection()
-                ? staleSelectionMessage
-                : undefined,
+              : error instanceof PullTargetRejected &&
+                  error.reason === "pr_review_generation_changed"
+                ? "A later PR review generation prevents publication"
+                : error instanceof AccessDenied && obsoleteSelection()
+                  ? staleSelectionMessage
+                  : undefined,
         );
       }
       return true;

@@ -58,6 +58,7 @@ async function fixture(
   t: test.TestContext,
   deepReview = false,
   duringMint?: (store: TaskStore) => void,
+  nativeReview = true,
 ) {
   const dir = mkdtempSync(join(tmpdir(), "versioned-pr-e2e-"));
   const database = join(dir, "channel.db"),
@@ -76,7 +77,7 @@ async function fixture(
       enabled: true,
       responsibleAgent: fixtureAgent,
       autoReview: true,
-      nativeReview: true,
+      nativeReview,
       deepReview,
       events: [
         "push",
@@ -94,6 +95,7 @@ async function fixture(
   const postedAt = Math.floor(Date.now() / 1000) * 1000 - 5_000;
   let loseNextComment = false;
   let loseNextReview = false;
+  let onMarkerScan: (() => Promise<void>) | undefined;
   const commentRow = (body: string, index: number) => ({
     id: 31 + index,
     body,
@@ -197,6 +199,16 @@ async function fixture(
       return Response.json({ message: "forbidden" }, { status: 403 });
     }
     if (path === "/repos/org/repo/rules/branches/main") return json([]);
+    if (
+      method === "GET" &&
+      (path.endsWith("/issues/7/comments") ||
+        path.endsWith("/pulls/7/reviews")) &&
+      onMarkerScan
+    ) {
+      const hook = onMarkerScan;
+      onMarkerScan = undefined;
+      await hook();
+    }
     if (path.endsWith("/issues/7/comments")) {
       if (method === "GET") return json(replies.map(commentRow));
       if (method === "POST") {
@@ -256,6 +268,8 @@ async function fixture(
     store.activeBinding.bind(store),
     async () => {},
     gitTransport,
+    (id) => store.publicationAllowed(id),
+    (id) => store.reviewPublicationCurrent(id),
   );
   const resolver = t.mock.method(github, "resolvePullRevision");
   const coordinator = new PullCoordinator(
@@ -409,6 +423,9 @@ async function fixture(
     },
     resolver,
     reviews,
+    duringMarkerScan(fn: () => Promise<void>) {
+      onMarkerScan = fn;
+    },
     loseReviewAcknowledgement: () => {
       loseNextReview = true;
     },
@@ -812,6 +829,47 @@ test("opened H1 returning after synchronize H2 cannot publish; only H2 produces 
   assert.equal(await agent.once(), false);
 });
 
+for (const native of [true, false]) {
+  test(
+    "a later signed B blocks an old A after its marker scan without waiting for the returned A webhook: " +
+      (native ? "Review" : "comment"),
+    async (t) => {
+      const f = await fixture(t, false, undefined, native);
+      const at = Math.floor(Date.now() / 1000) * 1000 - 10000;
+      const first = await f.pr("opened", h1, randomUUID(), at);
+      const agent = f.agentWith(async () =>
+        json({
+          id: "ran-on-old-A",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "old review" }],
+            },
+          ],
+        }),
+      );
+      await agent.once();
+      assert.equal(
+        f.store.get(first.taskId)?.outcome?.publication.kind,
+        native ? "review" : "comment",
+      );
+      let injected = false;
+      f.duringMarkerScan(async () => {
+        // GitHub's PR API has already returned to A, but the only new signed event is B.
+        await f.pr("synchronize", h2, randomUUID(), at + 1000);
+        injected = true;
+      });
+      assert.equal(await f.publisher.tick(), true);
+      assert.equal(injected, true);
+      assert.equal(f.store.get(first.taskId)?.deliveryStatus, "failed");
+      assert.equal(f.store.get(first.taskId)?.publicationReceipt, null);
+      assert.deepEqual(f.replies, []);
+      assert.deepEqual(f.reviews, []);
+    },
+  );
+}
 // The head seen on GitHub is the *returned* SHA throughout publication; a
 // simple live SHA equality check therefore cannot distinguish the generations.
 for (const events of [

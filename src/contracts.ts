@@ -215,6 +215,7 @@ export class PullTargetRejected extends AccessDenied {
     readonly reason:
       | "pr_open_unconfirmed"
       | "pr_outside_binding"
+      | "pr_review_generation_changed"
       | "pr_revision_changed",
     readonly observedRevision?: PullRevision,
     readonly observedGithubAt?: number,

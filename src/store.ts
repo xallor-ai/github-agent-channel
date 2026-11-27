@@ -168,6 +168,9 @@ export class TaskStore {
         this.reviews.record(task, observed, githubObservedAt);
     });
   }
+  reviewPublicationCurrent(id: string) {
+    return this.reviews.publicationCurrent(id);
+  }
   reviewLineage(id: string) {
     const t = this.get(id);
     return t ? this.reviews.get(t) : null;

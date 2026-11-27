@@ -27,6 +27,7 @@ const target = {
 } as const;
 const task = {
   id: "review-task",
+  source: { event: "pull_request", action: "opened" },
   repositoryId: 2,
   owner: "org",
   repo: "repo",
@@ -297,6 +298,8 @@ test("production native publisher rechecks bound policy, authorization and both 
       () => binding,
       async () => {},
       fetchImpl,
+      undefined,
+      () => true,
     );
     const publish = client.publishReview(
       {

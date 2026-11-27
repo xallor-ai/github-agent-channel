@@ -187,6 +187,8 @@ function fixture(
       },
       async () => {},
       fetchImpl,
+      undefined,
+      () => true,
     ),
     calls,
   };

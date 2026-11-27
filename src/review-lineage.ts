@@ -118,6 +118,24 @@ export class ReviewLineage {
         .run(task.id);
     return true;
   }
+  private conflictingEvent(id: string) {
+    // Arrival after admission only establishes that the evidence changed in the
+    // absence of timestamps; it is never used to identify a successor.
+    return this.db
+      .prepare(
+        `SELECT e.deliveryId,e.githubTime,e.version,d.taskId,s.githubTime originTime
+      FROM tasks t JOIN reviewEvents s ON s.deliveryId=t.deliveryId AND s.version=t.eventKey AND s.bindingId=t.bindingId AND s.actorId=t.actorId
+      JOIN deliveries orig ON orig.deliveryId=s.deliveryId
+      JOIN reviewEvents e ON e.bindingId=s.bindingId AND e.number=s.number AND e.version!=s.version
+      JOIN deliveries d ON d.deliveryId=e.deliveryId
+      WHERE t.id=? AND (e.githubTime>=s.githubTime OR ((e.githubTime IS NULL OR s.githubTime IS NULL) AND d.cursor>orig.cursor))
+      ORDER BY (e.githubTime IS NULL OR s.githubTime IS NULL OR e.githubTime=s.githubTime) DESC,e.githubTime,e.deliveryId LIMIT 1`,
+      )
+      .get(id);
+  }
+  publicationCurrent(id: string) {
+    return !this.hasDrift(id) && !this.conflictingEvent(id);
+  }
   hasDrift(id: string) {
     return !!this.db
       .prepare(
@@ -193,20 +211,88 @@ export class ReviewLineage {
                 : null,
           }
         : null;
-    if (!row)
-      return witness
-        ? {
-            previousRevision: p.r,
-            observedRevision: null,
-            observedAt: null,
-            githubObservedAt: null,
-            generation,
-            successorTaskId: generation?.successorTaskId ?? null,
-            reason: generation
-              ? "signed_revision_return"
+    if (!row) {
+      if (witness)
+        return {
+          previousRevision: p.r,
+          observedRevision: null,
+          observedAt: null,
+          githubObservedAt: null,
+          generation,
+          successorTaskId: generation?.successorTaskId ?? null,
+          reason: generation
+            ? "signed_revision_return"
+            : witness.via === null
+              ? "ambiguous_order"
               : "lifecycle_uncertain",
-          }
-        : null;
+        };
+      const next = this.conflictingEvent(task.id);
+      if (!next) return null;
+      if (
+        p.time === null ||
+        typeof next.githubTime !== "number" ||
+        next.githubTime <= p.time
+      ) {
+        return {
+          previousRevision: p.r,
+          observedRevision: null,
+          observedAt: null,
+          githubObservedAt: null,
+          generation: null,
+          signedChange: {
+            source: "signed_conflicting_event",
+            deliveryId: String(next.deliveryId),
+            githubTime:
+              next.githubTime === null ? null : Number(next.githubTime),
+            revision: {
+              ...p.r,
+              baseSha: String(JSON.parse(String(next.version))[4]),
+              headSha: String(JSON.parse(String(next.version))[5]),
+            },
+          },
+          successorTaskId: null,
+          reason:
+            p.time === null || next.githubTime === null
+              ? "event_time_unknown"
+              : "ambiguous_order",
+        };
+      }
+      const ambiguous = this.db
+        .prepare(
+          "SELECT 1 FROM reviewEvents WHERE bindingId=? AND number=? AND (githubTime IS NULL OR (githubTime=? AND version!=?)) LIMIT 1",
+        )
+        .get(task.bindingId, p.number, next.githubTime!, next.version!);
+      const separated = this.separated(
+        task,
+        p.number,
+        p.time,
+        Number(next.githubTime),
+      );
+      const pair = JSON.parse(String(next.version)) as string[];
+      return {
+        previousRevision: p.r,
+        observedRevision: null,
+        observedAt: null,
+        githubObservedAt: null,
+        generation: null,
+        signedChange:
+          separated || ambiguous
+            ? null
+            : {
+                source: "signed_review_event",
+                deliveryId: String(next.deliveryId),
+                githubTime: Number(next.githubTime),
+                revision: { ...p.r, baseSha: pair[4], headSha: pair[5] },
+              },
+        successorTaskId:
+          separated || ambiguous || !next.taskId ? null : String(next.taskId),
+        reason: separated
+          ? "lifecycle_uncertain"
+          : ambiguous
+            ? "ambiguous_order"
+            : "signed_later_version",
+      };
+    }
     const observedAt = Number(row.observedAt),
       observedRevision = revisionSchema.parse(JSON.parse(String(row.observed)));
     const base = {
