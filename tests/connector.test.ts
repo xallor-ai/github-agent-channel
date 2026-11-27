@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenClawConnector } from "../src/connector.js";
 import { AmbiguousExecution, type Task } from "../src/contracts.js";
+import {
+  renderMergeAssessment,
+  type MergeFacts,
+} from "../src/merge-assessment.js";
 const task: Task = {
   id: "task-1",
   bindingId: "binding",
@@ -434,6 +438,175 @@ const pr: Task = {
   reviewPolicy: { deepReview: false, nativeReview: false },
   target: { kind: "pull_request", number: 1, revision },
 };
+const openFacts: MergeFacts = {
+  repository: "org/repo",
+  number: 1,
+  stable: true,
+  base: { repository: "org/repo", id: 2, sha: revision.baseSha },
+  head: { repository: "org/repo", id: 2, sha: revision.headSha },
+  observedAt: "2026-11-26T07:22:04Z",
+  state: "open",
+  draft: false,
+  conflict: "none",
+  testMergeSha: null,
+  baseRefName: "main",
+  observedRevision: {
+    baseSha: revision.baseSha,
+    headSha: revision.headSha,
+    baseRefName: "main",
+  },
+  testMergeChecksKnown: false,
+  headChecksKnown: false,
+  rules: {
+    known: true,
+    checks: [],
+    reviewRequired: false,
+    queueRequired: false,
+  },
+  checks: [],
+  review: "unknown",
+  otherGates: "clear",
+  queue: { entry: "unknown", candidateSha: null, candidateStatus: "unknown" },
+  missing: [],
+};
+test("standalone merge questions use scoped facts before any diff, snapshot or model; terminal outcomes cannot publish", async () => {
+  for (const [prompt, state] of [
+    ["@xallor-robot is enable merged?", "open"], // incident #213 verbatim
+    ["@xallor-robot 能否合并？", "closed"],
+    ["可以合入吗", "merged"],
+    ["can we merge?", "open"],
+    ["already merged?", "unknown"],
+    ["/merge-status", "open"],
+  ] as const) {
+    const events: unknown[] = [],
+      tools: string[] = [];
+    const facts = { ...openFacts, state };
+    const connector = new OpenClawConnector(
+      settings,
+      "runtimeSecret",
+      async () => {
+        throw Error("unexpected model dispatch");
+      },
+    );
+    const result = await connector.run(
+      { ...pr, prompt, reviewPolicy: { deepReview: true, nativeReview: true } },
+      async (name, args) => {
+        tools.push(name);
+        assert.deepEqual(args, {});
+        return facts;
+      },
+      undefined,
+      async (event) => {
+        events.push(event);
+      },
+    );
+    assert.deepEqual(tools, ["read_merge_facts"]);
+    assert.deepEqual(events, [
+      {
+        kind: "started",
+        provider: "channel-merge-assessment",
+        modelTools: [],
+        runId: "github-channel:task-1",
+      },
+    ]);
+    assert.equal(result.text, renderMergeAssessment(facts));
+    assert.deepEqual(result.artifacts, [
+      { kind: "text", name: "merge_assessment", text: result.text },
+    ]);
+    assert.equal(
+      result.publication.kind,
+      state === "open" ? "comment" : "none",
+    );
+  }
+});
+test("merge assessment rejects mismatched targets, IDs, revisions and unvalidated payloads before using them", async () => {
+  const c = new OpenClawConnector(settings, "token", async () => {
+    throw Error("unexpected model dispatch");
+  });
+  for (const facts of [
+    { ...openFacts, repository: "other/repo" },
+    { ...openFacts, number: 2 },
+    { ...openFacts, head: { ...openFacts.head, id: 19 } },
+    { ...openFacts, base: { ...openFacts.base, sha: "c".repeat(40) } },
+    { ...openFacts, head: { ...openFacts.head, repository: "fork/repo" } },
+    { ...openFacts, unexpected: "unknown payload" },
+  ])
+    await assert.rejects(
+      c.run({ ...pr, prompt: "/merge-status" }, async () => facts),
+      /assigned PR and revision|Invalid merge facts/,
+    );
+});
+test("quoted requests, action requests and historical merge questions do not replace the current task", async () => {
+  for (const prompt of [
+    "> can we merge?",
+    "Review the docs",
+    "Merge this PR",
+    "合并这个 PR",
+    "explain `/merge-status`",
+  ]) {
+    const tools: string[] = [];
+    const c = new OpenClawConnector(settings, "token", async () =>
+      Response.json(summary),
+    );
+    const result = await c.run(
+      {
+        ...pr,
+        prompt,
+        threadContext: [
+          {
+            actor: "alice",
+            event: "comment",
+            excerpt: "能否合并",
+            truncated: false,
+          },
+        ],
+      },
+      async (name) => {
+        tools.push(name);
+        return diff;
+      },
+    );
+    assert.deepEqual(tools, ["read_pull_diff"]);
+    assert.equal(result.responseId, "result");
+  }
+});
+test("optional model tool is PR scoped, rejects arguments and returns only validated facts with terminal publication suppressed", async () => {
+  const facts = { ...openFacts, state: "closed" as const };
+  let turns = 0;
+  const tools: string[] = [];
+  const c = new OpenClawConnector(settings, "token", async (_url, init) => {
+    if (!turns++) return Response.json(call("read_merge_facts", {}));
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(JSON.parse(body.input[0].output), {
+      assessment: renderMergeAssessment(facts),
+    });
+    return Response.json(summary);
+  });
+  const result = await c.run(pr, async (name) => {
+    tools.push(name);
+    return name === "read_pull_diff" ? diff : facts;
+  });
+  assert.deepEqual(tools, ["read_pull_diff", "read_merge_facts"]);
+  assert.equal(result.publication.kind, "none");
+  assert.equal(result.artifacts[0].name, "merge_assessment");
+  for (const [assignment, args] of [
+    [task, {}],
+    [pr, { number: 2 }],
+  ] as const) {
+    const invoked: string[] = [];
+    const connector = new OpenClawConnector(settings, "token", async () =>
+      Response.json(call("read_merge_facts", args)),
+    );
+    await assert.rejects(
+      connector.run(assignment, async (name) => {
+        invoked.push(name);
+        return diff;
+      }),
+      { code: "tool_call_invalid" },
+    );
+    assert.ok(!invoked.includes("read_merge_facts"));
+  }
+});
 const diff = {
   untrusted: true,
   revision,
@@ -489,7 +662,7 @@ test("PR first input contains the assigned diff and exposes only scoped public t
         assert.deepEqual(JSON.parse(req.input[1].content), diff);
         assert.deepEqual(
           req.tools.map((t: { name: string }) => t.name),
-          ["read_issue", "read_file"],
+          ["read_issue", "read_file", "read_merge_facts"],
         );
         assert.match(req.tools[1].description, /PR head/);
         return Response.json(call("read_file", { path: "impl.ts" }));
@@ -559,7 +732,7 @@ test("deep review searches then reads an unchanged file locally under fresh auth
       if (turn++ === 0) {
         assert.deepEqual(
           req.tools.map((t: { name: string }) => t.name),
-          ["read_issue", "read_file", "search_repo"],
+          ["read_issue", "read_file", "read_merge_facts", "search_repo"],
         );
         assert.ok(!JSON.stringify(req.input).includes("unchanged.ts"));
         return Response.json(call("search_repo", { query: "impl()" }));

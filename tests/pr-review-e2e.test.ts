@@ -83,6 +83,9 @@ async function fixture(
     },
   );
   let head = h1;
+  let closed = false;
+  let baseRef = "main";
+  const replies: string[] = [];
   const reviews: { commit_id: string; body: string }[] = [];
   const filesRead: string[] = [];
   const gitTransport: typeof fetch = async (input, init) => {
@@ -107,12 +110,67 @@ async function fixture(
     if (path.endsWith("/pulls/7"))
       return json({
         number: 7,
-        state: "open",
+        state: closed ? "closed" : "open",
         merged: false,
         changed_files: 1,
-        base: { sha: baseSha, repo: { id: 2 } },
+        base: { sha: baseSha, ref: baseRef, repo: { id: 2 } },
         head: { sha: head, repo: { id: 2 } },
       });
+    if (path === "/graphql") {
+      const { query } = JSON.parse(String(init?.body));
+      const identity = { databaseId: 2, nameWithOwner: "org/repo" };
+      const pr = {
+        number: 7,
+        baseRefName: baseRef,
+        baseRefOid: baseSha,
+        headRefOid: head,
+        baseRepository: identity,
+        headRepository: identity,
+      };
+      if (query.includes("MergeLifecycle"))
+        return json({
+          data: {
+            repository: {
+              ...identity,
+              pullRequest: {
+                ...pr,
+                state: closed ? "CLOSED" : "OPEN",
+                merged: false,
+                isDraft: false,
+                mergeable: "MERGEABLE",
+              },
+            },
+          },
+        });
+      if (query.includes("MergeGates"))
+        return json({
+          data: {
+            repository: {
+              ...identity,
+              pullRequest: {
+                ...pr,
+                reviewDecision: null,
+                mergeStateStatus: "CLEAN",
+                mergeQueue: null,
+                mergeQueueEntry: null,
+                potentialMergeCommit: null,
+              },
+            },
+          },
+        });
+      return Response.json({ message: "forbidden" }, { status: 403 });
+    }
+    if (path === "/repos/org/repo/rules/branches/main") return json([]);
+    if (path.endsWith("/issues/7/comments")) {
+      if (method === "GET") return json([]);
+      if (method === "POST") {
+        replies.push(JSON.parse(String(init?.body)).body);
+        return json({
+          id: 31,
+          html_url: "https://github.com/org/repo/pull/7#issuecomment-31",
+        });
+      }
+    }
     if (
       [h1, h2].some(
         (sha) => path === `/repos/org/repo/compare/${baseSha}...${sha}`,
@@ -170,6 +228,9 @@ async function fixture(
     "hook",
     "admin",
     coordinator,
+    undefined,
+    undefined,
+    github.readMergeFacts.bind(github),
   );
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -236,13 +297,16 @@ async function fixture(
       },
       delivery,
     );
-  const comment = (delivery?: string) =>
+  const comment = (
+    delivery?: string,
+    prompt = "@fixture inspect this change",
+  ) =>
     send(
       "issue_comment",
       {
         action: "created",
         issue: { number: 7, state: "open", pull_request: {} },
-        comment: { id: 8, user: sender, body: "@fixture inspect this change" },
+        comment: { id: 8, user: sender, body: prompt },
       },
       delivery,
     );
@@ -282,6 +346,14 @@ async function fixture(
     resolver,
     reviews,
     filesRead,
+    replies,
+    retarget: () => {
+      baseRef = "release";
+    },
+    url,
+    closePr: () => {
+      closed = true;
+    },
     publisher: new DeliveryWorker(store, github),
     database,
   };
@@ -358,6 +430,74 @@ test("opened H1 returning after synchronize H2 cannot publish; only H2 produces 
   });
   assert.equal(await f.publisher.tick(), false);
   assert.equal(await agent.once(), false);
+});
+
+test("merge question traverses the bridge and scoped GitHub reads; a later closed readback never publishes", async (t) => {
+  const f = await fixture(t);
+  const { taskId } = await f.comment(undefined, "@fixture is enable merged?");
+  const agent = f.agentWith(async () => {
+    assert.fail("merge question dispatched a model");
+  });
+  assert.equal(await agent.once(), true);
+  const task = f.store.get(taskId)!;
+  assert.equal(task.status, "succeeded");
+  assert.equal(task.runtime?.provider, "channel-merge-assessment");
+  assert.deepEqual(task.runtime?.modelTools, []);
+  assert.equal(task.outcome?.publication.kind, "comment");
+  assert.match(task.outcome!.text, /仍开放未合并/);
+  assert.match(task.outcome!.text, /administration:read/);
+  assert.deepEqual(f.filesRead, []);
+  assert.equal(await f.publisher.tick(), true);
+  assert.equal(f.replies.length, 1);
+  assert.equal(f.reviews.length, 0);
+  const lookup = "/repositories/2/comments/8/task";
+  const get = (path: string) =>
+    fetch(f.url + path, { headers: { authorization: "Bearer admin" } });
+  assert.equal((await fetch(f.url + lookup)).status, 401);
+  assert.equal((await get("/repositories/9/comments/8/task")).status, 404);
+  const audit = await (await get(lookup)).json();
+  assert.equal(audit.id, taskId);
+  assert.equal(audit.publicationReceipt.id, 31);
+  assert.equal(audit.prompt, undefined);
+  assert.deepEqual(
+    audit.toolAudit.map((r: { name: string; succeeded: number }) => [
+      r.name,
+      r.succeeded,
+    ]),
+    [["read_merge_facts", 1]],
+  );
+  f.closePr();
+  const readback = "/tasks/" + taskId + "/merge-facts";
+  assert.equal((await fetch(f.url + readback)).status, 401);
+  const current = await (await get(readback)).json();
+  assert.equal(current.source, "current_readback");
+  assert.equal(current.assessment.state, "closed");
+  assert.equal(current.assessment.platform, "not_applicable");
+  assert.deepEqual(f.store.get(taskId)?.outcome, task.outcome);
+  assert.deepEqual(
+    (await (await get(lookup)).json()).toolAudit,
+    audit.toolAudit,
+  );
+  assert.equal(await f.publisher.tick(), false);
+  assert.equal(f.replies.length, 1);
+});
+
+test("retargeting to a branch at the identical SHA fences a previously assessed reply", async (t) => {
+  const f = await fixture(t);
+  const { taskId } = await f.comment(undefined, "@fixture /merge-status");
+  await f
+    .agentWith(async () => {
+      assert.fail("model dispatched");
+    })
+    .once();
+  assert.deepEqual(f.store.get(taskId)?.outcome?.publication, {
+    kind: "comment",
+    expectedBaseRef: "main",
+  });
+  f.retarget();
+  await f.publisher.tick();
+  assert.equal(f.replies.length, 0);
+  assert.equal(f.store.get(taskId)?.publicationReceipt, null);
 });
 
 test("PR comment resolves once at claim, persists the pin and lease hash, and cannot request opt-in deep tools", async (t) => {

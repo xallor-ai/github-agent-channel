@@ -6,6 +6,17 @@ export const runtimeEventSchema = z.strictObject({
   kind: z.literal("started"),
   provider: z.string().min(1).max(100),
   runId: z.string().min(1).max(1024),
+  bridgeBuildSha: z
+    .string()
+    .regex(/^[a-f0-9]{40}$/)
+    .optional(),
+  modelTools: z
+    .array(
+      z.enum(["read_issue", "read_file", "read_merge_facts", "search_repo"]),
+    )
+    .max(4)
+    .refine((tools) => new Set(tools).size === tools.length)
+    .optional(),
 });
 export const publicationReceiptSchema = z.strictObject({
   kind: z.enum(["comment", "pull_request", "review"]),
@@ -99,8 +110,14 @@ const artifactSchema = z.discriminatedUnion("kind", [
 ]);
 const publicationSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("none") }),
-  z.strictObject({ kind: z.literal("review") }),
-  z.strictObject({ kind: z.literal("comment") }),
+  z.strictObject({
+    kind: z.literal("review"),
+    expectedBaseRef: z.string().min(1).max(255).optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("comment"),
+    expectedBaseRef: z.string().min(1).max(255).optional(),
+  }),
   z.strictObject({
     kind: z.literal("pull_request"),
     title: z.string().trim().min(1).max(200),

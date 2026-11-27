@@ -6,7 +6,9 @@
 
 本表适用当前 v2 实现（2026-11-25 增补版本化 PR 评审的源码与本地测试入口；真实验收按行记录）。配置、协议、状态库均不兼容旧版。代码路径在本地测试；真实环境列明确区分实际验收、故障注入测试与未实现范围。
 
-**待交付的功能不计入现有证据：** #21 的逐事件送达/处理、澄清必答和版本取代，#22 的原评论收件 reaction，#23 的门禁事实与工具轨迹，见[功能地图](product-features.md)。已收到活动、能读 diff 或已发评论均不能替代这些验收。
+**待交付的功能不计入现有证据：** #21 的逐事件送达/处理、澄清必答和版本取代，及 #22 的原评论收件 reaction，见[功能地图](product-features.md)。已收到活动、能读 diff 或已发评论均不能替代这些验收。
+
+合并问答（#23）的固定版本采集器已与真实开放 PR 对照；生产身份下的任务与回帖链路仍待验收，见 R07c。
 
 ## 状态和证据口径
 
@@ -52,6 +54,7 @@
 | R07 | 读取 PR 差异 | 同仓开放 PR 按指定 base/head 比较语义列文件、状态、改名与可用补丁；文件数量和字节上限有遗漏提示。无 CI 日志 | [变更采集](../src/github-pull-context.ts)、[GitHub 测试](../tests/github.test.ts) | 待真实 opened/synchronize |
 | R07b | 自动评审材料不足 | 固定比较不可用或没有可见 hunk 增删行时不启动模型；已核验空比较单列。状态通知不计为完成代码评审。 | [连接器回归](../tests/connector.test.ts)、[HTTP 发布链路](../tests/pr-review-e2e.test.ts) | #24 仍待真实 H1/H2 验收 |
 | R07a | 深评只读源码 | 连接器按授权自动获取同仓 PR 指定提交并复用本地 Git 对象库；可读未改文件，搜索结果有截断标志 | [范围及限制](pr-review.md)、[快照测试](../tests/review-snapshot.test.ts) | 待真实未改调用方和跨版本隔离验收 |
+| R07c | PR 合并问答 | 按同仓任务版本分别查询生命周期、冲突、规则、必需检查与有效审核；明确缺项，工程建议单列。OpenClaw 支持明确状态查询，无合并写入 | [查询路径与真实证据](pr-merge-assessment.md)、[采集测试](../tests/github-merge-facts.test.ts)、[判断测试](../tests/merge-assessment.test.ts) | #25 真实 API 只读对照；未验证生产 App 安装权限与该功能真实任务/回帖 |
 | R08 | 固定版本 | PR 校验双方仓库和 base/head；ACP 编码要求工作区符合目标版本，不自动切换；仓库任务 OpenClaw 读取仍走默认分支 | [GitHub 客户端](../src/github.ts)、[工作区](../src/runtime-workspace.ts) | 旧版 draft PR parent/base 有实证；PR 评审路径仅本地 |
 | R09 | 仓库与工作区                       | 部分实现；映射干净独立 clone，校验 origin，拒绝隐藏修改的索引标志；不自动 clone/重置/分配 sandbox                    | [runtime-workspace.ts](../src/runtime-workspace.ts)                                 | 本地通过；不是多租户隔离                                       |
 | R10 | 修改文件并收集 diff                | ACP 委托 harness 编辑，保留 BOM 收集实际 UTF-8 文件变更；拒绝改 HEAD、特殊模式/超限文件                              | acp-connector.test.ts                                                               | 真实 OpenCode 修改单文件并发布 PR #4 |

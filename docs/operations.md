@@ -49,13 +49,17 @@ runtime.type 必须显式指定。ACP 使用[原生适配器配置](acp-setup.md
 生成目录不可覆盖不同内容。配置变更渲染到新目录，并保留源码提交。保持同一 `deployment.projectName` 才能复用原卷；不同项目名可能误建空数据库。
 
 1. 等待运行任务结束；先停止Agent，再停止Cloud（down不带-v）。
-2. 在服务停止后一起备份任务库、独立设备身份库（`<dataFile>.devices`）、journal 及各自存在的 WAL/SHM 文件、secret引用和生成配置。
+2. 在服务停止后一起备份任务库、独立设备身份库（`<dataFile>.devices`）、云端工具审计库（`<dataFile>.tool-audit.sqlite`）、连接器 journal 及各库存在的 SQLite journal/WAL/SHM 文件、secret 引用和生成配置。
 3. 生成新bundle，用相同projectName启动Cloud，再启动Agent。
 4. 检查两端日志/状态、私网health、授权评论回帖。
 
 同名bundle是原位替换，不能启动新bundle后再对旧bundle执行down。回滚需停止当前服务、恢复对应旧源码和配置；数据库schema不兼容时恢复备份。不要用down-v删除卷。不要删除Agent journal来重试任务。
 
 ## 租约和未知状态
+
+云端工具审计库使用独立的 v2 格式，不改写 v5 任务库。请为云端服务账户授予该目录读写权限，并限制其他账户访问；恢复时和对应的任务库一同恢复。首次启动若无审计库会创建空库，没有升级前的调用历史；若已存在但格式不符则拒绝启动并保留原文件。每个任务的每种云端工具只占一行，保留请求、成功和失败的次数及首次/最近请求、最近成功/失败的 UTC 毫秒时间。请求多于两种结果之和表示结果未确认。拒绝无效参数或初始租约时不创建工具记录。每行的 `lastFailure` 保存最近一次已接纳调用的失败分类；没有失败时为 null，后续成功不覆盖。不记录异常文本。
+
+分类包括：`scope`（任务范围或授权未确认）、`lease`（读取期间租约失效）、`github_permission_or_resource`（GitHub 返回 401、403 或 404，无法确定是权限、资源还是平台限制）、`invalid_evidence`（上游 JSON 或数据结构无效）、`upstream_unavailable`（上游返回 408、429 或 5xx）、`unknown`（没有足够信息分类）。这些分类不是根因判断。部署时可设置 `CHANNEL_BUILD_SHA` 为完整的 40 位提交 SHA；该行的 `buildSha` 对应最近一次请求的云服务部署声明，未配置或无效时为 null。审计不保存工具参数、返回内容或异常正文，不计入桥接器本地调用，也不改变 Runtime 自报的运行记录。
 
 领取时云端先持久化assignment，之后才返回任务。投递响应丢失不会重新投递同一执行。Agent在调用模型前写journal；进程重启看到执行中记录只报告unknown，不再次调用模型。结果回传失败只重试已持久化的同一结果；云端原子保存结果与幂等摘要后确认，重复同结果不会重复回帖，冲突409。
 

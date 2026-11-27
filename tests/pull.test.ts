@@ -2,6 +2,7 @@ import { fixtureAgent } from "./binding-fixture.js";
 import { seedBinding } from "./binding-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { z } from "zod";
 import { once } from "node:events";
 import { createChannelServer } from "../src/server.js";
 import { TaskStore } from "../src/store.js";
@@ -414,6 +415,67 @@ test("lease token scopes every tool and result; canonical retry ignores JSON key
   });
   assert.equal(second.status, 200);
   assert.deepEqual(await second.json(), { accepted: true, duplicate: true });
+});
+test("cloud tool audit classifies admitted failures without recording arguments or upstream error text", async (t) => {
+  const f = await fixture(t);
+  const task = f.store.accept(input).task;
+  const { leaseToken } = await (
+    await f.post("claim", { runtime: fixtureAgent })
+  ).json();
+  const read = (args: unknown) =>
+    f.post(`tasks/${task.id}/tool`, { leaseToken, name: "read_issue", args });
+  assert.equal((await read({ path: "private-path" })).status, 400);
+  assert.deepEqual(f.store.toolAudit(task.id), []);
+  const invalid = z.string().safeParse({ secret: "private-body" });
+  assert.ok(!invalid.success);
+  for (const [error, code, http] of [
+    [new AccessDenied("private-actor"), "scope", 403],
+    [
+      Object.assign(Error("private-token"), { status: 404 }),
+      "github_permission_or_resource",
+      503,
+    ],
+    [invalid.error, "invalid_evidence", 503],
+    [new SyntaxError("private-body"), "invalid_evidence", 503],
+    [
+      Object.assign(Error("private-body"), {
+        name: "GraphqlResponseError",
+        errors: [{ type: "FORBIDDEN", message: "private-actor" }],
+      }),
+      "github_permission_or_resource",
+      503,
+    ],
+    [
+      Object.assign(Error("private-body"), {
+        name: "GraphqlResponseError",
+        errors: [{ type: "NOT_FOUND" }, { type: "something_unknown" }],
+      }),
+      "unknown",
+      503,
+    ],
+    [
+      Object.assign(Error("private-token"), { status: 502 }),
+      "upstream_unavailable",
+      503,
+    ],
+    [Object.assign(Error("private-path"), { status: 422 }), "unknown", 503],
+  ] as const) {
+    f.github.readIssue = async () => {
+      throw error;
+    };
+    const r = await read({});
+    assert.equal(r.status, http);
+    assert.doesNotMatch(await r.text(), /private-/);
+    const ledger = f.store.toolAudit(task.id);
+    assert.equal(ledger[0].lastFailure, code);
+    assert.doesNotMatch(JSON.stringify(ledger), /private-/);
+  }
+  f.github.readIssue = async () => {
+    f.store.expireTasks(Date.now() + 120000);
+    return {};
+  };
+  assert.equal((await read({})).status, 409);
+  assert.equal(f.store.toolAudit(task.id)[0].lastFailure, "lease");
 });
 
 test("storage failure returns retryable 503 and same result is persisted once on retry", async (t) => {

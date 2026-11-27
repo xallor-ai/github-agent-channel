@@ -19,6 +19,8 @@
 
 自动 PR 评审在 OpenClaw 调用前检查固定差异中的变更行。Compare 读取失败须重新验证权限与版本；可确定缺少材料时记录失败并按原发布栅栏发送未完成通知，明确拒绝或失去权限时不这样转换。
 
+合并查询（C3/C6/C7/C8、W3/W4）：OpenClaw 对明确的 PR 状态提问直接调用 `read_merge_facts({})`；一般 PR 分析也可向模型提供该工具。云端取原任务版本和仓库，以当前绑定、安装与 actor 角色授权查询。采集模块将 GitHub 的规则和观察结果按提交、App 与时间整理；判定模块分别给出生命周期、平台门禁与工程建议。结果中的 `merge_assessment` 是判断产物，GitHub 评论是另一项需重新授权的发布动作。[实测范围](pr-merge-assessment.md#实测真实-github-只读对照)单列。
+
 ## 全部生产模块
 
 | 文件                                                  | 实际职责与边界                                                                                            |
@@ -33,6 +35,8 @@
 | [store.ts](../src/store.ts)                           | 云端任务、delivery 去重、assignment、outcome、runtime handle、publicationReceipt；无旧 claim/finish       |
 | [pull.ts](../src/pull.ts)                             | 只处理 `/connector/v2/claim` 及 `tasks/<id>/tool`、`result`、`execution`；lease/actor 与严格 outcome 校验 |
 | [github.ts](../src/github.ts)                         | 官方 Octokit App token/actor 校验、任务目标读取、评论与 PR 发布入口                                       |
+| [github-merge-facts.ts](../src/github-merge-facts.ts) | 固定两端仓库与 SHA；读取 PR、活动 ruleset、传统保护、审核决定与 head/测试合并检查；收尾复核，权限不足或截断报告缺项 |
+| [merge-assessment.ts](../src/merge-assessment.ts) | 验证事实契约，按检查适用对象与来源匹配门禁，生成三项独立结论 |
 | [github-pull-context.ts](../src/github-pull-context.ts) | 同仓开放 PR 的双方身份与版本核对，按固定 base...head 读取有界变更 |
 | [review-snapshot.ts](../src/review-snapshot.ts) | OpenClaw 每任务的只读 head 搜索及文件读取，关闭后不可用 |
 | [github-review.ts](../src/github-review.ts) | 固定 commit 的 COMMENT、按 bot/任务/版本标记核验真实回执 |
