@@ -1,3 +1,4 @@
+import { mentionsBot } from "./github-mention.js";
 import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import { bindingEvent } from "./binding-events.js";
@@ -105,17 +106,6 @@ function action(
     githubTime: githubTime(time),
   };
 }
-function mentionsBot(body: string, login: string) {
-  const aliases = [login, login.replace(/\[bot\]$/i, "")];
-  const escaped = aliases
-    .map((s) => s.replace(/[.*+?^$()|[\]\\{}]/g, "\\$&"))
-    .join("|");
-  return new RegExp(
-    "(?<![A-Za-z0-9_@-])@(?:" + escaped + ")(?![A-Za-z0-9_\\[\\]-])",
-    "i",
-  ).test(body);
-}
-
 export async function normalizeWebhook(
   config: { github: { botLogin: string }; lookup: BindingLookup },
   raw: Buffer,

@@ -162,6 +162,9 @@ export interface RuntimeConnector {
   ): Promise<RuntimeResult>;
 }
 export interface GitHubClient {
+  publishOwnerReaction?(task: Task, check: () => void): Promise<number>;
+  lookupOwnerReaction?(task: Task): Promise<number | null>;
+  reconcileOwnerReaction?(task: Task): Promise<number | null>;
   authorize(task: Task): Promise<void>;
   resolvePullRevision?(task: Task): Promise<PullRevision>;
   readPullDiff?(task: Task): Promise<unknown>;

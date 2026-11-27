@@ -2,7 +2,8 @@ import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
-import { activityPageSchema } from "./activity-feed.js";
+import { z } from "zod";
+import { activityPageSchema, receivedPageSchema } from "./activity-feed.js";
 import type { RuntimeProfile } from "./runtime-profile.js";
 import { requireSchemaVersion } from "./store-schema.js";
 
@@ -19,6 +20,19 @@ type Binding = {
 type Entry = Binding & { seq: number; cursor: number };
 type Wait = { revision: number; until: number; failures: number };
 const PAGE = 25;
+const RETAIN = 256;
+const expiredReceipt = z
+  .strictObject({
+    bindingId: receivedPageSchema.shape.bindingId,
+    expired: receivedPageSchema.shape.entries,
+  })
+  .transform(({ bindingId, expired: entries }) => ({ bindingId, entries }));
+type Activity = z.infer<typeof activityPageSchema>["activities"][number];
+type InboxRow = {
+  activity: Activity;
+  ack: "pending" | "confirmed" | "expired";
+};
+
 const MAX_BYTES = 256 * 1024;
 const POLL_INTERVAL_MS = 15_000;
 const IDLE_INTERVAL_MS = 60_000;
@@ -52,7 +66,7 @@ async function pageBody(response: Response): Promise<unknown> {
   );
 }
 
-/** Stores only confirmed registrations and consumption progress, never event bodies. */
+/** Stores bounded, consumable activity excerpts before acknowledging their receipt. */
 export class ActivityInbox {
   readonly #db: DatabaseSync;
   readonly #wait = new Map<number, Wait>();
@@ -66,6 +80,7 @@ export class ActivityInbox {
       const exists = requireSchemaVersion(
         this.#db,
         {
+          received: ["seq", "cursor", "deliveryId", "data", "ack"],
           bindings: [
             "seq",
             "origin",
@@ -84,7 +99,7 @@ export class ActivityInbox {
             "pollStatus",
           ],
         },
-        1,
+        2,
       );
       if (!exists)
         this.#db.exec(`CREATE TABLE bindings(
@@ -95,7 +110,10 @@ export class ActivityInbox {
           retentionTruncated INTEGER NOT NULL DEFAULT 0, lastSyncedAt INTEGER,
           pollStatus TEXT NOT NULL DEFAULT 'not_yet_polled' CHECK(pollStatus IN ('not_yet_polled','synced','denied','unconfirmed')),
           UNIQUE(origin,installationId,repositoryId,deviceId)
-        ) STRICT; PRAGMA user_version=1;`);
+        ) STRICT; CREATE TABLE received(seq INTEGER NOT NULL,cursor INTEGER NOT NULL,deliveryId TEXT NOT NULL,
+        data TEXT NOT NULL,ack TEXT NOT NULL CHECK(ack IN ('pending','confirmed','expired')),PRIMARY KEY(seq,cursor), UNIQUE(seq,deliveryId)) STRICT;
+        CREATE TRIGGER reset_received AFTER UPDATE OF revision ON bindings WHEN NEW.revision!=OLD.revision BEGIN DELETE FROM received WHERE seq=NEW.seq; END;
+        PRAGMA user_version=2;`);
       this.#db.exec("COMMIT");
       chmodSync(path, 0o600);
     } catch (error) {
@@ -152,6 +170,68 @@ export class ActivityInbox {
           lastSyncedAt: b.lastSyncedAt === null ? null : Number(b.lastSyncedAt),
         }
       : null;
+  }
+  records(
+    baseUrl: string,
+    profile: RuntimeProfile,
+    b: Binding,
+    after: number,
+    limit: number,
+  ) {
+    if (
+      !Number.isSafeInteger(after) ||
+      after < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100
+    )
+      throw Error("Invalid inbox page");
+    if (!b.enabled) return null;
+    // Keep binding validation and page lookup in one SQLite snapshot.
+    return this.transaction(() => {
+      const selected = this.#db
+        .prepare(
+          "SELECT seq, retentionTruncated FROM bindings WHERE origin=? AND profile=? AND installationId=? AND repositoryId=? AND deviceId=? AND revision=? AND owner=? AND repo=? AND enabled=1 AND pollStatus!='denied'",
+        )
+        .get(
+          new URL(baseUrl).origin,
+          profileKey(profile),
+          b.installationId,
+          b.repositoryId,
+          b.deviceId,
+          b.revision,
+          b.owner,
+          b.repo,
+        );
+      if (!selected) return null;
+      const rows = this.#db
+        .prepare(
+          "SELECT data,ack FROM received WHERE seq=? AND cursor>? ORDER BY cursor LIMIT ?",
+        )
+        .all(Number(selected.seq), after, limit + 1);
+      const activities: InboxRow[] = rows.slice(0, limit).map((r) => ({
+        activity: JSON.parse(String(r.data)) as Activity,
+        ack: r.ack as InboxRow["ack"],
+      }));
+      return {
+        bindingId: bindingKey(b),
+        retentionTruncated: !!selected.retentionTruncated,
+        activities,
+        nextCursor: activities.at(-1)?.activity.cursor ?? after,
+        hasMore: rows.length > limit,
+      };
+    });
+  }
+  private transaction<T>(fn: () => T): T {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const ret = fn();
+      this.#db.exec("COMMIT");
+      return ret;
+    } catch (e) {
+      this.#db.exec("ROLLBACK");
+      throw e;
+    }
   }
   async pollOne(
     connection: Connection,
@@ -210,8 +290,23 @@ export class ActivityInbox {
       postpone(true);
     };
     try {
+      const entries = this.#db
+        .prepare(
+          "SELECT cursor,deliveryId FROM received WHERE seq=? AND ack='pending' ORDER BY cursor LIMIT ?",
+        )
+        .all(binding.seq, PAGE)
+        .map((r) => ({
+          cursor: Number(r.cursor),
+          deliveryId: String(r.deliveryId),
+        }));
+      const ack = entries.length > 0;
       const response = await fetcher(
-        new URL("/connector/v2/activities", origin),
+        new URL(
+          ack
+            ? "/connector/v2/activities/received"
+            : "/connector/v2/activities",
+          origin,
+        ),
         {
           method: "POST",
           redirect: "error",
@@ -224,12 +319,63 @@ export class ActivityInbox {
             owner: binding.owner,
             repo: binding.repo,
             runtime: profile,
-            after: binding.cursor,
-            limit: PAGE,
+            ...(ack
+              ? { bindingId, entries }
+              : { after: binding.cursor, limit: PAGE }),
           }),
         },
       );
-      if (!response.ok) {
+      if (ack && (response.status === 200 || response.status === 410)) {
+        const expired = response.status === 410;
+        const raw = await pageBody(response);
+        const receipt = (expired ? expiredReceipt : receivedPageSchema).parse(
+          raw,
+        );
+        const result = receipt.entries;
+        if (receipt.bindingId !== bindingId)
+          throw Error(
+            "Activity acknowledgement differs from registered binding",
+          );
+        signal.throwIfAborted();
+        if (
+          expired
+            ? !result.every((r) =>
+                entries.some(
+                  (e) => e.cursor === r.cursor && e.deliveryId === r.deliveryId,
+                ),
+              )
+            : result.length !== entries.length ||
+              !result.every(
+                (r, i) =>
+                  entries[i].cursor === r.cursor &&
+                  entries[i].deliveryId === r.deliveryId,
+              )
+        )
+          throw Error(
+            "Activity acknowledgement differs from submitted receipts",
+          );
+        this.transaction(() => {
+          const changed = this.#db
+            .prepare(
+              "UPDATE bindings SET lastSyncedAt=?,pollStatus='synced',retentionTruncated=MAX(retentionTruncated,?) WHERE seq=? AND revision=? AND enabled=1",
+            )
+            .run(Date.now(), Number(expired), binding.seq, binding.revision);
+          if (!changed.changes) return;
+          const update = this.#db.prepare(
+            "UPDATE received SET ack=? WHERE seq=? AND cursor=? AND deliveryId=? AND ack='pending'",
+          );
+          for (const e of result)
+            update.run(
+              expired ? "expired" : "confirmed",
+              binding.seq,
+              e.cursor,
+              e.deliveryId,
+            );
+        });
+        this.#wait.delete(binding.seq);
+        return { received: 0, truncated: expired };
+      }
+      if (!response.ok || ack) {
         await response.body?.cancel();
         // Do not report historical local data as freshly verified after a denial.
         mark(
@@ -254,6 +400,7 @@ export class ActivityInbox {
         (hasMore && activities.length !== PAGE) ||
         activities.some(
           (a, i) =>
+            a.deliveryId.length > 100 ||
             a.bindingId !== bindingId ||
             a.installationId !== binding.installationId ||
             a.repositoryId !== binding.repositoryId ||
@@ -268,22 +415,40 @@ export class ActivityInbox {
         throw Error(
           "Activity receipt does not match the registered binding and cursor",
         );
-      const changed = this.#db
-        .prepare(
-          `UPDATE bindings SET cursor=?,totalReceived=totalReceived+?,
+      const stored = this.transaction(() => {
+        const changed = this.#db
+          .prepare(
+            `UPDATE bindings SET cursor=?,totalReceived=totalReceived+?,
       retentionTruncated=MAX(retentionTruncated,?),lastSyncedAt=?,pollStatus='synced'
       WHERE seq=? AND revision=? AND enabled=1 AND cursor=?`,
-        )
-        .run(
-          nextCursor,
-          activities.length,
-          Number(truncated),
-          Date.now(),
-          binding.seq,
-          binding.revision,
-          binding.cursor,
+          )
+          .run(
+            nextCursor,
+            activities.length,
+            Number(truncated),
+            Date.now(),
+            binding.seq,
+            binding.revision,
+            binding.cursor,
+          );
+        if (!changed.changes) return false;
+        const put = this.#db.prepare(
+          "INSERT INTO received(seq,cursor,deliveryId,data,ack) VALUES(?,?,?,?,'pending')",
         );
-      if (!changed.changes) return undefined;
+        for (const a of activities)
+          put.run(binding.seq, a.cursor, a.deliveryId, JSON.stringify(a));
+        const evicted = this.#db
+          .prepare(
+            "DELETE FROM received WHERE seq=? AND ack!='pending' AND cursor<=(SELECT cursor FROM received WHERE seq=? ORDER BY cursor DESC LIMIT 1 OFFSET ?)",
+          )
+          .run(binding.seq, binding.seq, RETAIN);
+        if (evicted.changes)
+          this.#db
+            .prepare("UPDATE bindings SET retentionTruncated=1 WHERE seq=?")
+            .run(binding.seq);
+        return true;
+      });
+      if (!stored) return undefined;
       if (nextCursor > binding.cursor) this.#wait.delete(binding.seq);
       else postpone(false);
       return { received: activities.length, truncated };
@@ -291,6 +456,24 @@ export class ActivityInbox {
       if (!stop.aborted) mark("unconfirmed");
       throw error;
     }
+  }
+}
+
+/** Callers must supply the current binding just verified by the authenticated server. */
+export function readActivityInbox(
+  stateFile: string,
+  baseUrl: string,
+  profile: RuntimeProfile,
+  binding: Binding,
+  after = 0,
+  limit = 25,
+) {
+  if (!existsSync(stateFile + ".inbox")) return null;
+  const inbox = new ActivityInbox(stateFile);
+  try {
+    return inbox.records(baseUrl, profile, binding, after, limit);
+  } finally {
+    inbox.close();
   }
 }
 

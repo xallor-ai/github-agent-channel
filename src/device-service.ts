@@ -18,7 +18,8 @@ import {
   type BindingRegistry,
 } from "./binding-registry.js";
 import type { TaskStore } from "./store.js";
-import { feedQueryFields } from "./activity-feed.js";
+import { feedQueryFields, receivedPageSchema } from "./activity-feed.js";
+import { ExpiredActivities, ReceiptScopeDenied } from "./owner-receipts.js";
 import { sameRuntimeIdentity, type RuntimeProfile } from "./runtime-profile.js";
 import { AccessDenied } from "./contracts.js";
 
@@ -34,6 +35,10 @@ const target = z.strictObject({
     .refine((s) => s !== "." && s !== ".."),
 });
 const feedQuery = target.extend(feedQueryFields);
+const receiptQuery = target.extend({
+  ...receivedPageSchema.shape,
+  runtime: feedQueryFields.runtime,
+});
 const update = target.extend({
   expectedRevision: z
     .number()
@@ -49,6 +54,7 @@ const paths = {
   read: "/connector/v2/bindings/read",
   apply: "/connector/v2/bindings/apply",
   activities: "/connector/v2/activities",
+  received: "/connector/v2/activities/received",
 };
 function matchesActivityBinding(
   binding: ReturnType<BindingRegistry["get"]>,
@@ -105,6 +111,7 @@ async function jsonBody(req: IncomingMessage): Promise<unknown> {
 type Options = {
   runtimeLastSeen?: TaskStore["runtimeLastSeen"];
   recentActivities?: TaskStore["activitiesForDevice"];
+  confirmActivities?: TaskStore["confirmActivities"];
   dbPath: string;
   adminToken: string;
   appId: string;
@@ -123,11 +130,13 @@ export class DeviceService {
   readonly #fetch: typeof fetch;
   readonly #runtimeLastSeen: Options["runtimeLastSeen"];
   readonly #recentActivities: Options["recentActivities"];
+  readonly #confirmActivities: Options["confirmActivities"];
   readonly #hasWriteProfile: Options["hasWriteProfile"];
   readonly #now: () => number;
   constructor(options: Options) {
     this.#runtimeLastSeen = options.runtimeLastSeen;
     this.#recentActivities = options.recentActivities;
+    this.#confirmActivities = options.confirmActivities;
     this.#hasWriteProfile = options.hasWriteProfile;
     this.#admin = digest(options.adminToken);
     this.#fetch = options.fetchImpl ?? fetch;
@@ -400,7 +409,11 @@ export class DeviceService {
         const body = await jsonBody(req);
         const change = path === paths.apply ? update.parse(body) : undefined;
         const feed =
-          path === paths.activities ? feedQuery.parse(body) : undefined;
+          path === paths.activities
+            ? feedQuery.parse(body)
+            : path === paths.received
+              ? receiptQuery.parse(body)
+              : undefined;
         const selector = change ?? feed;
         const selection = selector
           ? { owner: selector.owner, repo: selector.repo }
@@ -461,24 +474,48 @@ export class DeviceService {
             throw new Rejection(409, "binding_conflict");
           if (!matchesActivityBinding(binding, feed.runtime))
             throw new Rejection(403, "binding_owner");
-          if (!this.#recentActivities)
-            throw new Rejection(503, "service_error");
           const bindingId = [
             binding.installationId,
             binding.repositoryId,
             binding.deviceId,
             binding.revision,
           ].join(":");
-          send(200, {
-            bindingId,
-            ...this.#recentActivities(
-              binding.deviceId,
-              feed.after,
-              feed.limit,
-              feed.runtime,
+          if ("entries" in feed) {
+            if (feed.bindingId !== bindingId)
+              throw new Rejection(409, "binding_conflict");
+            if (!this.#confirmActivities)
+              throw new Rejection(503, "service_error");
+            try {
+              this.#confirmActivities(
+                binding.deviceId,
+                feed.runtime,
+                bindingId,
+                feed.entries,
+              );
+            } catch (e) {
+              if (e instanceof ExpiredActivities) {
+                send(410, { bindingId, expired: e.expired });
+                return true;
+              }
+              if (e instanceof ReceiptScopeDenied)
+                throw new Rejection(403, "binding_owner");
+              throw e;
+            }
+            send(200, { bindingId, entries: feed.entries });
+          } else {
+            if (!this.#recentActivities)
+              throw new Rejection(503, "service_error");
+            send(200, {
               bindingId,
-            ),
-          });
+              ...this.#recentActivities(
+                binding.deviceId,
+                feed.after,
+                feed.limit,
+                feed.runtime,
+                bindingId,
+              ),
+            });
+          }
         } else if (change) {
           try {
             const updated = this.#registry.apply(

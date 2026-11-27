@@ -40,6 +40,7 @@ allowedPaths 支持精确文件和以 `/` 或 `/**` 结尾的目录前缀；不�
 | `POST /connector/v2/bindings/read` | 设备 Bearer；指定 owner/repo，返回此设备的登记记录或 null |
 | `POST /connector/v2/bindings/apply` | 设备 Bearer；提交指定仓库、expectedRevision、declaration，返回生效记录 |
 | `POST /connector/v2/activities` | 设备 Bearer；提交 owner、repo、runtime、after、limit；按游标返回当前绑定保留的活动及 nextCursor、hasMore、truncated。 |
+| `POST /connector/v2/activities/received` | 负责人的接收端落盘后，按当前 owner、repo、runtime、bindingId 提交 1–25 对有序的 cursor 与 deliveryId。200 逐条确认；410 列出已过期项，整批不写，可另送未过期项。租约、心跳、请求分页都不构成送达确认。 |
 | `POST /connector/v2/claim`                | 设备 Bearer，提交 `{runtime:{type,id,deepReview,nativeReview}}`；只领取匹配当前设备、负责适配器及身份的任务；204 或 `{task,leaseToken,expiresAt}`                         |
 | `POST /connector/v2/tasks/<id>/execution` | `{leaseToken,event:{kind:"started",provider,runId}}`；只记录当前 assignment 的运行标识 |
 | `POST /connector/v2/tasks/<id>/source-grant` | 有效设备及租约、已启用的深评绑定和固定同仓 PR；仅连接器下载进程使用单仓只读短期凭据，不能作为模型工具调用。 |
@@ -58,7 +59,7 @@ publication=none 保存成果并将 deliveryStatus 置 skipped；comment/review/
 
 ## 使用新状态库
 
-云端任务、活动与绑定共享 schema 5；设备身份另库持久化，内网 journal 为 schema 3。协议路径仍是 v2，须使用同一修订的服务端和 bridge。旧格式直接抛出 StorageSchemaError；没有迁移、修复或清空行为。
+云端任务、活动与绑定与逐事件收件确认共享 schema 6；设备身份另库持久化，内网执行 journal 为 schema 3，活动收件箱为 schema 2。协议路径仍是 v2，须使用同一修订的服务端和 bridge。旧格式直接抛出 StorageSchemaError；没有迁移、修复或清空行为。
 
 1. 对已有旧部署，先停止接收新任务，完成现有任务与 unknown 对账，再停止旧 bridge 和服务端。
 2. 保留旧配置和数据库备份。准备新的 dataFile/stateFile；容器使用新的 projectName/数据卷。不要把旧库挂进 v2，也不要在尚有任务运行时删除旧卷。
