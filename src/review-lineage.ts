@@ -123,11 +123,13 @@ export class ReviewLineage {
     // absence of timestamps; it is never used to identify a successor.
     return this.db
       .prepare(
-        `SELECT e.deliveryId,e.githubTime,e.version,d.taskId,s.githubTime originTime
+        `SELECT e.deliveryId,e.githubTime,e.version,candidate.id taskId,s.githubTime originTime
       FROM tasks t JOIN reviewEvents s ON s.deliveryId=t.deliveryId AND s.version=t.eventKey AND s.bindingId=t.bindingId AND s.actorId=t.actorId
       JOIN deliveries orig ON orig.deliveryId=s.deliveryId
       JOIN reviewEvents e ON e.bindingId=s.bindingId AND e.number=s.number AND e.version!=s.version
-      JOIN deliveries d ON d.deliveryId=e.deliveryId
+      JOIN deliveries d ON d.deliveryId=e.deliveryId AND d.bindingId=e.bindingId
+      LEFT JOIN tasks candidate ON candidate.id=d.taskId AND candidate.bindingId=e.bindingId AND candidate.eventKey=e.version
+        AND candidate.actorId=e.actorId AND candidate.githubTime>s.githubTime AND candidate.githubTime<=e.githubTime
       WHERE t.id=? AND (e.githubTime>=s.githubTime OR ((e.githubTime IS NULL OR s.githubTime IS NULL) AND d.cursor>orig.cursor))
       ORDER BY (e.githubTime IS NULL OR s.githubTime IS NULL OR e.githubTime=s.githubTime) DESC,e.githubTime,e.deliveryId LIMIT 1`,
       )

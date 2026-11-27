@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TaskStore } from "../src/store.js";
-import { seedBinding } from "./binding-fixture.js";
+import { seedBinding, fixtureAgent } from "./binding-fixture.js";
 import type { NewTask } from "../src/contracts.js";
 const scope = {
     installationId: 1,
@@ -271,6 +271,67 @@ test("an undated published review prevents guessing which published revision was
   publish("c", undefined, 8);
   const current = observe("d", 300).taskId!;
   assert.equal(s.previousPublishedReview(current), null);
+});
+
+test("a signed change on a new binding cannot name the previous binding's task as successor", (t) => {
+  const { s, b, observe } = fixture(t);
+  const old = observe("b", 100, "original").taskId!;
+  assert.equal(
+    s.claimAssignment("device", "lease", Date.now() + 60000)?.id,
+    old,
+  );
+  s.finishAssignment(
+    old,
+    "device",
+    "lease",
+    {
+      status: "succeeded",
+      outcome: {
+        publication: { kind: "comment" },
+        text: "Original",
+        artifacts: [],
+      },
+    },
+    "ok",
+  );
+  s.pendingDelivery();
+  s.markDelivery(old, "sent", {
+    kind: "comment",
+    id: 51,
+    url: "https://github.com/org/repo/pull/7#issuecomment-51",
+  });
+  s.registry.apply({ ...scope, deviceId: "device", administratorId: 44 }, 1, {
+    enabled: true,
+    responsibleAgent: fixtureAgent,
+    nativeReview: true,
+    events: ["pull_request.synchronize"],
+  });
+  const live = s.activeBinding(1, 2)!;
+  assert.notEqual(live.id, b.id);
+  const receive = (head: string, time: number) =>
+    s.observe({
+      execute: true,
+      reason: "review",
+      githubTime: time,
+      input: {
+        ...scope,
+        deliveryId: "new-" + time,
+        bindingId: live.id,
+        actorLogin: "alice",
+        actorId: 4,
+        prompt: "review",
+        source: { event: "pull_request", action: "synchronize" },
+        target: { kind: "pull_request", number: 7, revision: pin(head) },
+      },
+    });
+  const second = receive("c", 200).taskId!;
+  const alias = receive("b", 300);
+  assert.equal(alias.taskId, old);
+  assert.equal(s.reviewPublicationCurrent(second), false);
+  const relation = s.reviewLineage(second);
+  assert.ok(relation?.signedChange);
+  assert.equal(relation.successorTaskId, null);
+  assert.equal(s.get(old)?.publicationReceipt?.id, 51);
 });
 test("a same-second competing predecessor and later return cannot authorize the old task", (t) => {
   const { s, observe } = fixture(t),
