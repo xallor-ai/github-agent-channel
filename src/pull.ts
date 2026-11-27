@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { runtimeProfileSchema } from "./runtime-profile.js";
 import { failureCodes } from "./runtime-failure.js";
 import { revisionSchema } from "./outcomes.js";
-import { summarizeReviewInput } from "./review-input.js";
+import { priorReviewContext, summarizeReviewInput } from "./review-input.js";
 import { mergeSnapshotPublishable } from "./merge-assessment.js";
 import { cloudToolNames, type ToolFailureCode } from "./tool-audit.js";
 import { z } from "zod";
@@ -146,7 +146,11 @@ export class PullCoordinator {
       this.authenticate(credential)?.deviceId === workerId &&
       this.store.assignedTask(task.id, workerId, hash(lease))
     )
-      this.store.recordReviewDrift(task.id, observed);
+      this.store.recordReviewDrift(
+        task.id,
+        observed.revision,
+        observed.githubAt,
+      );
   }
   private checkReviewAccess(
     task: Task,
@@ -231,6 +235,11 @@ export class PullCoordinator {
           }
           await this.github.authorize(task);
           this.assignment(task.id, leaseToken, workerId);
+          if (
+            isAutomaticReview(task) &&
+            !this.store.publicationAllowed(task.id)
+          )
+            throw new PullTargetRejected("pr_revision_changed");
         } catch (error) {
           // No request has reached the remote runtime; keep details out of the response.
           this.recordDrift(task, error, leaseToken, workerId, credential);
@@ -259,6 +268,17 @@ export class PullCoordinator {
         );
         if (!binding || binding.id !== task.bindingId)
           throw new StaleAssignment();
+        const lastReview =
+          runtime.type === "openclaw" && isAutomaticReview(task)
+            ? this.store.previousPublishedReview(task.id)
+            : null;
+        const previousReview =
+          lastReview &&
+          priorReviewContext(
+            task,
+            this.store.get(lastReview.taskId),
+            lastReview.reviewInput?.limited ?? null,
+          );
         const threadContext = this.store
           .recentThread(task)
           .filter((e) => e.deliveryId !== task.deliveryId)
@@ -272,6 +292,7 @@ export class PullCoordinator {
         send(200, {
           task: {
             ...task,
+            ...(previousReview && { previousReview }),
             ...(task.target.kind === "pull_request"
               ? {
                   reviewPolicy: {

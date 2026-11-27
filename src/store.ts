@@ -4,6 +4,7 @@ import {
   type ReactionResult,
 } from "./owner-receipts.js";
 import { DatabaseSync } from "node:sqlite";
+import { expireReviewPayloads } from "./review-generation.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -152,7 +153,11 @@ export class TaskStore {
   conversation(id: string) {
     return this.questions.conversation(id);
   }
-  recordReviewDrift(id: string, observed: PullRevision) {
+  recordReviewDrift(
+    id: string,
+    observed: PullRevision,
+    githubObservedAt?: number,
+  ) {
     this.transaction(() => {
       const task = this.get(id);
       if (
@@ -160,7 +165,7 @@ export class TaskStore {
         this.activeBinding(task.installationId, task.repositoryId)?.id ===
           task.bindingId
       )
-        this.reviews.record(task, observed);
+        this.reviews.record(task, observed, githubObservedAt);
     });
   }
   reviewLineage(id: string) {
@@ -328,13 +333,14 @@ export class TaskStore {
         input,
         isStale ? "closed" : reason,
         execute && !isStale
-          ? (eventKey) => {
+          ? (eventKey, recovered, recoveredTime, receivedAt) => {
               const id = this.enqueue(
                 match?.reason === "clarification_reply"
                   ? { ...input, prompt: match.answer }
-                  : input,
+                  : (recovered ?? input),
                 eventKey,
-                githubTime,
+                recoveredTime ?? githubTime,
+                receivedAt,
               );
               if (match) this.questions.link(match, id);
               return id;
@@ -546,6 +552,7 @@ export class TaskStore {
     this.transaction(() => this.expireInTransaction(now));
   }
   private expireInTransaction(now: number): void {
+    expireReviewPayloads(this.db, now);
     this.questions.expireCandidates(now);
     this.expireQueuedAnswers(now);
     this.db

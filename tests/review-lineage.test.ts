@@ -52,7 +52,7 @@ function fixture(t: test.TestContext) {
 test("recorded drift remains immutable, matching later delivery uses signed time and respects late close", (t) => {
   const { s, b, observe } = fixture(t);
   const first = observe("b", 100).taskId!;
-  s.recordReviewDrift(first, pin("c"));
+  s.recordReviewDrift(first, pin("c"), 500);
   assert.equal(s.reviewLineage(first)?.successorTaskId, null);
   s.recordReviewDrift(first, pin("d"));
   assert.deepEqual(s.reviewLineage(first)?.observedRevision, pin("c"));
@@ -218,14 +218,12 @@ test("late intermediate webhook detaches previously coalesced future deliveries 
   assert.equal(observe("b", 300, "c").taskId, first);
   observe("c", 200, "b");
   assert.equal(s.get(first)?.deliveryStatus, "sent");
-  assert.equal(s.activityReceipt("c")?.taskId, null);
-  assert.equal(
-    s.activityReceipt("c")?.reviewFollowUp,
-    "review_generation_unconfirmed",
-  );
-  assert.equal(observe("b", 300, "c").taskId, null);
-  assert.equal(observe("b", 300, "copy-of-c").taskId, null);
-  assert.equal(s.reviewLineage(first)?.generation?.successorTaskId, null);
+  const recovered = s.activityReceipt("c")?.taskId;
+  assert.ok(recovered && recovered !== first);
+  assert.equal(s.get(recovered)?.deliveryStatus, "pending");
+  assert.equal(observe("b", 300, "c").taskId, recovered);
+  assert.equal(observe("b", 300, "copy-of-c").taskId, recovered);
+  assert.equal(s.reviewLineage(first)?.generation?.successorTaskId, recovered);
   s.closeThread({
     ...scope,
     bindingId: b.id,
@@ -233,4 +231,42 @@ test("late intermediate webhook detaches previously coalesced future deliveries 
     githubTime: 125,
   });
   assert.equal(s.reviewLineage(first)?.generation, null);
+});
+test("a late event cannot corroborate an earlier drift using the local clock alone", (t) => {
+  const { s, observe } = fixture(t);
+  const original = observe("b", 100).taskId!;
+  s.recordReviewDrift(original, pin("c"));
+  observe("c", 200);
+  assert.equal(s.reviewLineage(original)?.successorTaskId, null);
+});
+test("an undated published review prevents guessing which published revision was previous", (t) => {
+  const { s, observe } = fixture(t);
+  function publish(head: string, time: number | undefined, id: number) {
+    const t = observe(head, time).taskId!;
+    s.claimAssignment("device", "lease", Date.now() + 60000);
+    s.finishAssignment(
+      t,
+      "device",
+      "lease",
+      {
+        status: "succeeded",
+        outcome: {
+          text: "review",
+          artifacts: [],
+          publication: { kind: "comment" },
+        },
+      },
+      "done",
+    );
+    s.pendingDelivery();
+    s.markDelivery(t, "sent", {
+      kind: "comment",
+      id,
+      url: `https://github.com/org/repo/pull/7#issuecomment-${id}`,
+    });
+  }
+  publish("b", 100, 7);
+  publish("c", undefined, 8);
+  const current = observe("d", 300).taskId!;
+  assert.equal(s.previousPublishedReview(current), null);
 });

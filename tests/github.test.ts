@@ -71,6 +71,7 @@ function fixture(
     revokeOnSecondCheck?: boolean;
     bindingEnabled?: () => boolean;
     pull?: () => { state: string; merged?: boolean } | null;
+    pullDate?: string;
     compareStatus?: number;
     files?: () => unknown[];
     fileAt?: (ref: string | null) => string;
@@ -164,7 +165,12 @@ function fixture(
     else throw new Error("unexpected request " + url);
     return new Response(JSON.stringify(data), {
       status: 200,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(url.pathname.endsWith("/pulls/5") && options.pullDate
+          ? { date: options.pullDate }
+          : {}),
+      },
     });
   }) as typeof fetch;
   return {
@@ -452,7 +458,7 @@ test("only a verified open same-repository SHA change is review replacement evid
     await assert.rejects(client.authorize(auto), (e) => {
       const observed = observedReviewDrift(auto, e);
       assert.deepEqual(
-        observed,
+        observed?.revision,
         expected ? { ...revision, headSha: newHead } : undefined,
       );
       assert.equal(observedReviewDrift(pinned, e), undefined);
@@ -496,11 +502,41 @@ test("final pre-POST comment version drift propagates without a GitHub write", a
   });
   await assert.rejects(
     client.publishComment(auto, "Findings"),
-    (e) => observedReviewDrift(auto, e)?.headSha === newHead,
+    (e) => observedReviewDrift(auto, e)?.revision.headSha === newHead,
   );
   assert.ok(
     !calls.some((c) => c.method === "POST" && c.path.endsWith("/comments")),
   );
+});
+test("drift uses the GitHub PR response date only when it is a canonical UTC HTTP timestamp", async () => {
+  const auto = {
+    ...pinned,
+    source: { event: "pull_request", action: "opened" },
+  };
+  const date = "Thu, 26 Nov 2026 19:15:40 GMT";
+  for (const raw of [
+    date,
+    undefined,
+    "Mon, 26 Nov 2026 19:15:40 GMT",
+    "2026-11-26T19:15:40Z",
+  ]) {
+    const f = fixture({
+      pullDate: raw,
+      pull: () => ({
+        ...openPull,
+        head: { ...openPull.head, sha: "7".repeat(40) },
+      }),
+    });
+    await assert.rejects(f.client.authorize(auto), (e) => {
+      const evidence = observedReviewDrift(auto, e);
+      assert.ok(evidence);
+      assert.equal(
+        evidence.githubAt,
+        raw === date ? Date.parse(date) : undefined,
+      );
+      return true;
+    });
+  }
 });
 test("local disable during final PR state read prevents a new comment POST", async () => {
   let enabled = true;

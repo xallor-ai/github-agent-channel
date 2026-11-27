@@ -117,7 +117,12 @@ export class DeliveryWorker {
         });
       } catch (error) {
         const observed = observedReviewDrift(delivery, error);
-        if (observed) this.store.recordReviewDrift(delivery.id, observed);
+        if (observed)
+          this.store.recordReviewDrift(
+            delivery.id,
+            observed.revision,
+            observed.githubAt,
+          );
         this.store.markDelivery(
           delivery.id,
           error instanceof AccessDenied ? "failed" : "unknown",

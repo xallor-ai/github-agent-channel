@@ -455,8 +455,8 @@ export class OctokitGitHubClient implements GitHubClient {
       text,
       client,
       this.#config.github.botLogin,
-      async () => {
-        await this.authorize(task);
+      () => this.authorize(task),
+      () => {
         if (this.#binding(task).nativeReview !== true)
           throw new AccessDenied("Native review publication is not enabled");
       },

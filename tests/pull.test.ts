@@ -264,6 +264,40 @@ test("a successful scoped merge-facts tool only records an open final PR revisio
     );
   }
 });
+test("a signed ABA fence during claim authorization prevents disclosing the original, still-undelivered generation", async (t) => {
+  const f = await fixture(t, 60000, ["pull_request.synchronize"]);
+  const receive = (head: string, time: number, deliveryId: string) =>
+    f.store.observe({
+      input: {
+        ...input,
+        deliveryId,
+        source: { event: "pull_request", action: "synchronize" },
+        target: {
+          kind: "pull_request",
+          number: 4,
+          revision: {
+            baseRepoId: 2,
+            headRepoId: 2,
+            baseSha: "a".repeat(40),
+            headSha: head.repeat(40),
+          },
+        },
+      },
+      execute: true,
+      reason: "review",
+      githubTime: time,
+    });
+  const first = receive("b", 1000, "first").taskId!;
+  f.github.authorize = async () => {
+    receive("c", 2000, "via");
+    receive("b", 3000, "back");
+  };
+  const claim = await f.post("claim", { runtime: fixtureAgent });
+  assert.equal(claim.status, 204);
+  assert.equal(await claim.text(), "");
+  assert.equal(f.store.get(first)?.status, "rejected");
+  assert.equal(f.store.get(first)?.runtime, null);
+});
 test("claim one assignment, authorize scoped tools, persist idempotent result and publish once", async (t) => {
   const f = await fixture(t);
   const task = f.store.accept(input).task;

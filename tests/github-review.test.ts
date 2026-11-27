@@ -83,10 +83,17 @@ test("a changed version during the final native Review check preserves the obser
   const observed = { ...target.revision, headSha: "c".repeat(40) };
   let checks = 0;
   await assert.rejects(
-    publishNativeReview(task, "summary", f.client, bot, async () => {
-      if (++checks === 2)
-        throw new PullTargetRejected("pr_revision_changed", observed);
-    }),
+    publishNativeReview(
+      task,
+      "summary",
+      f.client,
+      bot,
+      async () => {
+        if (++checks === 2)
+          throw new PullTargetRejected("pr_revision_changed", observed);
+      },
+      () => {},
+    ),
     (e) => e instanceof PullTargetRejected && e.observedRevision === observed,
   );
   assert.equal(checks, 2);
@@ -95,12 +102,44 @@ test("a changed version during the final native Review check preserves the obser
 test("native review submits COMMENT on the pinned commit, returns a verified receipt", async () => {
   const f = fixture();
   assert.deepEqual(
-    await publishNativeReview(task, "summary", f.client, bot, async () => {}),
+    await publishNativeReview(
+      task,
+      "summary",
+      f.client,
+      bot,
+      async () => {},
+      () => {},
+    ),
     { id: 8, url },
   );
   assert.deepEqual(f.writes, [
     { body: expected.body, event: "COMMENT", commit_id: sha },
   ]);
+});
+test("a local generation fence after remote reauthorization still blocks native POST", async () => {
+  const f = fixture();
+  let allowed = true,
+    checks = 0;
+  await assert.rejects(
+    publishNativeReview(
+      task,
+      "summary",
+      f.client,
+      bot,
+      async () => {
+        if (++checks === 2)
+          queueMicrotask(() => {
+            allowed = false;
+          });
+      },
+      () => {
+        if (!allowed) throw new AccessDenied("Superseded");
+      },
+    ),
+    AccessDenied,
+  );
+  assert.equal(checks, 2);
+  assert.deepEqual(f.writes, []);
 });
 test("lost response or inconsistent returned review is uncertain with a single POST", async () => {
   for (const opts of [
@@ -111,7 +150,14 @@ test("lost response or inconsistent returned review is uncertain with a single P
   ]) {
     const f = fixture(opts);
     await assert.rejects(
-      publishNativeReview(task, "summary", f.client, bot, async () => {}),
+      publishNativeReview(
+        task,
+        "summary",
+        f.client,
+        bot,
+        async () => {},
+        () => {},
+      ),
       AmbiguousExecution,
     );
     assert.equal(f.writes.length, 1);
@@ -121,9 +167,16 @@ test("preflight change blocks POST; already published review is found without a 
   const f = fixture();
   let checks = 0;
   await assert.rejects(
-    publishNativeReview(task, "summary", f.client, bot, async () => {
-      if (++checks === 2) throw Error("revoked");
-    }),
+    publishNativeReview(
+      task,
+      "summary",
+      f.client,
+      bot,
+      async () => {
+        if (++checks === 2) throw Error("revoked");
+      },
+      () => {},
+    ),
     AccessDenied,
   );
   assert.equal(f.writes.length, 0);
@@ -135,6 +188,7 @@ test("preflight change blocks POST; already published review is found without a 
       existing.client,
       bot,
       async () => {},
+      () => {},
     ),
     { id: 8, url },
   );
@@ -270,7 +324,14 @@ test("scan limit and conflicting prior body cannot trigger another review", asyn
   ]) {
     const f = fixture({ listed });
     await assert.rejects(
-      publishNativeReview(task, "summary", f.client, bot, async () => {}),
+      publishNativeReview(
+        task,
+        "summary",
+        f.client,
+        bot,
+        async () => {},
+        () => {},
+      ),
       listed.length === 100 ? AccessDenied : AmbiguousExecution,
     );
     assert.equal(f.writes.length, 0);
@@ -371,7 +432,14 @@ test("an exhausted native review marker scan blocks the POST", async () => {
     })),
   });
   await assert.rejects(
-    publishNativeReview(task, "summary", f.client, bot, async () => {}),
+    publishNativeReview(
+      task,
+      "summary",
+      f.client,
+      bot,
+      async () => {},
+      () => {},
+    ),
     AccessDenied,
   );
   assert.equal(f.writes.length, 0);

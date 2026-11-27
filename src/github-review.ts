@@ -125,6 +125,7 @@ export async function publishNativeReview(
   client: Octokit,
   botLogin: string,
   authorize: () => Promise<void>,
+  checkLocal: () => void,
 ) {
   const scope = reviewScope(task);
   const body = `${text}\n\n${scope.marker}`;
@@ -140,6 +141,7 @@ export async function publishNativeReview(
     }
   };
   await check();
+  checkLocal();
   try {
     const existing = await lookupMarker(scope, client, botLogin, body);
     if (existing) return existing;
@@ -152,6 +154,8 @@ export async function publishNativeReview(
     );
   }
   await check();
+  // No await between local generation/policy validation and dispatch.
+  checkLocal();
   try {
     const { data } = await client.request(
       "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",

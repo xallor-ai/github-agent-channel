@@ -93,6 +93,7 @@ async function fixture(
   const replies: string[] = [];
   const postedAt = Math.floor(Date.now() / 1000) * 1000 - 5_000;
   let loseNextComment = false;
+  let loseNextReview = false;
   const commentRow = (body: string, index: number) => ({
     id: 31 + index,
     body,
@@ -140,14 +141,17 @@ async function fixture(
         user: sender,
       });
     if (path.endsWith("/pulls/7"))
-      return json({
-        number: 7,
-        state: closed ? "closed" : "open",
-        merged: false,
-        changed_files: 1,
-        base: { sha: baseSha, ref: baseRef, repo: { id: 2 } },
-        head: { sha: head, repo: { id: 2 } },
-      });
+      return Response.json(
+        {
+          number: 7,
+          state: closed ? "closed" : "open",
+          merged: false,
+          changed_files: 1,
+          base: { sha: baseSha, ref: baseRef, repo: { id: 2 } },
+          head: { sha: head, repo: { id: 2 } },
+        },
+        { headers: { date: new Date().toUTCString() } },
+      );
     if (path === "/graphql") {
       const { query } = JSON.parse(String(init?.body));
       const identity = { databaseId: 2, nameWithOwner: "org/repo" };
@@ -229,6 +233,10 @@ async function fixture(
     if (path.endsWith("/pulls/7/reviews") && method === "POST") {
       const request = JSON.parse(String(init?.body));
       reviews.push(request);
+      if (loseNextReview) {
+        loseNextReview = false;
+        return Response.json({}, { status: 503 });
+      }
       return json({
         id: 22 + reviews.length,
         html_url:
@@ -292,7 +300,7 @@ async function fixture(
     event: string,
     fields: object,
     delivery: string = randomUUID(),
-    expectedStatus = 202,
+    expectedStatus: number | "decision" = 202,
   ) => {
     const body = JSON.stringify({
       installation: { id: 1 },
@@ -311,7 +319,9 @@ async function fixture(
       },
       body,
     });
-    assert.equal(res.status, expectedStatus);
+    if (expectedStatus === "decision")
+      assert.ok([200, 202].includes(res.status));
+    else assert.equal(res.status, expectedStatus);
     return (await res.json()) as { taskId: string; duplicate: boolean };
   };
   const pr = (
@@ -319,6 +329,7 @@ async function fixture(
     sha: string,
     delivery?: string,
     at?: number,
+    status: number | "decision" = 202,
   ) =>
     send(
       "pull_request",
@@ -338,6 +349,7 @@ async function fixture(
         },
       },
       delivery,
+      status,
     );
   const comment = (
     delivery?: string,
@@ -397,6 +409,9 @@ async function fixture(
     },
     resolver,
     reviews,
+    loseReviewAcknowledgement: () => {
+      loseNextReview = true;
+    },
     filesRead,
     replies,
     postedAt,
@@ -797,6 +812,176 @@ test("opened H1 returning after synchronize H2 cannot publish; only H2 produces 
   assert.equal(await agent.once(), false);
 });
 
+// The head seen on GitHub is the *returned* SHA throughout publication; a
+// simple live SHA equality check therefore cannot distinguish the generations.
+for (const events of [
+  [
+    [h2, 2],
+    [h1, 4],
+    [h1, 3],
+  ],
+  [
+    [h1, 4],
+    [h2, 2],
+  ],
+  [
+    [h2, 2],
+    [h1, 2],
+  ],
+] as [string, number][][]) {
+  const sameSecond = events[0][1] === events[1][1];
+  test(
+    "review generation return during execution: " +
+      events.map(([s, t]) => s[0] + "@" + t).join(", "),
+    async (t) => {
+      const f = await fixture(t);
+      const start = Math.floor(Date.now() / 1000) * 1000 - 120_000;
+      const firstDelivery = randomUUID();
+      const first = await f.pr("opened", h1, firstDelivery, start);
+      const ids: string[] = [];
+      let calls = 0;
+      const agent = f.agentWith(async () => {
+        if (++calls === 1) {
+          for (const [sha, at] of events) {
+            const id = randomUUID();
+            ids.push(id);
+            await f.pr("synchronize", sha, id, start + at * 1000, "decision");
+          }
+          assert.equal(f.store.get(first.taskId)?.status, "running");
+        }
+        return json({
+          id: "review-" + calls,
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [
+                { type: "output_text", text: "review generation " + calls },
+              ],
+            },
+          ],
+        });
+      });
+      assert.equal(await agent.once(), true);
+      assert.equal(f.store.get(first.taskId)?.status, "succeeded");
+      const old = f.store.get(first.taskId)!;
+      assert.equal(old.deliveryStatus, "skipped");
+      assert.equal(old.publicationReceipt, null);
+      const candidateIds = events
+        .map(([sha], i) =>
+          sha === h1 ? f.store.activityReceipt(ids[i])?.taskId : null,
+        )
+        .filter((id) => id != null);
+      if (sameSecond) assert.equal(candidateIds.length, 0);
+      else {
+        assert.equal(new Set(candidateIds).size, 1);
+        assert.notEqual(candidateIds[0], first.taskId);
+      }
+      // Duplicate each delivery. This must not rearm the fenced execution or
+      // manufacture an independent publisher for another same-generation event.
+      for (const [i, [sha, at]] of events.entries())
+        await f.pr("synchronize", sha, ids[i], start + at * 1000, "decision");
+      await f.pr("opened", h1, firstDelivery, start, "decision");
+      for (let i = 0; i < events.length + 2; i++) {
+        await agent.once();
+        await f.publisher.tick();
+      }
+      assert.equal(calls, sameSecond ? 1 : 2);
+      assert.deepEqual(
+        f.reviews.map((r) => r.commit_id),
+        sameSecond ? [] : [h1],
+      );
+      assert.equal(f.store.get(first.taskId)?.publicationReceipt, null);
+      if (!sameSecond)
+        assert.equal(f.store.get(candidateIds[0]!)?.publicationReceipt?.id, 23);
+    },
+  );
+}
+
+test("an uncertain Review POST remains unknown across a signed return, never replayed", async (t) => {
+  const f = await fixture(t),
+    start = Date.now() - 60000;
+  let calls = 0;
+  const agent = f.agentWith(async () =>
+    json({
+      id: "r" + ++calls,
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Review" }],
+        },
+      ],
+    }),
+  );
+  const id = randomUUID(),
+    first = await f.pr("opened", h1, id, start);
+  await agent.once();
+  f.loseReviewAcknowledgement();
+  await f.publisher.tick();
+  assert.equal(f.store.get(first.taskId)?.deliveryStatus, "unknown");
+  await f.pr("synchronize", h2, undefined, start + 1000);
+  const next = await f.pr("synchronize", h1, undefined, start + 2000);
+  assert.notEqual(next.taskId, first.taskId);
+  assert.equal((await f.pr("opened", h1, id, start)).taskId, first.taskId);
+  assert.equal(await agent.once(), false);
+  assert.equal(await f.publisher.tick(), false);
+  assert.equal(f.store.get(first.taskId)?.deliveryStatus, "unknown");
+  assert.equal(f.store.get(first.taskId)?.publicationReceipt, null);
+  assert.equal(calls, 1);
+  assert.deepEqual(
+    f.reviews.map((r) => r.commit_id),
+    [h1],
+  );
+});
+test("a coalesced intervening event still separates two returns to B without replaying an already published C", async (t) => {
+  const f = await fixture(t);
+  const start = Math.floor(Date.now() / 1000) * 1000 - 60000;
+  let calls = 0;
+  const agent = f.agentWith(async () =>
+    json({
+      id: "r" + ++calls,
+      status: "completed",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Review " + calls }],
+        },
+      ],
+    }),
+  );
+  f.setHead(h3);
+  const c0 = await f.pr("opened", h3, undefined, start);
+  await agent.once();
+  await f.publisher.tick();
+  const sent = f.store.get(c0.taskId)?.publicationReceipt;
+  assert.ok(sent);
+  const c2id = randomUUID();
+  await f.pr("synchronize", h3, c2id, start + 2000, "decision");
+  const b1id = randomUUID();
+  await f.pr("synchronize", h2, b1id, start + 1000, "decision");
+  f.setHead(h2);
+  const b3 = await f.pr("synchronize", h2, undefined, start + 3000);
+  assert.ok(b3.taskId);
+  const oldB = f.store.activityReceipt(b1id)?.taskId;
+  assert.notEqual(oldB, b3.taskId);
+  await f.pr("synchronize", h3, c2id, start + 2000, "decision");
+  for (let i = 0; i < 5; i++) {
+    await agent.once();
+    await f.publisher.tick();
+  }
+  assert.deepEqual(
+    f.reviews.map((r) => r.commit_id),
+    [h3, h2],
+  );
+  assert.equal(calls, 2);
+  assert.equal(f.store.get(b3.taskId)?.publicationReceipt?.id, 24);
+  if (oldB) assert.equal(f.store.get(oldB)?.publicationReceipt, null);
+  assert.deepEqual(f.store.get(c0.taskId)?.publicationReceipt, sent);
+});
 test("three rapid PR heads leave scoped lineage for stale runs and only the authorized current head publishes", async (t) => {
   const f = await fixture(t);
   const start = Date.now() - 120000;
@@ -806,9 +991,31 @@ test("three rapid PR heads leave scoped lineage for stale runs and only the auth
     third = "";
   const modelPins: string[] = [];
   const agent = f.agentWith(async (_url, init) => {
-    const evidence = JSON.parse(
-      JSON.parse(String(init?.body)).input.at(-1).content,
-    );
+    const messages: { role: string; content: string }[] = JSON.parse(
+      String(init?.body),
+    ).input;
+    const evidence = JSON.parse(messages.at(-1)!.content);
+    const historical = messages
+      .slice(0, -1)
+      .find((m) => m.content.startsWith("Prior published review"));
+    if ([emptyCommit, rewritten].includes(evidence.revision.headSha)) {
+      assert.ok(historical);
+      const prior = JSON.parse(
+        historical.content.slice(historical.content.indexOf("{")),
+      );
+      assert.equal(
+        prior.revision.headSha,
+        evidence.revision.headSha === emptyCommit ? h3 : emptyCommit,
+      );
+      assert.match(prior.excerpt, /THIRD_ONLY/);
+      assert.equal(
+        prior.receiptId,
+        evidence.revision.headSha === emptyCommit ? 23 : 24,
+      );
+      assert.equal(prior.inputLimited, false);
+      if (evidence.revision.headSha === rewritten)
+        assert.doesNotMatch(JSON.stringify(evidence), /THIRD_ONLY/);
+    } else assert.equal(historical, undefined);
     modelPins.push(evidence.revision.headSha);
     if (evidence.revision.headSha === h1) {
       f.setHead(h2);

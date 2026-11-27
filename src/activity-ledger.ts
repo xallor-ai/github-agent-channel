@@ -2,7 +2,8 @@ import type { DatabaseSync } from "node:sqlite";
 import type { NewTask } from "./contracts.js";
 import type { RuntimeProfile } from "./runtime-profile.js";
 import type { WebhookDecision } from "./webhook.js";
-import { fenceReviewGeneration, reviewKey } from "./review-lineage.js";
+import { admitReview } from "./review-generation.js";
+import { reviewKey } from "./review-lineage.js";
 
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const MAX_PER_REPOSITORY = 1024;
@@ -65,7 +66,12 @@ export class ActivityLedger {
   record(
     input: NewTask,
     reason: Reason,
-    createTask?: (key: string) => string,
+    createTask?: (
+      key: string,
+      input?: NewTask,
+      time?: number,
+      receivedAt?: number,
+    ) => string,
     closedAt?: number,
     githubTime?: number,
   ) {
@@ -127,111 +133,38 @@ export class ActivityLedger {
             githubTime ?? null,
           )
       : undefined;
-    let unconfirmedGeneration = false;
-    let generation: { oldId: string; via: string; time: number } | undefined;
-    if (
-      priorTask?.bindingId === input.bindingId &&
-      reason === "review" &&
-      target.kind === "pull_request"
-    ) {
-      const priorTime = priorTask.githubTime;
-      const middle =
-        githubTime !== undefined &&
-        typeof priorTime === "number" &&
-        this.db
-          .prepare(
-            "SELECT id FROM tasks WHERE bindingId=? AND json_extract(target,'$.number')=? AND json_extract(source,'$.event')='pull_request' AND json_extract(eventKey,'$[0]')='review' AND eventKey!=? AND githubTime>? AND githubTime<? ORDER BY githubTime DESC LIMIT 1",
-          )
-          .get(
-            input.bindingId,
-            target.number,
-            taskKey,
-            Math.min(githubTime, priorTime),
-            Math.max(githubTime, priorTime),
-          );
-      if (middle && githubTime! > Number(priorTime)) {
-        if (
-          this.db
-            .prepare(
-              "SELECT 1 FROM reviewGenerations WHERE oldTaskId=? AND successor IS NULL AND returnedAt>=?",
-            )
-            .get(priorTask.id!, githubTime!)
-        )
-          unconfirmedGeneration = true;
-        else {
-          generation = {
-            oldId: String(priorTask.id),
-            via: String(middle.id),
-            time: githubTime!,
-          };
-          priorTask = undefined;
-        }
-      } else if (
-        middle ||
-        this.db
-          .prepare(
-            "SELECT 1 FROM reviewDrifts WHERE taskId=? UNION ALL SELECT 1 FROM reviewGenerations WHERE oldTaskId=? LIMIT 1",
-          )
-          .get(priorTask.id!, priorTask.id!)
-      )
-        unconfirmedGeneration = true;
-    }
-    const taskId = priorTask
-      ? unconfirmedGeneration
-        ? null
-        : String(priorTask.id)
-      : (createTask?.(taskKey) ?? null);
     const receivedAt = Date.now();
-    if (generation && taskId)
-      fenceReviewGeneration(
-        this.db,
-        generation.oldId,
-        generation.via,
-        generation.time,
-        taskId,
-      );
-    // The returning head may have been coalesced before we saw the intervening
-    // revision. Detach the affected logical events and all transport aliases.
-    // Do not manufacture a new task from a receipt without a fresh delegation.
-    if (
+    const decision =
       reason === "review" &&
-      taskId &&
-      !priorTask &&
+      createTask &&
       target.kind === "pull_request" &&
-      githubTime !== undefined
-    ) {
-      const stale = this.db
-        .prepare(
-          `SELECT d.cursor,d.githubTime,t.id AS oldId FROM tasks t JOIN deliveries d ON d.taskId=t.id
-        WHERE t.bindingId=? AND json_extract(t.target,'$.number')=? AND json_extract(t.source,'$.event')='pull_request' AND json_extract(t.eventKey,'$[0]')='review' AND t.eventKey!=? AND t.githubTime<?
-        AND d.bindingId=t.bindingId AND d.reason='review' AND d.duplicate=1 AND d.eventKey IS NOT NULL AND d.githubTime>? ORDER BY d.githubTime`,
-        )
-        .all(input.bindingId, target.number, taskKey, githubTime, githubTime);
-      for (const alias of stale) {
-        fenceReviewGeneration(
-          this.db,
-          String(alias.oldId),
-          taskId,
-          Number(alias.githubTime),
-          null,
-        );
-        this.db
-          .prepare(
-            "UPDATE deliveries SET taskId=NULL,reviewFollowUp='review_generation_unconfirmed' WHERE cursor=? AND taskId=?",
+      target.revision
+        ? admitReview(
+            this.db,
+            input,
+            taskKey,
+            githubTime,
+            closedAt,
+            priorTask as
+              | {
+                  id: string;
+                  bindingId: string;
+                  status: string;
+                  githubTime: number | null;
+                }
+              | undefined,
+            createTask,
           )
-          .run(alias.cursor!, alias.oldId!);
-        this.db
-          .prepare(
-            "UPDATE activities SET data=json_set(data,'$.taskId',NULL) WHERE cursor=?",
-          )
-          .run(alias.cursor!);
-        this.db
-          .prepare(
-            "DELETE FROM reviewCandidates WHERE taskId=? AND githubTime>=?",
-          )
-          .run(alias.oldId!, alias.githubTime!);
-      }
-    }
+        : null;
+    const unconfirmedGeneration = decision?.unconfirmed ?? false;
+    const reused = decision?.reused ?? !!priorTask;
+    const taskId = decision
+      ? decision.taskId
+      : priorTask
+        ? String(priorTask.id)
+        : (createTask?.(taskKey) ?? null);
+    if (decision && (taskId !== priorTask?.id || !reused))
+      priorTask = undefined;
     if (
       !unconfirmedGeneration &&
       priorTask?.status === "queued" &&
@@ -282,7 +215,7 @@ export class ActivityLedger {
         cursor,
         taskId,
         reason,
-        Number(!!priorTask),
+        Number(reused),
         githubTime ?? null,
         unconfirmedGeneration
           ? "review_generation_unconfirmed"
@@ -310,7 +243,7 @@ export class ActivityLedger {
       taskId,
       reason,
       bindingId: input.bindingId,
-      duplicate: !!priorTask,
+      duplicate: reused,
     };
   }
 

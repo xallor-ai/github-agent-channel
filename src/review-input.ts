@@ -22,6 +22,57 @@ const diffSchema = z.strictObject({
   limitations: z.array(z.string().max(256)).max(16),
 });
 export type ReviewDiff = z.infer<typeof diffSchema>;
+// History can suggest findings to revisit, never a verdict on a new pin.
+export const priorReviewSchema = z.strictObject({
+  taskId: z.uuid(),
+  number: z.number().int().positive().safe(),
+  revision: revisionSchema,
+  receiptId: z.number().int().positive().safe(),
+  kind: z.enum(["comment", "review"]),
+  excerpt: z.string().min(1).max(2048),
+  truncated: z.boolean(),
+  inputLimited: z.boolean().nullable(),
+});
+export type PriorReview = z.infer<typeof priorReviewSchema>;
+export function priorReviewContext(
+  current: Task,
+  prior: Task | null | undefined,
+  inputLimited: boolean | null,
+): PriorReview | undefined {
+  if (
+    !prior ||
+    !isAutomaticReview(current) ||
+    !isAutomaticReview(prior) ||
+    current.id === prior.id ||
+    prior.bindingId !== current.bindingId ||
+    prior.installationId !== current.installationId ||
+    prior.repositoryId !== current.repositoryId ||
+    prior.target.kind !== "pull_request" ||
+    current.target.kind !== "pull_request" ||
+    prior.target.number !== current.target.number ||
+    !prior.target.revision ||
+    prior.target.revision.baseRepoId !== current.repositoryId ||
+    prior.target.revision.headRepoId !== current.repositoryId ||
+    prior.status !== "succeeded" ||
+    prior.deliveryStatus !== "sent" ||
+    !prior.outcome?.text ||
+    !prior.publicationReceipt ||
+    prior.publicationReceipt.kind !== prior.outcome.publication.kind
+  )
+    return;
+  const text = prior.outcome.text;
+  const parsed = priorReviewSchema.safeParse({
+    taskId: prior.id,
+    number: prior.target.number,
+    revision: prior.target.revision,
+    receiptId: prior.publicationReceipt.id,
+    kind: prior.publicationReceipt.kind,
+    excerpt: text.slice(0, 2048).replace(/[\uD800-\uDBFF]$/, ""),
+    truncated: text.length > 2048,
+    inputLimited,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
 type Scope = Pick<Task, "target" | "repositoryId" | "source">;
 
 // Both sides verify the same assignment pin and payload budget. A successful

@@ -29,7 +29,7 @@ const reference = (a: PullRevision, b: PullRevision) =>
 export function fenceReviewGeneration(
   db: DatabaseSync,
   oldId: string,
-  via: string,
+  via: string | null,
   returnedAt: number,
   successor: string | null,
 ) {
@@ -63,7 +63,9 @@ export class ReviewLineage {
       pin.data,
     );
     const row = this.db
-      .prepare("SELECT githubTime FROM tasks WHERE id=? AND eventKey=?")
+      .prepare(
+        "SELECT t.githubTime FROM tasks t JOIN reviewEvents e ON e.deliveryId=t.deliveryId AND t.eventKey=e.version AND t.actorId=e.actorId AND e.bindingId=t.bindingId AND t.githubTime IS e.githubTime WHERE t.id=? AND t.eventKey=?",
+      )
       .get(task.id, key);
     if (!row) return;
     return {
@@ -73,7 +75,7 @@ export class ReviewLineage {
       key,
     };
   }
-  record(task: Task, observed: PullRevision) {
+  record(task: Task, observed: PullRevision, githubObservedAt?: number) {
     const p = this.pin(task);
     const v = revisionSchema.safeParse(observed);
     if (
@@ -86,9 +88,16 @@ export class ReviewLineage {
       return false;
     this.db
       .prepare(
-        "INSERT INTO reviewDrifts VALUES(?,?,?) ON CONFLICT(taskId) DO NOTHING",
+        "INSERT INTO reviewDrifts SELECT ?,?,?,COALESCE(MAX(cursor),0),? FROM deliveries WHERE true ON CONFLICT(taskId) DO NOTHING",
       )
-      .run(task.id, JSON.stringify(v.data), Date.now());
+      .run(
+        task.id,
+        JSON.stringify(v.data),
+        Date.now(),
+        Number.isSafeInteger(githubObservedAt) && githubObservedAt! > 0
+          ? githubObservedAt!
+          : null,
+      );
     this.db
       .prepare("UPDATE tasks SET publicationBlocked=1 WHERE id=?")
       .run(task.id);
@@ -135,23 +144,53 @@ export class ReviewLineage {
         .get(task.id);
     if (!p) return null;
     const witness = this.db
-      .prepare(
-        "SELECT g.*,t.target FROM reviewGenerations g JOIN tasks t ON t.id=g.via WHERE oldTaskId=?",
-      )
+      .prepare("SELECT * FROM reviewGenerations WHERE oldTaskId=?")
       .get(task.id);
+    const event =
+      witness?.via &&
+      this.db
+        .prepare(
+          "SELECT e.*,t.id taskId FROM reviewEvents e JOIN deliveries d ON d.deliveryId=e.deliveryId LEFT JOIN tasks t ON t.id=d.taskId AND t.bindingId=e.bindingId AND t.actorId=e.actorId AND t.eventKey=e.version WHERE e.deliveryId=? AND e.bindingId=? AND e.number=? AND e.version!=? AND e.githubTime>? AND e.githubTime<?",
+        )
+        .get(
+          witness.via,
+          task.bindingId,
+          p.number,
+          p.key,
+          p.time,
+          Number(witness.returnedAt),
+        );
+    const returned =
+      witness &&
+      this.db
+        .prepare(
+          "SELECT d.taskId,t.actorId expectedActor,e.actorId FROM reviewEvents e JOIN deliveries d ON d.deliveryId=e.deliveryId LEFT JOIN tasks t ON t.deliveryId=e.deliveryId WHERE e.bindingId=? AND e.number=? AND e.version=? AND e.githubTime=? ORDER BY t.id IS NOT NULL DESC LIMIT 1",
+        )
+        .get(task.bindingId, p.number, p.key, witness.returnedAt!);
     const generation =
+      event &&
+      typeof event === "object" &&
+      returned &&
       witness &&
       p.time !== null &&
       !this.separated(task, p.number, p.time, Number(witness.returnedAt))
         ? {
             source: "signed_review_events",
-            intermediateTaskId: String(witness.via),
-            intermediateRevision: revisionSchema.parse(
-              JSON.parse(String(witness.target)).revision,
-            ),
+            intermediateDeliveryId: String(event.deliveryId),
+            intermediateTaskId:
+              event.taskId === null ? null : String(event.taskId),
+            intermediateRevision: {
+              ...p.r,
+              baseSha: String(JSON.parse(String(event.version))[4]),
+              headSha: String(JSON.parse(String(event.version))[5]),
+            },
             returnedAt: Number(witness.returnedAt),
             successorTaskId:
-              witness.successor === null ? null : String(witness.successor),
+              returned.taskId !== null &&
+              returned.taskId === witness.successor &&
+              returned.expectedActor === returned.actorId
+                ? String(witness.successor)
+                : null,
           }
         : null;
     if (!row)
@@ -160,6 +199,7 @@ export class ReviewLineage {
             previousRevision: p.r,
             observedRevision: null,
             observedAt: null,
+            githubObservedAt: null,
             generation,
             successorTaskId: generation?.successorTaskId ?? null,
             reason: generation
@@ -173,6 +213,8 @@ export class ReviewLineage {
       previousRevision: p.r,
       observedRevision,
       observedAt,
+      githubObservedAt:
+        typeof row.githubObservedAt === "number" ? row.githubObservedAt : null,
       generation,
     };
     const unknown = (reason: string) => ({
@@ -183,53 +225,56 @@ export class ReviewLineage {
     if (p.time === null) return unknown("event_time_unknown");
     // Only signed GitHub times establish order. The read timestamp bounds the
     // observation, never a reason to order two same-second webhook events.
-    const upper = observedAt;
+    const upper = base.githubObservedAt;
+    const targetKey = reviewKey(
+      task.installationId,
+      task.repositoryId,
+      p.number,
+      observedRevision,
+    );
+    const predicate =
+      "e.bindingId=? AND e.number=? AND (e.githubTime IS NULL OR e.githubTime>=?) AND (d.cursor<=? OR (? IS NOT NULL AND e.githubTime<=?))";
+    const args = [task.bindingId, p.number, p.time, row.cursor!, upper, upper];
     const candidates = this.db
       .prepare(
-        "SELECT id,githubTime FROM tasks WHERE bindingId=? AND eventKey=? AND (githubTime IS NULL OR githubTime BETWEEN ? AND ?) LIMIT 2",
+        "SELECT t.id taskId,e.githubTime,d.cursor FROM reviewEvents e JOIN deliveries d ON e.deliveryId=d.deliveryId LEFT JOIN tasks t ON t.id=d.taskId AND t.eventKey=e.version AND t.bindingId=e.bindingId WHERE " +
+          predicate +
+          " AND e.version=? ORDER BY e.githubTime IS NULL DESC,e.githubTime DESC LIMIT 1",
       )
-      .all(
-        task.bindingId,
-        reviewKey(
-          task.installationId,
-          task.repositoryId,
-          p.number,
-          observedRevision,
-        ),
-        p.time,
-        upper,
-      );
-    if (!candidates.length) return unknown("no_matching_task");
+      .get(...args, targetKey);
+    if (!candidates) return unknown("no_matching_task");
+    const time = candidates.githubTime;
     if (
-      candidates.length !== 1 ||
-      typeof candidates[0].githubTime !== "number" ||
-      candidates[0].githubTime <= p.time
+      typeof time !== "number" ||
+      time <= p.time ||
+      candidates.taskId === null ||
+      (upper !== null &&
+        (time > upper ||
+          (time === upper && Number(candidates.cursor) > Number(row.cursor))))
     )
       return unknown("ambiguous_order");
-    const c = candidates[0];
-    if (this.separated(task, p.number, p.time, upper))
+    if (
+      this.separated(task, p.number, p.time, upper ?? Number.MAX_SAFE_INTEGER)
+    )
       return unknown("lifecycle_uncertain");
-    const competing = this.db
+    const conflict = this.db
       .prepare(
-        "SELECT 1 FROM tasks WHERE bindingId=? AND json_extract(target,'$.kind')='pull_request' AND json_extract(target,'$.number')=? AND json_extract(source,'$.event')='pull_request' AND json_extract(eventKey,'$[0]')='review' AND eventKey!=? AND (githubTime IS NULL OR githubTime BETWEEN ? AND ?) LIMIT 1",
+        "SELECT 1 FROM reviewEvents e JOIN deliveries d ON d.deliveryId=e.deliveryId WHERE e.bindingId=? AND e.number=? AND (e.githubTime IS NULL OR (e.githubTime>=? AND (? IS NULL OR e.githubTime<=?))) AND (e.version!=? OR d.taskId IS NOT ?) LIMIT 1",
       )
       .get(
         task.bindingId,
         p.number,
-        reviewKey(
-          task.installationId,
-          task.repositoryId,
-          p.number,
-          observedRevision,
-        ),
-        c.githubTime!,
+        time,
         upper,
+        upper,
+        targetKey,
+        candidates.taskId!,
       );
-    return competing
+    return conflict
       ? unknown("ambiguous_order")
       : {
           ...base,
-          successorTaskId: String(c.id),
+          successorTaskId: String(candidates.taskId),
           reason: "matching_review_task",
         };
   }
@@ -258,7 +303,7 @@ export class ReviewLineage {
     if (!p || p.time === null) return null;
     const rows = this.db
       .prepare(
-        "SELECT id,githubTime,target,publicationReceipt FROM tasks WHERE bindingId=? AND json_extract(target,'$.kind')='pull_request' AND json_extract(target,'$.number')=? AND json_extract(eventKey,'$[0]')='review' AND status='succeeded' AND deliveryStatus='sent' AND githubTime<=? AND id!=? ORDER BY githubTime DESC LIMIT 2",
+        "SELECT id,githubTime,target,publicationReceipt FROM tasks WHERE bindingId=? AND json_extract(target,'$.kind')='pull_request' AND json_extract(target,'$.number')=? AND json_extract(eventKey,'$[0]')='review' AND status='succeeded' AND deliveryStatus='sent' AND (githubTime IS NULL OR githubTime<=?) AND id!=? ORDER BY githubTime IS NULL DESC,githubTime DESC LIMIT 2",
       )
       .all(task.bindingId, p.number, p.time, task.id);
     const row = rows[0];
