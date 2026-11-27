@@ -1429,3 +1429,54 @@ test("an accepted automatic review without patches delivers one failure notice, 
   assert.ok(notices[0].includes(h1));
   assert.match(notices[0], /代码评审未完成/);
 });
+
+test("a gateway timeout during a pinned file read yields one failure comment, not a Review", async (t) => {
+  const f = await fixture(t, false, undefined, false);
+  const { taskId } = await f.pr("opened", h1);
+  let timeouts = 0;
+  const notices: string[] = [];
+  t.mock.method(f.github, "publishComment", async (_task, body: string) => {
+    notices.push(body);
+    return {
+      id: 19,
+      url: "https://github.com/org/repo/pull/7#issuecomment-19",
+    };
+  });
+  const agent = f.agentWith(
+    async () =>
+      json({
+        status: "completed",
+        id: "r1",
+        output: [
+          {
+            type: "function_call",
+            call_id: "c1",
+            name: "read_file",
+            arguments: JSON.stringify({ path: "src/example.ts" }),
+          },
+        ],
+      }),
+    async (input, init) => {
+      if (
+        String(input).endsWith("/tool") &&
+        JSON.parse(String(init?.body)).name === "read_file"
+      ) {
+        timeouts++;
+        return new Response(null, { status: 504 });
+      }
+      return fetch(input, init);
+    },
+  );
+  await agent.once();
+  assert.equal(timeouts, 1);
+  assert.equal(await f.publisher.tick(), true);
+  assert.equal(await f.publisher.tick(), false);
+  assert.equal(f.store.get(taskId)?.status, "failed");
+  assert.equal(f.store.get(taskId)?.deliveryStatus, "sent");
+  assert.equal(f.store.get(taskId)?.publicationReceipt?.kind, "comment");
+  assert.equal(f.reviews.length, 0);
+  assert.equal(notices.length, 1);
+  assert.ok(
+    notices[0].includes(taskId) && notices[0].includes("tool_call_failed"),
+  );
+});

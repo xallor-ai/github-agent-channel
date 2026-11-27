@@ -334,22 +334,18 @@ test("native review is never downgraded or replayed", async (t) => {
 });
 
 test("a confirmed analysis failure sends one status notice without inventing an outcome; unknown execution is silent", async (t) => {
-  for (const status of ["failed", "unknown"] as const) {
+  for (const result of [
+    { status: "failed", failure: "no_final_answer" },
+    { status: "failed", failure: "tool_call_failed" },
+    { status: "unknown", failure: "runtime_transport" },
+  ] as const) {
+    const { status } = result;
     const store = new TaskStore(":memory:");
     t.after(() => store.close());
     seedBinding(store, input, "worker");
     const task = store.accept(input).task;
     store.claimAssignment("worker", "hash", Date.now() + 60000);
-    store.finishAssignment(
-      task.id,
-      "worker",
-      "hash",
-      {
-        status,
-        failure: status === "failed" ? "no_final_answer" : "runtime_transport",
-      },
-      "digest",
-    );
+    store.finishAssignment(task.id, "worker", "hash", result, "digest");
     if (status === "unknown") store.resolveUnknown(task.id, "failed");
     const notices: string[] = [];
     const worker = new DeliveryWorker(
@@ -368,7 +364,7 @@ test("a confirmed analysis failure sends one status notice without inventing an 
     await worker.tick();
     assert.equal(notices.length, status === "failed" ? 1 : 0);
     if (status === "failed") {
-      assert.match(notices[0]!, /no_final_answer/);
+      assert.ok(notices[0]!.includes(result.failure));
       assert.equal(store.get(task.id)?.deliveryStatus, "sent");
     }
     assert.equal(store.get(task.id)?.status, "failed");
