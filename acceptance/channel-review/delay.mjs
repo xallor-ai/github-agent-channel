@@ -1,1 +1,1 @@
-export function readingDelay(delay) { return delay || 250; }
+export function readingDelay(delay) { return delay ?? 250; }
