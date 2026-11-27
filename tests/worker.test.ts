@@ -102,6 +102,80 @@ test("delivery worker publishes persisted connector result once", async (t) => {
     url: "https://github.com/org/repo/issues/4#issuecomment-10",
   });
 });
+test("generation change after dispatch cannot erase a confirmed receipt or replay an uncertain POST", async (t) => {
+  for (const lost of [false, true]) {
+    const s = new TaskStore(":memory:");
+    t.after(() => s.close());
+    seedBinding(s, input, "worker", ["pull_request.synchronize"]);
+    const receive = (head: string, time: number) =>
+      s.observe({
+        input: {
+          ...input,
+          deliveryId: "d" + time,
+          source: { event: "pull_request", action: "synchronize" },
+          target: {
+            kind: "pull_request",
+            number: 4,
+            revision: {
+              baseRepoId: 2,
+              headRepoId: 2,
+              baseSha: "a".repeat(40),
+              headSha: head.repeat(40),
+            },
+          },
+        },
+        reason: "review",
+        execute: true,
+        githubTime: time,
+      }).taskId!;
+    const old = receive("b", 1000);
+    s.claimAssignment("worker", "lease", Date.now() + 60_000);
+    s.finishAssignment(
+      old,
+      "worker",
+      "lease",
+      {
+        status: "succeeded",
+        outcome: {
+          text: "First B findings",
+          artifacts: [],
+          publication: { kind: "review" },
+        },
+      },
+      "old",
+    );
+    let next = "",
+      writes = 0;
+    const receipt = {
+      id: 123,
+      url: "https://github.com/org/repo/pull/4#pullrequestreview-123",
+    };
+    const worker = new DeliveryWorker(
+      s,
+      github({
+        publishReview: async () => {
+          writes++;
+          assert.equal(s.get(old)?.deliveryStatus, "sending");
+          receive("c", 2000);
+          next = receive("b", 3000);
+          if (lost) throw new AmbiguousExecution("lost acknowledgement");
+          return receipt;
+        },
+      }),
+    );
+    await worker.tick();
+    assert.notEqual(next, old);
+    assert.equal(s.publicationAllowed(old), false);
+    assert.equal(s.get(old)?.deliveryStatus, lost ? "unknown" : "sent");
+    assert.deepEqual(
+      s.get(old)?.publicationReceipt,
+      lost ? null : { kind: "review", ...receipt },
+    );
+    assert.equal(s.get(next)?.publicationReceipt, null);
+    assert.equal(await worker.tick(), false);
+    assert.equal(writes, 1);
+  }
+});
 test("lost publication result becomes unknown and is never retried automatically", async (t) => {
   const { store, task } = ready(t);
   let attempts = 0;

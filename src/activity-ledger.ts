@@ -2,6 +2,8 @@ import type { DatabaseSync } from "node:sqlite";
 import type { NewTask } from "./contracts.js";
 import type { RuntimeProfile } from "./runtime-profile.js";
 import type { WebhookDecision } from "./webhook.js";
+import { admitReview } from "./review-generation.js";
+import { reviewKey } from "./review-lineage.js";
 
 const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const MAX_PER_REPOSITORY = 1024;
@@ -64,7 +66,12 @@ export class ActivityLedger {
   record(
     input: NewTask,
     reason: Reason,
-    createTask?: (key: string) => string,
+    createTask?: (
+      key: string,
+      input?: NewTask,
+      time?: number,
+      receivedAt?: number,
+    ) => string,
     closedAt?: number,
     githubTime?: number,
   ) {
@@ -102,21 +109,19 @@ export class ActivityLedger {
     const target = input.target;
     const taskKey =
       reason === "review" && target.kind === "pull_request" && target.revision
-        ? JSON.stringify([
-            "review",
+        ? reviewKey(
             input.installationId,
             input.repositoryId,
             target.number,
-            target.revision.baseSha,
-            target.revision.headSha,
-          ])
+            target.revision,
+          )
         : key;
-    const priorTask = createTask
+    let priorTask = createTask
       ? this.db
           .prepare(
-            `SELECT id,bindingId,status FROM tasks WHERE eventKey=?
+            `SELECT id,bindingId,status,githubTime FROM tasks WHERE eventKey=?
           AND (bindingId=? OR status!='rejected' OR EXISTS(SELECT 1 FROM assignments WHERE taskId=tasks.id))
-          AND (? IS NULL OR githubTime>?) ORDER BY (bindingId=?) DESC, rowid DESC LIMIT 1`,
+          AND (? IS NULL OR githubTime>?) ORDER BY (bindingId=?) DESC, (githubTime<=?) DESC, CASE WHEN githubTime<=? THEN githubTime END DESC, rowid DESC LIMIT 1`,
           )
           .get(
             taskKey,
@@ -124,13 +129,44 @@ export class ActivityLedger {
             closedAt ?? null,
             closedAt ?? null,
             input.bindingId,
+            githubTime ?? null,
+            githubTime ?? null,
           )
       : undefined;
-    const taskId = priorTask
-      ? String(priorTask.id)
-      : (createTask?.(taskKey) ?? null);
     const receivedAt = Date.now();
+    const decision =
+      reason === "review" &&
+      createTask &&
+      target.kind === "pull_request" &&
+      target.revision
+        ? admitReview(
+            this.db,
+            input,
+            taskKey,
+            githubTime,
+            closedAt,
+            priorTask as
+              | {
+                  id: string;
+                  bindingId: string;
+                  status: string;
+                  githubTime: number | null;
+                }
+              | undefined,
+            createTask,
+          )
+        : null;
+    const unconfirmedGeneration = decision?.unconfirmed ?? false;
+    const reused = decision?.reused ?? !!priorTask;
+    const taskId = decision
+      ? decision.taskId
+      : priorTask
+        ? String(priorTask.id)
+        : (createTask?.(taskKey) ?? null);
+    if (decision && (taskId !== priorTask?.id || !reused))
+      priorTask = undefined;
     if (
+      !unconfirmedGeneration &&
       priorTask?.status === "queued" &&
       priorTask.bindingId === input.bindingId &&
       reason === "review" &&
@@ -179,11 +215,13 @@ export class ActivityLedger {
         cursor,
         taskId,
         reason,
-        Number(!!priorTask),
+        Number(reused),
         githubTime ?? null,
-        priorTask && priorTask.bindingId !== input.bindingId
-          ? "check_prior_review_before_delegating"
-          : null,
+        unconfirmedGeneration
+          ? "review_generation_unconfirmed"
+          : priorTask && priorTask.bindingId !== input.bindingId
+            ? "check_prior_review_before_delegating"
+            : null,
       );
     this.db
       .prepare("DELETE FROM activities WHERE receivedAt<=?")
@@ -205,7 +243,7 @@ export class ActivityLedger {
       taskId,
       reason,
       bindingId: input.bindingId,
-      duplicate: !!priorTask,
+      duplicate: reused,
     };
   }
 

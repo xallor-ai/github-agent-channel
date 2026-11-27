@@ -1,4 +1,9 @@
-import { AccessDenied, type GitHubClient } from "./contracts.js";
+import {
+  AccessDenied,
+  observedReviewDrift,
+  PullTargetRejected,
+  type GitHubClient,
+} from "./contracts.js";
 import { DraftPublicationUncertain } from "./github-publication.js";
 import { noticeFailureCode } from "./runtime-failure.js";
 import { TaskStore } from "./store.js";
@@ -33,7 +38,8 @@ export class DeliveryWorker {
         }
         try {
           await this.github.authorize(delivery);
-        } catch {
+        } catch (error) {
+          if (observedReviewDrift(delivery, error)) throw error;
           // No publication call has been made. Do not block the queue as an unknown write.
           this.store.markDelivery(
             delivery.id,
@@ -111,15 +117,27 @@ export class DeliveryWorker {
           ...result,
         });
       } catch (error) {
+        const observed = observedReviewDrift(delivery, error);
+        if (observed)
+          this.store.recordReviewDrift(
+            delivery.id,
+            observed.revision,
+            observed.githubAt,
+          );
         this.store.markDelivery(
           delivery.id,
           error instanceof AccessDenied ? "failed" : "unknown",
           undefined,
           error instanceof DraftPublicationUncertain
             ? error.message
-            : error instanceof AccessDenied && obsoleteSelection()
-              ? staleSelectionMessage
-              : undefined,
+            : observed
+              ? "PR revision changed before publication"
+              : error instanceof PullTargetRejected &&
+                  error.reason === "pr_review_generation_changed"
+                ? "A later PR review generation prevents publication"
+                : error instanceof AccessDenied && obsoleteSelection()
+                  ? staleSelectionMessage
+                  : undefined,
         );
       }
       return true;

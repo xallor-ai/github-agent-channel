@@ -4,6 +4,7 @@ import {
   type ReactionResult,
 } from "./owner-receipts.js";
 import { DatabaseSync } from "node:sqlite";
+import { expireReviewPayloads } from "./review-generation.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -41,6 +42,9 @@ import {
 } from "./tool-audit.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 import { ClarificationLedger } from "./clarification-ledger.js";
+import { ReviewLineage } from "./review-lineage.js";
+import type { ReviewInputSummary } from "./review-input.js";
+import type { PullRevision } from "./contracts.js";
 
 // Prior failed tasks also used pending. Only explicitly diagnosed model failures may enqueue a notice.
 const publishableStatus =
@@ -65,6 +69,7 @@ export class TaskStore {
   private readonly ownerReceipts: OwnerReceipts;
   private readonly ledger: ActivityLedger;
   private readonly questions: ClarificationLedger;
+  private readonly reviews: ReviewLineage;
   private readonly audit: ToolAuditStore;
   readonly registry: BindingRegistry;
   private closed = false;
@@ -75,6 +80,7 @@ export class TaskStore {
       initializeTaskSchema(this.db);
       this.ledger = new ActivityLedger(this.db);
       this.questions = new ClarificationLedger(this.db);
+      this.reviews = new ReviewLineage(this.db);
       this.ownerReceipts = new OwnerReceipts(this.db, this.ledger);
       this.registry = new BindingRegistry(this.db);
       this.audit = new ToolAuditStore(
@@ -146,6 +152,45 @@ export class TaskStore {
   }
   conversation(id: string) {
     return this.questions.conversation(id);
+  }
+  recordReviewDrift(
+    id: string,
+    observed: PullRevision,
+    githubObservedAt?: number,
+  ) {
+    this.transaction(() => {
+      const task = this.get(id);
+      if (
+        task &&
+        this.activeBinding(task.installationId, task.repositoryId)?.id ===
+          task.bindingId
+      )
+        this.reviews.record(task, observed, githubObservedAt);
+    });
+  }
+  reviewPublicationCurrent(id: string) {
+    return this.reviews.publicationCurrent(id);
+  }
+  reviewLineage(id: string) {
+    const t = this.get(id);
+    return t ? this.reviews.get(t) : null;
+  }
+  previousPublishedReview(id: string) {
+    const t = this.get(id);
+    return t ? this.reviews.previous(t) : null;
+  }
+  recordReviewInput(id: string, summary: ReviewInputSummary) {
+    this.transaction(() => {
+      const t = this.get(id);
+      if (
+        t?.status === "running" &&
+        this.activeBinding(t.installationId, t.repositoryId)?.id === t.bindingId
+      )
+        this.reviews.storeInput(t, summary);
+    });
+  }
+  reviewInput(id: string) {
+    return this.reviews.input(id);
   }
   private decodeTask(row: Record<string, unknown>): Task {
     const {
@@ -291,13 +336,14 @@ export class TaskStore {
         input,
         isStale ? "closed" : reason,
         execute && !isStale
-          ? (eventKey) => {
+          ? (eventKey, recovered, recoveredTime, receivedAt) => {
               const id = this.enqueue(
                 match?.reason === "clarification_reply"
                   ? { ...input, prompt: match.answer }
-                  : input,
+                  : (recovered ?? input),
                 eventKey,
-                githubTime,
+                recoveredTime ?? githubTime,
+                receivedAt,
               );
               if (match) this.questions.link(match, id);
               return id;
@@ -375,6 +421,12 @@ export class TaskStore {
   }
   private fenceThread(input: ThreadClosure) {
     const { githubTime } = input;
+    if (input.target.kind === "pull_request")
+      this.reviews.noteClose(
+        input.repositoryId,
+        input.target.number,
+        githubTime,
+      );
     const scope = [input.repositoryId, threadKey(input.target)];
     this.questions.fence(
       input.repositoryId,
@@ -503,6 +555,7 @@ export class TaskStore {
     this.transaction(() => this.expireInTransaction(now));
   }
   private expireInTransaction(now: number): void {
+    expireReviewPayloads(this.db, now);
     this.questions.expireCandidates(now);
     this.expireQueuedAnswers(now);
     this.db
@@ -707,6 +760,7 @@ export class TaskStore {
           throw new InvalidAssignmentOutcome("Invalid assignment outcome");
         }
       }
+      const staleReview = this.reviews.hasDrift(task.id);
       const withheld =
         task.continuation &&
         this.db
@@ -727,10 +781,12 @@ export class TaskStore {
               ? result.failure
                 ? failedExecutionMessage(result.failure)
                 : "Connector execution failed"
-              : withheld
-                ? "Continuation retained; PR merge snapshot: " + withheld
-                : null,
-          withheld
+              : staleReview
+                ? "Automatic review retained; authorized PR revision changed"
+                : withheld
+                  ? "Continuation retained; PR merge snapshot: " + withheld
+                  : null,
+          withheld || staleReview
             ? "skipped"
             : result.status === "succeeded"
               ? outcome?.publication.kind === "none"

@@ -30,7 +30,7 @@ export async function checkPull(
   const expected = task.target.kind === "pull_request" && task.target.revision;
   if (!expected && (!resolving || task.source.event !== "issue_comment"))
     throw new AccessDenied("Missing target pull request revision");
-  const { data } = await client.request(
+  const { data, headers } = await client.request(
     "GET /repos/{owner}/{repo}/pulls/{pull_number}",
     params,
   );
@@ -59,19 +59,33 @@ export async function checkPull(
     baseRepoId: data.base.repo.id,
     headRepoId: data.head.repo.id,
   };
-  const publication = task.outcome?.publication;
-  if (
-    (publication?.kind === "comment" || publication?.kind === "review") &&
-    publication.expectedBaseRef !== undefined &&
-    publication.expectedBaseRef !== data.base.ref
-  )
-    throw new PullTargetRejected("pr_revision_changed");
   if (
     expected &&
     (expected.baseSha !== revision.baseSha ||
       expected.headSha !== revision.headSha ||
       expected.baseRepoId !== revision.baseRepoId ||
       expected.headRepoId !== revision.headRepoId)
+  ) {
+    // Only an IMF-fixdate from the same authenticated response can be compared
+    // with GitHub event times. Never substitute the channel's local clock.
+    const raw = headers.date;
+    const ms =
+      typeof raw === "string" && raw.length === 29 ? Date.parse(raw) : NaN;
+    const observedGithubAt =
+      Number.isSafeInteger(ms) && ms > 0 && new Date(ms).toUTCString() === raw
+        ? ms
+        : undefined;
+    throw new PullTargetRejected(
+      "pr_revision_changed",
+      revision,
+      observedGithubAt,
+    );
+  }
+  const publication = task.outcome?.publication;
+  if (
+    (publication?.kind === "comment" || publication?.kind === "review") &&
+    publication.expectedBaseRef !== undefined &&
+    publication.expectedBaseRef !== data.base.ref
   )
     throw new PullTargetRejected("pr_revision_changed");
   return { revision, changedFiles: data.changed_files };

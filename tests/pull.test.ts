@@ -27,9 +27,13 @@ const input: NewTask = {
   target: { kind: "issue", number: 4 },
   prompt: "secret issue prompt",
 };
-async function fixture(t: test.TestContext, timeoutMs = 60000) {
+async function fixture(
+  t: test.TestContext,
+  timeoutMs = 60000,
+  events = ["issue_comment.created"],
+) {
   const store = new TaskStore(":memory:");
-  seedBinding(store, input, "only-worker");
+  seedBinding(store, input, "only-worker", events);
   let authorized = true,
     authorizations = 0,
     reads = 0,
@@ -182,6 +186,117 @@ test("connector auth precedes claim and caller auth precedes prompt disclosure",
     ((await response.json()) as { task: { id: string } }).task.id,
     next.id,
   );
+});
+test("a successful scoped merge-facts tool only records an open final PR revision, never a test-merge candidate or closed state", async (t) => {
+  for (const state of ["closed", "open"] as const) {
+    const f = await fixture(t, 60000, ["pull_request.synchronize"]);
+    const pin = {
+      baseRepoId: 2,
+      headRepoId: 2,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+    };
+    const event = {
+      ...input,
+      source: { event: "pull_request", action: "synchronize" },
+      target: { kind: "pull_request" as const, number: 4, revision: pin },
+    };
+    const { taskId } = f.store.observe({
+      input: event,
+      execute: true,
+      reason: "review",
+      githubTime: Date.now() - 2000,
+    });
+    assert.ok(taskId);
+    const { leaseToken } = await (
+      await f.post("claim", { runtime: fixtureAgent })
+    ).json();
+    const repository = "org/repo",
+      newHead = "d".repeat(40);
+    f.github.readMergeFacts = async () => ({
+      repository,
+      number: 4,
+      observedAt: new Date().toISOString(),
+      base: { repository, id: 2, sha: pin.baseSha },
+      head: { repository, id: 2, sha: pin.headSha },
+      state,
+      stable: false,
+      draft: false,
+      conflict: "unknown",
+      testMergeSha: "c".repeat(40),
+      baseRefName: "main",
+      headChecksKnown: false,
+      testMergeChecksKnown: false,
+      observedRevision: {
+        baseRefName: "main",
+        baseSha: pin.baseSha,
+        headSha: newHead,
+      },
+      rules: {
+        known: false,
+        checks: [],
+        reviewRequired: null,
+        queueRequired: null,
+      },
+      checks: [],
+      review: "unknown",
+      otherGates: "unknown",
+      queue: {
+        entry: "unknown",
+        candidateSha: null,
+        candidateStatus: "unknown",
+      },
+      missing: [],
+    });
+    assert.equal(
+      (
+        await f.post("tasks/" + taskId + "/tool", {
+          leaseToken,
+          name: "read_merge_facts",
+          args: {},
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      f.store.reviewLineage(taskId)?.observedRevision.headSha,
+      state === "open" ? newHead : undefined,
+    );
+  }
+});
+test("a signed ABA fence during claim authorization prevents disclosing the original, still-undelivered generation", async (t) => {
+  const f = await fixture(t, 60000, ["pull_request.synchronize"]);
+  const receive = (head: string, time: number, deliveryId: string) =>
+    f.store.observe({
+      input: {
+        ...input,
+        deliveryId,
+        source: { event: "pull_request", action: "synchronize" },
+        target: {
+          kind: "pull_request",
+          number: 4,
+          revision: {
+            baseRepoId: 2,
+            headRepoId: 2,
+            baseSha: "a".repeat(40),
+            headSha: head.repeat(40),
+          },
+        },
+      },
+      execute: true,
+      reason: "review",
+      githubTime: time,
+    });
+  const first = receive("b", 1000, "first").taskId!;
+  f.github.authorize = async () => {
+    receive("c", 2000, "via");
+    receive("b", 3000, "back");
+  };
+  const claim = await f.post("claim", { runtime: fixtureAgent });
+  assert.equal(claim.status, 204);
+  assert.equal(await claim.text(), "");
+  assert.equal(f.store.get(first)?.status, "rejected");
+  assert.equal(f.store.get(first)?.runtime, null);
 });
 test("claim one assignment, authorize scoped tools, persist idempotent result and publish once", async (t) => {
   const f = await fixture(t);

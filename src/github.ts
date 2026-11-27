@@ -14,6 +14,8 @@ import { Octokit } from "@octokit/core";
 import {
   AccessDenied,
   AmbiguousExecution,
+  PullTargetRejected,
+  isAutomaticReview,
   type BindingLookup,
   type ChannelConfig,
   type GitHubClient,
@@ -40,6 +42,7 @@ export class OctokitGitHubClient implements GitHubClient {
     private readonly verifyManager: (task: Task) => Promise<void>,
     fetchImpl: typeof fetch = fetch,
     private readonly publicationAllowed: (id: string) => boolean = () => true,
+    private readonly reviewPublicationCurrent?: (id: string) => boolean,
   ) {
     this.#config = config;
     this.#fetch = fetchImpl;
@@ -69,6 +72,10 @@ export class OctokitGitHubClient implements GitHubClient {
     )
       throw new AccessDenied("Task scope is not enabled");
     return found;
+  }
+  #checkReviewGeneration(task: Task) {
+    if (isAutomaticReview(task) && !this.reviewPublicationCurrent?.(task.id))
+      throw new PullTargetRejected("pr_review_generation_changed");
   }
   async #client(task: Task, write = false): Promise<Octokit> {
     this.#binding(task);
@@ -147,10 +154,21 @@ export class OctokitGitHubClient implements GitHubClient {
     this.#binding(task, evidenceRead);
     return client;
   }
+  async #checkPull(client: Octokit, task: Task, resolving = false) {
+    try {
+      return await checkPull(client, task, resolving);
+    } catch (e) {
+      // A mismatch is durable evidence only while the installation, manager and
+      // original actor still authorize this read. Never substitute an API error.
+      if (e instanceof PullTargetRejected && e.observedRevision)
+        await this.#authorized(task);
+      throw e;
+    }
+  }
   async #checkedClient(task: Task) {
     const client = await this.#authorized(task);
     if (task.target.kind === "pull_request") {
-      await checkPull(client, task);
+      await this.#checkPull(client, task);
     } else if (task.target.kind === "issue") {
       await this.#readOpenDiscussion(client, task, task.target.number);
     }
@@ -172,7 +190,7 @@ export class OctokitGitHubClient implements GitHubClient {
   }
   async resolvePullRevision(task: Task) {
     const client = await this.#authorized(task);
-    const { revision } = await checkPull(client, task, true);
+    const { revision } = await this.#checkPull(client, task, true);
     this.#binding(task);
     return revision;
   }
@@ -276,7 +294,7 @@ export class OctokitGitHubClient implements GitHubClient {
   }
   async readPullDiff(task: Task) {
     const client = await this.#authorized(task);
-    const initial = await checkPull(client, task);
+    const initial = await this.#checkPull(client, task);
     this.#binding(task);
     return collectPullDiff(client, task, initial, () => this.authorize(task));
   }
@@ -340,7 +358,8 @@ export class OctokitGitHubClient implements GitHubClient {
     )
       throw new AccessDenied("Task has no issue scope");
     const client = await this.#authorized(task);
-    if (task.target.kind === "pull_request") await checkPull(client, task);
+    if (task.target.kind === "pull_request")
+      await this.#checkPull(client, task);
     const data = await this.#readOpenDiscussion(
       client,
       task,
@@ -411,7 +430,8 @@ export class OctokitGitHubClient implements GitHubClient {
   private async authorizeWrite(task: Task): Promise<void> {
     try {
       await this.authorize(task);
-    } catch {
+    } catch (e) {
+      if (e instanceof PullTargetRejected) throw e;
       throw new AccessDenied("Cannot confirm authorization for GitHub write");
     }
   }
@@ -441,10 +461,11 @@ export class OctokitGitHubClient implements GitHubClient {
       text,
       client,
       this.#config.github.botLogin,
-      async () => {
-        await this.authorize(task);
+      () => this.authorize(task),
+      () => {
         if (this.#binding(task).nativeReview !== true)
           throw new AccessDenied("Native review publication is not enabled");
+        this.#checkReviewGeneration(task);
       },
     );
   }
@@ -540,8 +561,9 @@ export class OctokitGitHubClient implements GitHubClient {
     const client = await this.#authorized(task);
     if (task.target.kind === "pull_request") {
       try {
-        await checkPull(client, task);
-      } catch {
+        await this.#checkPull(client, task);
+      } catch (e) {
+        if (e instanceof PullTargetRejected) throw e;
         throw new AccessDenied("Cannot confirm target pull request revision");
       }
       this.#binding(task);
@@ -584,6 +606,7 @@ export class OctokitGitHubClient implements GitHubClient {
     // Re-check after the paginated read, immediately before the outbound effect.
     await this.authorizeWrite(task);
     this.#binding(task);
+    this.#checkReviewGeneration(task);
     try {
       const { data } = await client.request(
         "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",

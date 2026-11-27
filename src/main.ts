@@ -86,6 +86,7 @@ try {
     },
     fetch,
     (id) => store.publicationAllowed(id),
+    (id) => store.reviewPublicationCurrent(id),
   );
   const coordinator = new PullCoordinator(
     store,

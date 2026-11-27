@@ -131,6 +131,7 @@ export type PublicationReceipt = {
   createdAt?: number;
 };
 export interface Task extends NewTask {
+  previousReview?: import("./review-input.js").PriorReview;
   continuation?: {
     rootTaskId: string;
     questionTaskId: string;
@@ -214,10 +215,30 @@ export class PullTargetRejected extends AccessDenied {
     readonly reason:
       | "pr_open_unconfirmed"
       | "pr_outside_binding"
+      | "pr_review_generation_changed"
       | "pr_revision_changed",
+    readonly observedRevision?: PullRevision,
+    readonly observedGithubAt?: number,
   ) {
     super(reason);
   }
+}
+export function isAutomaticReview(
+  task: Pick<Task, "target" | "source">,
+): boolean {
+  return (
+    task.source.event === "pull_request" &&
+    (task.source.action === "opened" || task.source.action === "synchronize") &&
+    task.target.kind === "pull_request"
+  );
+}
+export function observedReviewDrift(task: Task, error: unknown) {
+  return isAutomaticReview(task) &&
+    error instanceof PullTargetRejected &&
+    error.reason === "pr_revision_changed" &&
+    error.observedRevision
+    ? { revision: error.observedRevision, githubAt: error.observedGithubAt }
+    : undefined;
 }
 export class AmbiguousExecution extends Error {}
 

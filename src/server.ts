@@ -15,6 +15,7 @@ import { normalizeWebhook } from "./webhook.js";
 import { AccessDenied } from "./contracts.js";
 import { assessMerge } from "./merge-assessment.js";
 import { reactionFailure } from "./github-reaction.js";
+import { isAutomaticReview } from "./contracts.js";
 function authorized(header: string | undefined, token: string) {
   const a = Buffer.from(header ?? "");
   const b = Buffer.from(`Bearer ${token}`);
@@ -133,6 +134,11 @@ export function createChannelServer(
             ...receipt,
             requestedDeliveryId: match![1],
             ownerReceipt: store.ownerReceipt(match![1]),
+            reviewLineage:
+              receipt.taskId &&
+              store.get(receipt.taskId)?.bindingId === receipt.bindingId
+                ? store.reviewLineage(receipt.taskId)
+                : null,
           });
         return;
       }
@@ -183,7 +189,7 @@ export function createChannelServer(
           return;
         }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/conversation|\/lookup-review|\/merge-facts|\/reconcile-reaction|\/reconcile-clarification)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/thread|\/conversation|\/review-lineage|\/lookup-review|\/merge-facts|\/reconcile-reaction|\/reconcile-clarification)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -196,6 +202,19 @@ export function createChannelServer(
         }
         if (req.method === "GET" && match[2] === "/thread") {
           send(200, { activities: store.recentThread(task) });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/review-lineage") {
+          if (!isAutomaticReview(task)) {
+            send(409, { error: "Not an automatic PR review" });
+          } else {
+            send(200, {
+              taskId: task.id,
+              reviewLineage: store.reviewLineage(task.id),
+              reviewInput: store.reviewInput(task.id),
+              previousPublishedReview: store.previousPublishedReview(task.id),
+            });
+          }
           return;
         }
         if (req.method === "GET" && match[2] === "/conversation") {

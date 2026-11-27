@@ -8,6 +8,7 @@ import { prepareReviewCache } from "./review-cache.js";
 import { runtimeProfile } from "./runtime-profile.js";
 import { runActivityInbox } from "./agent-inbox.js";
 import { z } from "zod";
+import { priorReviewSchema } from "./review-input.js";
 import { createRuntime } from "./runtime-factory.js";
 import {
   targetSchema,
@@ -20,7 +21,11 @@ import {
   outcomeSchema,
   publicationReceiptSchema,
 } from "./outcomes.js";
-import { AmbiguousExecution, type RuntimeConnector } from "./contracts.js";
+import {
+  AmbiguousExecution,
+  isAutomaticReview,
+  type RuntimeConnector,
+} from "./contracts.js";
 import { loadAgentConfig, type AgentConfig } from "./agent-config.js";
 import {
   AgentStore,
@@ -59,6 +64,7 @@ const assignmentSchema = z.strictObject({
         )
         .max(8),
       source: sourceSchema,
+      previousReview: priorReviewSchema.optional(),
       status: z.literal("running"),
       deliveryStatus: z.enum([
         "pending",
@@ -78,6 +84,17 @@ const assignmentSchema = z.strictObject({
       (t) =>
         (t.target.kind === "pull_request") === (t.reviewPolicy !== undefined),
       "Only PR assignments require explicit review policy",
+    )
+    .refine(
+      (t) =>
+        !t.previousReview ||
+        (isAutomaticReview(t) &&
+          t.target.kind === "pull_request" &&
+          t.previousReview.number === t.target.number &&
+          t.previousReview.taskId !== t.id &&
+          t.previousReview.revision.baseRepoId === t.repositoryId &&
+          t.previousReview.revision.headRepoId === t.repositoryId),
+      "Prior review must belong to the same automatic PR review scope",
     ),
   leaseToken: z.string().min(1).max(1024),
   expiresAt: z.number().positive(),
