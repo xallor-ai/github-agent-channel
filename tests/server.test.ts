@@ -416,3 +416,102 @@ test("signed HTTP delivery is persisted and independently completed; task query 
     s.close();
   }
 });
+test("unknown Review reconciliation needs matching GitHub read-back and never accepts a comment URL", async (t) => {
+  const s = new TaskStore(":memory:");
+  t.after(() => s.close());
+  seedBinding(
+    s,
+    { installationId: 1, repositoryId: 2, owner: "org", repo: "repo" },
+    "worker",
+    ["pull_request.opened"],
+  );
+  const url = "https://github.com/org/repo/pull/5#pullrequestreview-8";
+  let verified = false,
+    reads = 0;
+  const server = createChannelServer(
+    cfg,
+    s,
+    "secret",
+    "admin",
+    undefined,
+    undefined,
+    async (_, id) => {
+      reads++;
+      if (!verified) throw Error("Review identity mismatch");
+      return { id, url };
+    },
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const task = s.accept({
+    deliveryId: "native",
+    source: { event: "pull_request", action: "opened" },
+    bindingId: "1:2:worker:1",
+    installationId: 1,
+    repositoryId: 2,
+    owner: "org",
+    repo: "repo",
+    actorId: 3,
+    actorLogin: "alice",
+    target: {
+      kind: "pull_request",
+      number: 5,
+      revision: {
+        baseSha: "b".repeat(40),
+        headSha: "a".repeat(40),
+        baseRepoId: 2,
+        headRepoId: 2,
+      },
+    },
+    prompt: "review",
+  }).task;
+  s.claimAssignment("worker", "hash", Date.now() + 60000);
+  s.finishAssignment(
+    task.id,
+    "worker",
+    "hash",
+    {
+      status: "succeeded",
+      outcome: {
+        text: "summary",
+        artifacts: [],
+        publication: { kind: "review" },
+      },
+    },
+    "digest",
+  );
+  s.pendingDelivery();
+  s.markDelivery(task.id, "unknown");
+  const post = (value: string) =>
+    fetch(
+      `http://127.0.0.1:${address.port}/tasks/${task.id}/resolve-delivery`,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer admin" },
+        body: JSON.stringify({
+          confirmedReconciled: true,
+          resolution: "sent",
+          url: value,
+        }),
+      },
+    );
+  for (const bad of [
+    url.replace("pullrequestreview", "issuecomment"),
+    url.replace("/5#", "/7#"),
+    url + "0".repeat(24),
+  ])
+    assert.equal((await post(bad)).status, 400);
+  assert.equal(reads, 0);
+  assert.equal((await post(url)).status, 409);
+  assert.equal(s.get(task.id)?.deliveryStatus, "unknown");
+  verified = true;
+  assert.equal((await post(url)).status, 200);
+  assert.deepEqual(s.get(task.id)?.publicationReceipt, {
+    kind: "review",
+    id: 8,
+    url,
+  });
+});

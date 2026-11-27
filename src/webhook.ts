@@ -1,3 +1,4 @@
+import { revisionSchema } from "./outcomes.js";
 import { Webhooks } from "@octokit/webhooks";
 import type { BindingLookup, NewTask } from "./contracts.js";
 
@@ -144,12 +145,26 @@ export async function normalizeWebhook(
     (!binding.triggerLabel || event.label?.name !== binding.triggerLabel)
   )
     return null;
+  const parsed = revisionSchema.safeParse({
+    baseSha: item.base?.sha,
+    headSha: item.head?.sha,
+    baseRepoId: item.base?.repo?.id,
+    headRepoId: item.head?.repo?.id,
+  });
+  if (
+    headers.event === "pull_request" &&
+    (!parsed.success || parsed.data.baseRepoId !== repository.id)
+  )
+    return null;
   return {
     ...task,
     prompt: item.title + "\n\n" + body,
     target: {
       kind: headers.event === "issues" ? "issue" : "pull_request",
       number: item.number,
+      ...(headers.event === "pull_request" && parsed.success
+        ? { revision: parsed.data }
+        : {}),
     },
   };
 }

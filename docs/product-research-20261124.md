@@ -12,3 +12,14 @@
 | [ACP v1](https://agentclientprotocol.com/protocol/v1/overview) | 新会话、更新、取消与可选的加载会话是不同能力 | 保存 GitHub 工作记录；不强制所有 Runtime 能透明恢复，也不把发出取消当作进程已退出 |
 
 本仓对照：在 `e9361f2` 的[真实验收](acp-live-validation-20261124.md)中，OpenCode 经 ACP 完成编码并创建 PR；评审仍需手贴 diff，且测试期间手动切换了 worker。因此优先补版本上下文和同一 PR 续改，不以新增事件数量衡量进展。
+
+## 2026-11-25 补充：评审是否要在执行端同步仓库
+
+| 官方证据 | 观察 | 采用的决定 |
+| --- | --- | --- |
+| [PR-Agent GitHub provider（固定提交）](https://github.com/The-PR-Agent/pr-agent/blob/711199823081f9951b8e97181fefff078e434f82/pr_agent/git_providers/github_provider.py#L639-L681) | 从 PR 文件、patch 和变更前后内容准备材料，必要时解析共同祖先。 | 普通差异评审用授权 API 即可，不强制所有运行时 clone。 |
+| [CodeRabbit 沙箱](https://www.coderabbit.ai/blog/our-security-posture-how-we-safeguard-your-repositories) · [评审上下文](https://www.coderabbit.ai/blog/explainable-reviews-coderabbit-review-context-engine) | 厂商说明每次评审在隔离环境克隆源码，结合差异追查跨文件影响。 | 深度评审默认有任务专属的只读源码视图；不照搬其代码图或商业平台。 |
+| [Claude Code Action 综合评审示例（固定提交）](https://github.com/anthropics/claude-code-action/blob/4411a9e9b0283becf4b924f7bce360fd7756c78c/examples/pr-review-comprehensive.yml#L4-L31) | opened/synchronize 等触发后，runner 先浅检出再运行 Agent。 | 一棵完整源码树不要求完整历史；检出引用仍须与任务 SHA 独立核对。 |
+| [GitHub Copilot Code Review](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/code-review) | 官方将全项目上下文列为依赖 runner 的增强能力；runner 不可用时评审范围受限。 | 告知用户实际覆盖范围，不从公开产品描述推定其内部同步方式。 |
+
+上述材料是公开实现或厂商说明，不是本仓的运行证据。[OpenClaw workspace](https://docs.openclaw.ai/agent-workspace) 是工作目录，本身不是硬隔离边界。因此不为每个绑定仓库在 OpenClaw 默认目录中维护一份可写副本；具体交付见[实施方案](superpowers/plans/2026-11-25-pr-review-context.md)。

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
 
@@ -55,6 +55,11 @@ const openclawSchema = z.strictObject({
   agentId: z.string().min(1),
   timeoutMs: z.number().int().min(1).max(3600000),
   maxToolRounds: z.number().int().min(1).max(100),
+  reviewRepositories: z
+    .record(z.string().regex(/^[1-9][0-9]*$/), z.string().refine(isAbsolute))
+    .optional(),
+  deepReview: z.boolean().optional(),
+  publishReview: z.boolean().optional(),
 });
 export type OpenClawRuntimeConfig = z.infer<typeof openclawSchema>;
 const schema = z.strictObject({
@@ -65,7 +70,7 @@ const schema = z.strictObject({
   runtime: z.union([openclawSchema, acpSchema]),
   stateFile: z.string().min(1),
   pollIntervalMs: z.number().int().min(100).max(60000),
-  requestTimeoutMs: z.number().int().min(100).max(60000),
+  requestTimeoutMs: z.number().int().min(100).max(150000),
   deployment: z
     .strictObject({
       image: z

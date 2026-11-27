@@ -92,7 +92,13 @@ function fixture(
     else if (path === "/repos/org/repo")
       data = { id: 2, name: "repo", owner: { login: "org" } };
     else if (method === "GET" && path === "/repos/org/repo/pulls/5")
-      data = { state: "open", merged: false };
+      data = {
+        state: "open",
+        merged: false,
+        number: 5,
+        base: { sha: "a".repeat(40), repo: { id: 2 } },
+        head: { sha: "b".repeat(40), repo: { id: 2 } },
+      };
     else if (path.endsWith("/permission"))
       data = {
         permission: ++checks >= (opts.revokeAt ?? Infinity) ? "read" : "write",
@@ -349,7 +355,22 @@ test("PR linkage uses canonical task target", async () => {
   for (const kind of ["issue", "pull_request"] as const) {
     const f = fixture();
     await f.client.publishPullRequest(
-      { ...task, target: { kind, number: 5 } },
+      {
+        ...task,
+        target:
+          kind === "issue"
+            ? { kind, number: 5 }
+            : {
+                kind,
+                number: 5,
+                revision: {
+                  baseSha: "a".repeat(40),
+                  headSha: "b".repeat(40),
+                  baseRepoId: 2,
+                  headRepoId: 2,
+                },
+              },
+      },
       proposal,
     );
     assert.equal(

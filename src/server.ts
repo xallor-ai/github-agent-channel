@@ -4,7 +4,11 @@ import {
   type ServerResponse,
 } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import type { ChannelConfig } from "./contracts.js";
+import type {
+  ChannelConfig,
+  GitHubClient,
+  PublicationReceipt,
+} from "./contracts.js";
 import { StaleBinding, TaskStore } from "./store.js";
 import { normalizeWebhook } from "./webhook.js";
 function authorized(header: string | undefined, token: string) {
@@ -32,6 +36,7 @@ export function createChannelServer(
     handle(req: IncomingMessage, res: ServerResponse): Promise<boolean>;
   },
   lookup = store.activeBinding.bind(store),
+  reconcileReview?: GitHubClient["reconcileReview"],
 ) {
   const server = createServer(async (req, res) => {
     const send = (status: number, value: unknown) => {
@@ -86,7 +91,7 @@ export function createChannelServer(
           return;
         }
         const match = path.match(
-          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery)?$/,
+          /^\/tasks\/([0-9a-f-]{36})(\/resolve|\/resolve-delivery|\/lookup-review)?$/,
         );
         if (!match) {
           send(404, { error: "Not found" });
@@ -109,6 +114,26 @@ export function createChannelServer(
             runtime: task.runtime,
             outcome: task.outcome,
           });
+          return;
+        }
+        if (req.method === "GET" && match[2] === "/lookup-review") {
+          if (
+            !reconcileReview ||
+            task.deliveryStatus !== "unknown" ||
+            task.outcome?.publication.kind !== "review"
+          ) {
+            send(409, { error: "No unknown native review to verify" });
+            return;
+          }
+          try {
+            const receipt = await reconcileReview(task);
+            send(200, { kind: "review", ...receipt });
+          } catch {
+            send(409, {
+              error:
+                "Could not uniquely verify native review; delivery remains unknown",
+            });
+          }
           return;
         }
         if (req.method === "POST" && match[2] === "/resolve-delivery") {
@@ -138,6 +163,8 @@ export function createChannelServer(
             });
             return;
           }
+          const publicationKind = task.outcome?.publication.kind;
+          let reviewId: number | undefined;
           let validUrl =
             fields.url === undefined && fields.resolution === "failed";
           if (typeof fields.url === "string") {
@@ -151,25 +178,37 @@ export function createChannelServer(
                 `/${task.owner}/${task.repo}/issues/${issueNumber}`,
                 `/${task.owner}/${task.repo}/pull/${issueNumber}`,
               ];
-              validUrl =
-                url.protocol === "https:" &&
-                url.hostname === "github.com" &&
-                !url.port &&
-                !url.username &&
-                !url.password &&
-                !url.search &&
-                (task.outcome?.publication?.kind === "pull_request"
-                  ? url.pathname.startsWith(
-                      `/${task.owner}/${task.repo}/pull/`,
-                    ) &&
-                    /^[1-9][0-9]*$/.test(
-                      url.pathname.slice(
-                        `/${task.owner}/${task.repo}/pull/`.length,
-                      ),
-                    ) &&
-                    !url.hash
-                  : paths.includes(url.pathname) &&
-                    /^#issuecomment-[1-9][0-9]*$/.test(url.hash));
+              if (publicationKind === "review") {
+                reviewId = /^#pullrequestreview-[1-9][0-9]*$/.test(url.hash)
+                  ? Number(url.hash.slice("#pullrequestreview-".length))
+                  : undefined;
+                validUrl =
+                  fields.resolution === "sent" &&
+                  task.target.kind === "pull_request" &&
+                  Number.isSafeInteger(reviewId) &&
+                  fields.url ===
+                    `https://github.com${paths[1]}#pullrequestreview-${reviewId}`;
+              } else {
+                validUrl =
+                  url.protocol === "https:" &&
+                  url.hostname === "github.com" &&
+                  !url.port &&
+                  !url.username &&
+                  !url.password &&
+                  !url.search &&
+                  (publicationKind === "pull_request"
+                    ? url.pathname.startsWith(
+                        `/${task.owner}/${task.repo}/pull/`,
+                      ) &&
+                      /^[1-9][0-9]*$/.test(
+                        url.pathname.slice(
+                          `/${task.owner}/${task.repo}/pull/`.length,
+                        ),
+                      ) &&
+                      !url.hash
+                    : paths.includes(url.pathname) &&
+                      /^#issuecomment-[1-9][0-9]*$/.test(url.hash));
+              }
             } catch {
               validUrl = false;
             }
@@ -182,19 +221,30 @@ export function createChannelServer(
             return;
           }
           try {
-            store.resolveUnknownDelivery(
-              task.id,
-              fields.resolution as "sent" | "failed",
-              fields.url
-                ? {
-                    kind:
-                      task.outcome?.publication.kind === "pull_request"
-                        ? "pull_request"
-                        : "comment",
-                    url: fields.url as string,
-                  }
-                : undefined,
-            );
+            let receipt: PublicationReceipt | undefined;
+            if (typeof fields.url === "string") {
+              if (publicationKind === "review") {
+                if (
+                  !reconcileReview ||
+                  reviewId === undefined ||
+                  task.deliveryStatus !== "unknown"
+                )
+                  throw Error("Cannot verify review");
+                const verified = await reconcileReview(task, reviewId);
+                if (verified.url !== fields.url || verified.id !== reviewId)
+                  throw Error("Review identity mismatch");
+                receipt = { kind: "review", ...verified };
+              } else {
+                receipt = {
+                  kind:
+                    publicationKind === "pull_request"
+                      ? "pull_request"
+                      : "comment",
+                  url: fields.url,
+                };
+              }
+            }
+            store.resolveUnknownDelivery(task.id, fields.resolution, receipt);
             send(200, { resolved: true });
           } catch {
             send(409, { error: "Delivery cannot be resolved" });

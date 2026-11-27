@@ -139,6 +139,8 @@ export async function repoCommand(
       binding &&
       binding.enabled === desired.enabled &&
       binding.requireMention === desired.requireMention &&
+      !!binding.nativeReview === !!desired.nativeReview &&
+      !!binding.deepReview === !!desired.deepReview &&
       binding.triggerLabel === desired.triggerLabel &&
       JSON.stringify([...binding.events].sort()) ===
         JSON.stringify(desired.events);

@@ -24,7 +24,7 @@
 ## Actual call graph and common traps
 
 - src/main.ts loads the cloud config once and wires HTTP, PullCoordinator and publication-only DeliveryWorker. Service configuration is static; repository bindings are dynamic, device-scoped and managed through authenticated registration endpoints.
-- OpenClaw tool exposure and invocation validation must share the target-scoped allowlist. Repository tasks allow only read_file and publish none; never offer read_issue without an Issue/PR scope. read_file still reads the default branch, not the push SHA.
+- OpenClaw tool exposure and invocation validation must share the target-scoped allowlist. Repository tasks allow only read_file and publish none; never offer read_issue without an Issue/PR scope. For repository/Issue tasks read_file still reads the default branch, not the push SHA. On PR tasks, require the pinned same-repository revision and never fall back to the default branch. Deep search uses a task-scoped snapshot and per-read lease/authorization checks.
 - src/agent.ts is the outbound bridge, not a coding engine. src/runtime-factory.ts selects adapters; src/connector.ts contains OpenClaw Responses specifics only.
 - Cloud has connector identity/config; bridge has runtime config. Only bridge initiates cross-network requests. No public runtime address or reverse tunnel is required.
 - The server derives the worker identity from the paired device credential; it is neither a client-selected workerId nor the runtime agentId or GitHub botLogin. Admin, connector and runtime/model credentials are not interchangeable.
@@ -34,7 +34,7 @@
 - Bindings events are opt-in; subscribing all GitHub events does not implement them. PR writes require a matching server-side writeProfiles entry; device declarations cannot grant write access. Core derives the head branch and validates repository, base SHA, paths and actor.
 - Cloud Inbox and local journal protect different network boundaries. Startup/expiry uncertainty is not proof execution stopped; no automatic model or GitHub side-effect replay. Unknown execution may only be reconciled to failed, not promoted to success.
 - ACP process permissions are not an OS sandbox. Dedicated normal clean clones only; no shared workspaces, symlinks/submodules/alternate Git metadata. The harness and verification subprocesses must not inherit bridge credentials; verification does not receive harness auth envRefs.
-- Reject skip-worktree/assume-unchanged index flags at workspace admission and every change collection; they hide actual edits from Git. A repository target SHA must match workspace HEAD before ACP starts. Never silently clear flags, reset or switch branches.
+- Reject skip-worktree/assume-unchanged index flags at workspace admission and every change collection; they hide actual edits from Git. The repository target SHA or pinned same-repository PR head must match workspace HEAD before ACP starts; unversioned PR assignments are rejected. Never silently clear flags, reset or switch branches.
 - ACP native bridge is supported; ACP Docker render explicitly fails. Do not imply the provided Channel image bundles a coding harness or a workspace sandbox.
 
 ## Pull request review
@@ -46,10 +46,10 @@
 - Compare pinned SDK/runtime implementations before adding workspace, session or GitHub tooling. Prefer maintained protocol/SDK implementations; keep task policy and auth in Channel.
 - Current reuse: Octokit for GitHub App/Git Data/PR APIs, official ACP TypeScript SDK for harness protocol. Adapter-specific APIs must not become requirements on every Runtime.
 - Update capabilities, implementation map, relevant guide/examples and evidence with each change. Do not rebrand a partial adapter or mocked test as universal runtime interoperability.
-- Review changes through the GitHub Agent Channel with an exact commit/base and supplied diff/context; record the real delivery/task/runtime/publication receipt and verify model claims. Local review or fixture success alone does not complete this loop. Current OpenClaw tools do not fetch arbitrary commit/PR diffs; never substitute default-branch files for the review target.
+- Review changes through the GitHub Agent Channel with an exact commit/base and supplied diff/context; record the real delivery/task/runtime/publication receipt and verify model claims. Local review or fixture success alone does not complete this loop. Repository administrators opt into deepReview/nativeReview on the current binding; these never grant Git Data write permission. A versioned PR task reads its own diff; no tool fetches arbitrary PRs or revisions. Record diff coverage and snapshot omissions. Native Review is a separate opt-in, commit-pinned COMMENT (no inline or approval); an ordinary comment is not a Review receipt.
 - Bridge config loading returns separate config and resolved secrets; resolve credentials once, pass only the runtime token to its factory, and render only config. OpenClaw configuration types are inferred from the schema. Do not restore unused capabilities declarations.
 - CLI init templates come from src/examples.ts; keep deploy example files and guide YAML consistent.
-- Secret File references and agent stateFile are relative to config; native cloud dataFile is relative to cwd. Container paths are fixed /data. Fresh cloud v3 and bridge v2 stores are required for this breaking revision.
+- Secret File references and agent stateFile are relative to config; native cloud dataFile is relative to cwd. Container paths are fixed /data. Fresh cloud v4 and bridge v3 stores are required for this breaking revision.
 - Node24 required. npm run channel uses source CLI; npm start uses compiled cloud main. Docker defaults to cloud, generated bridge command overrides it.
 - doctor is offline; healthz is process liveness. Unit/HTTP and Docker smoke use synthetic GitHub/model behavior. smoke:openclaw uses a real model with synthetic read tools. Live outcomes require separate evidence.
 - Type checking enables noUnusedLocals and noUnusedParameters. Keep protocol inputs unknown until schema validation; do not reintroduce any-based response parsing.

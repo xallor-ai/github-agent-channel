@@ -124,7 +124,7 @@ test("canonical outcome survives restart and is reported without reexecution", (
   assert.equal(store.pending(), undefined);
   store.close();
   const db = new DatabaseSync(path);
-  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 2);
+  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 3);
   db.close();
 });
 

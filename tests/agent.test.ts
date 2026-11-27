@@ -361,6 +361,20 @@ test("assignments with missing canonical fields or obsolete aliases are rejected
       commentId: 1,
     },
     { ...task, result: null, commentUrl: null },
+    {
+      ...task,
+      target: {
+        kind: "pull_request",
+        number: 1,
+        revision: {
+          baseRepoId: 2,
+          headRepoId: 2,
+          headSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+        },
+      },
+    },
+    { ...task, reviewPolicy: { deepReview: true, nativeReview: true } },
   ]) {
     let calls = 0;
     const f = await fixture(t, (_path, _body, res) =>

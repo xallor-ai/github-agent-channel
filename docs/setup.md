@@ -4,6 +4,8 @@
 
 本篇是使用入口，按顺序完成后应能在绑定仓库评论 `@机器人`，由内网 OpenClaw 分析并回帖。自建 ECS 不是每个使用者都要做的事：已有 Channel 服务时，拿到服务地址和发给 GitHub 用户的一次性邀请即可；没有服务时，先完成[可选的 ECS 自建部署](ecs-setup.md)，再回到本文。
 
+需要自动审查 PR 时，按[PR 评审指南](pr-review.md)选择普通差异评审、只读深评或原生 Review；三者可用范围不同。
+
 当前实现是本仓库的独立连接器进程，不是在 OpenClaw 的 channels 列表里填一个 GitHub Webhook URL。连接器只向公网发起 HTTPS 请求；OpenClaw 留在本机或内网。
 
 当前 Channel 仅接受 v2 配置/协议和新状态库；从旧部署切换先读[v2 契约](protocol-v2.md)。
@@ -118,7 +120,7 @@ JS
 }
 ```
 
-`agents.entries.github` 中的 **github就是agentId**。它默认继承已有模型配置；需要指定模型时，在这个entry里增加 `model`。`tools.deny`限制该Agent的内置工具，客户端提供的 `read_issue/read_file` 由连接器处理并交回ECS。repository/push 任务只提供 `read_file`，分析保存在任务 outcome 中，不尝试向不存在的 Issue 发评论；文件仍从默认分支读取，不能当作指定 push SHA 的代码审查。`tools.toolSearch=false`在2026.11.3中是全局设置，不是entry内字段；它直接提供少量客户端工具的定义。共享Gateway时先评估该全局修改对其他Agent的影响，或者使用独立profile。
+`agents.entries.github` 中的 **github就是agentId**。它默认继承已有模型配置；需要指定模型时，在这个entry里增加 `model`。`tools.deny`限制该Agent的内置工具，普通任务的 `read_issue/read_file` 由连接器转发服务端；PR 深评时 `read_file/search_repo` 在授权后的任务快照执行。repository/push 任务只提供 `read_file`，分析保存在任务 outcome 中，不尝试向不存在的 Issue 发评论；文件仍从默认分支读取，不能当作指定 push SHA 的代码审查。`tools.toolSearch=false`在2026.11.3中是全局设置，不是entry内字段；它直接提供少量客户端工具的定义。共享Gateway时先评估该全局修改对其他Agent的影响，或者使用独立profile。
 
 先审阅片段并备份自己的配置，再执行（以下以新profile为例；已有专用默认实例去掉profile参数）：
 

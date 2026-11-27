@@ -157,7 +157,7 @@ test("fresh schema is version 3 and contains no legacy columns", (t) => {
   const { path } = fixture(t);
   const db = new DatabaseSync(path);
   try {
-    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 3);
+    assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 4);
     const columns = db
       .prepare("PRAGMA table_info(tasks)")
       .all()
