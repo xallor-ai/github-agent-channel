@@ -36,6 +36,7 @@ export class OctokitGitHubClient implements GitHubClient {
     private readonly lookup: BindingLookup,
     private readonly verifyManager: (task: Task) => Promise<void>,
     fetchImpl: typeof fetch = fetch,
+    private readonly publicationAllowed: (id: string) => boolean = () => true,
   ) {
     this.#config = config;
     this.#fetch = fetchImpl;
@@ -51,6 +52,8 @@ export class OctokitGitHubClient implements GitHubClient {
   #binding(task: Task) {
     const found = this.lookup(task.installationId, task.repositoryId);
     if (
+      ((task.status === "succeeded" || task.status === "failed") &&
+        !this.publicationAllowed(task.id)) ||
       !found?.enabled ||
       found.id !== task.bindingId ||
       found.owner !== task.owner ||
@@ -126,20 +129,24 @@ export class OctokitGitHubClient implements GitHubClient {
     const client = await this.#authorized(task);
     if (task.target.kind === "pull_request") {
       await checkPull(client, task);
-    } else if (task.status === "failed" && task.target.kind === "issue") {
-      const { data } = await client.request(
-        "GET /repos/{owner}/{repo}/issues/{issue_number}",
-        {
-          owner: task.owner,
-          repo: task.repo,
-          issue_number: task.target.number,
-        },
-      );
-      if (data.state !== "open")
-        throw new AccessDenied("Failure notice target is not confirmed open");
+    } else if (task.target.kind === "issue") {
+      await this.#readOpenDiscussion(client, task, task.target.number);
     }
     this.#binding(task);
     return client;
+  }
+  async #readOpenDiscussion(client: Octokit, task: Task, number: number) {
+    const { data } = await client.request(
+      "GET /repos/{owner}/{repo}/issues/{issue_number}",
+      { owner: task.owner, repo: task.repo, issue_number: number },
+    );
+    if (
+      data.number !== number ||
+      data.state !== "open" ||
+      (task.target.kind === "issue" && data.pull_request)
+    )
+      throw new AccessDenied("Issue discussion is not confirmed open");
+    return data;
   }
   async resolvePullRevision(task: Task) {
     const client = await this.#authorized(task);
@@ -215,11 +222,14 @@ export class OctokitGitHubClient implements GitHubClient {
       task.target.number < 1
     )
       throw new AccessDenied("Task has no issue scope");
-    const client = await this.#checkedClient(task);
-    const { data } = await client.request(
-      "GET /repos/{owner}/{repo}/issues/{issue_number}",
-      { owner: task.owner, repo: task.repo, issue_number: task.target.number },
+    const client = await this.#authorized(task);
+    if (task.target.kind === "pull_request") await checkPull(client, task);
+    const data = await this.#readOpenDiscussion(
+      client,
+      task,
+      task.target.number,
     );
+    this.#binding(task);
     return {
       untrusted: true,
       number: task.target.number,

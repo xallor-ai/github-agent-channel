@@ -281,6 +281,18 @@ test("failure notices are only sent to open Issues", async () => {
   const open = fixture({ issueState: "open" });
   assert.equal((await open.client.publishComment(failed, "notice")).id, 9);
 });
+
+test("an Issue closed without a webhook cannot be assigned or expose tool data", async () => {
+  const f = fixture({ issueState: "closed" });
+  const running: Task = { ...task, status: "running" };
+  for (const check of [
+    () => f.client.authorize(running),
+    () => f.client.readIssue(running),
+    () => f.client.readFile(running, "README.md"),
+  ])
+    await assert.rejects(check, AccessDenied);
+  assert.ok(!f.calls.some((call) => call.path.includes("/contents/")));
+});
 test("comment scan bound refuses creation and excessive response is refused", async () => {
   const a = fixture({
     comments: Array.from({ length: 100 }, () => ({

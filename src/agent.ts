@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { OpenClawConnector } from "./connector.js";
 import { openReviewSnapshot } from "./review-snapshot.js";
 import { prepareReviewCache } from "./review-cache.js";
+import { runtimeProfile } from "./runtime-profile.js";
+import { runActivityInbox } from "./agent-inbox.js";
 import { z } from "zod";
 import { createRuntime } from "./runtime-factory.js";
 import {
@@ -41,6 +43,16 @@ const assignmentSchema = z.strictObject({
       reviewPolicy: z
         .strictObject({ deepReview: z.boolean(), nativeReview: z.boolean() })
         .optional(),
+      threadContext: z
+        .array(
+          z.strictObject({
+            actor: z.string().max(100),
+            event: z.string().max(100),
+            excerpt: z.string().max(1024),
+            truncated: z.boolean(),
+          }),
+        )
+        .max(8),
       source: sourceSchema,
       status: z.literal("running"),
       deliveryStatus: z.enum([
@@ -172,7 +184,11 @@ export class Agent {
   private async step(signal?: AbortSignal): Promise<boolean> {
     if (signal?.aborted) return false;
     if (await this.report(signal)) return true;
-    const claimed = await this.post("/connector/v2/claim", {}, signal);
+    const claimed = await this.post(
+      "/connector/v2/claim",
+      { runtime: runtimeProfile(this.config.runtime) },
+      signal,
+    );
     if (claimed.status === 204) return false;
     const parsed = assignmentSchema.safeParse(claimed.data);
     if (!parsed.success) throw Error("Cloud assignment is invalid");
@@ -195,7 +211,6 @@ export class Agent {
           this.runtime instanceof OpenClawConnector &&
           pin &&
           this.config.runtime.type === "openclaw" &&
-          this.config.runtime.deepReview &&
           task.reviewPolicy?.deepReview === true
             ? this.runtime.withReviewSource(async () => {
                 const dir = await this.prepareCache(
@@ -332,6 +347,22 @@ export async function runAgent(
   const store = new AgentStore(config.stateFile);
   const runtime = createRuntime(config.runtime, configPath, secrets.runtime);
   const agent = new Agent(config, store, runtime, secrets.channel);
+  const stopInbox = new AbortController();
+  const inboxSignal = signal
+    ? AbortSignal.any([stopInbox.signal, signal])
+    : stopInbox.signal;
+  const inbox = runActivityInbox(
+    config.stateFile,
+    {
+      baseUrl: config.channel.baseUrl,
+      timeout: config.requestTimeoutMs,
+      token: secrets.channel,
+    },
+    runtimeProfile(config.runtime),
+    inboxSignal,
+  ).catch(() => {
+    console.error(JSON.stringify({ event: "activity_inbox_unavailable" }));
+  });
   let failures = 0;
   try {
     while (!signal?.aborted) {
@@ -372,6 +403,8 @@ export async function runAgent(
       }
     }
   } finally {
+    stopInbox.abort();
+    await inbox;
     store.close();
   }
 }

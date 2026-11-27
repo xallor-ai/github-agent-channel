@@ -7,6 +7,13 @@ import {
 } from "./contracts.js";
 import type { Octokit } from "@octokit/core";
 type Proposal = Extract<PublicationRequest, { kind: "pull_request" }>;
+export class DraftPublicationUncertain extends AmbiguousExecution {
+  constructor(branch: string, commitSha: string, branchConfirmed: boolean) {
+    super(
+      `Draft PR publication requires reconciliation: branch ${branch} at ${commitSha} (branch ${branchConfirmed ? "confirmed" : "unconfirmed"})`,
+    );
+  }
+}
 function safePath(path: string): boolean {
   return (
     typeof path === "string" &&
@@ -219,32 +226,44 @@ export async function publishDraftPullRequest(
     }),
   );
   const commitSha = validSha(newCommit.data.sha);
-  const ref = await mutate(() =>
-    client.request("POST /repos/{owner}/{repo}/git/refs", {
-      ...scope,
-      ref: `refs/heads/${branch}`,
-      sha: commitSha,
-    }),
-  );
-  validSha(ref.data.object?.sha);
-  const pr = await mutate(() =>
-    client.request("POST /repos/{owner}/{repo}/pulls", {
-      ...scope,
-      title: proposal.title,
-      body,
-      head: branch,
-      base: proposal.baseBranch,
-      draft: true,
-    }),
-  );
-  if (
-    typeof pr.data.id !== "number" ||
-    !Number.isSafeInteger(pr.data.id) ||
-    pr.data.id <= 0 ||
-    !pr.data.html_url?.startsWith(
-      `https://github.com/${task.owner}/${task.repo}/pull/`,
+  let branchConfirmed = false;
+  try {
+    const expectedRef = `refs/heads/${branch}`;
+    const ref = await mutate(() =>
+      client.request("POST /repos/{owner}/{repo}/git/refs", {
+        ...scope,
+        ref: expectedRef,
+        sha: commitSha,
+      }),
+    );
+    if (ref.data?.ref !== expectedRef || ref.data.object?.sha !== commitSha)
+      throw new AmbiguousExecution("Unconfirmed GitHub task branch response");
+    branchConfirmed = true;
+    const pr = await mutate(() =>
+      client.request("POST /repos/{owner}/{repo}/pulls", {
+        ...scope,
+        title: proposal.title,
+        body,
+        head: branch,
+        base: proposal.baseBranch,
+        draft: true,
+      }),
+    );
+    if (
+      typeof pr.data.id !== "number" ||
+      !Number.isSafeInteger(pr.data.id) ||
+      pr.data.id <= 0 ||
+      !pr.data.html_url?.startsWith(
+        `https://github.com/${task.owner}/${task.repo}/pull/`,
+      )
     )
-  )
-    throw new AmbiguousExecution("Incomplete GitHub PR response");
-  return { id: pr.data.id, url: pr.data.html_url };
+      throw new AmbiguousExecution("Incomplete GitHub PR response");
+    return { id: pr.data.id, url: pr.data.html_url };
+  } catch (error) {
+    // Even a definitive denial of the draft step does not undo a published ref.
+    // Keep the expected ref and commit for read-only operator reconciliation.
+    if (branchConfirmed || error instanceof AmbiguousExecution)
+      throw new DraftPublicationUncertain(branch, commitSha, branchConfirmed);
+    throw error;
+  }
 }

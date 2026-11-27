@@ -1,34 +1,25 @@
 # 让 Agent 评审一个 PR
 
-在已配对设备的仓库声明中启用 `pull_request.opened` 和 `pull_request.synchronize`，或在开放 PR 会话中按该绑定的规则发起评论任务。GitHub App 必须有该仓库的访问权限，发起人须有 write、maintain 或 admin 权限。使用同一修订的服务端和 bridge，准备新的云任务库（schema 4）与本地 journal（schema 3）；切换步骤见[协议说明](protocol-v2.md)。旧库不会迁移。
+在已配对设备的仓库声明中启用 `pull_request.opened` 和 `pull_request.synchronize`，或在开放 PR 会话中按该绑定的规则发起评论任务。GitHub App 必须有该仓库的访问权限，发起人须有 write、maintain 或 admin 权限。使用同一修订的服务端和 bridge，准备新的云任务库（schema 5）与本地 journal（schema 3）；切换步骤见[协议说明](protocol-v2.md)。旧库不会迁移。
 
 | 想得到什么 | 配置 | 能核对什么 |
 | --- | --- | --- |
 | PR 改动分析 | OpenClaw 默认路径；无需手贴 diff | 任务固定的仓库、PR、base/head、已提供与缺失的补丁；默认发布普通会话评论 |
-| 查未改动的调用方或测试 | 仓库绑定和 OpenClaw runtime 均设置 `deepReview: true` | 模型可从 head 搜索路径/行号并打开源码。实际引用才能证明检查过；搜索工具可用不等于已通读 |
-| GitHub 原生 Review | OpenClaw 设置 `runtime.publishReview: true`，配对的仓库管理员在该仓库绑定中设置 `nativeReview: true` | GitHub COMMENT 总评的 ID、URL 及 commit_id；不会自动批准、请求修改或合并 |
+| 查未改动的调用方或测试 | 仓库绑定选择 `deepReview: true`，负责 Agent 支持深评 | 模型可从 head 搜索路径/行号并打开源码。实际引用才能证明检查过；搜索工具可用不等于已通读 |
+| GitHub 原生 Review | 仓库绑定选择 `nativeReview: true`，负责 Agent 支持原生 Review | GitHub COMMENT 总评的 ID、URL 及 commit_id；不会自动批准、请求修改或合并 |
 
 **版本和范围。** 签名 opened/synchronize 事件各自保留 base/head SHA 和仓库数字 ID；会话评论没有这两个 SHA，在首次授权领取时解析并固定。当目标不是同一开放 PR、任一版本已变、fork 超出绑定或授权失效，不能用当前最新版本代替原任务。普通 Issue 和 push 不是这条 PR 路径。差异请求使用 [GitHub Compare](https://docs.github.com/en/rest/commits/commits#compare-two-commits)，参数为固定的 `baseSha...headSha`。GitHub 只在第一页返回文件（最多 300 个），随后再次核实 PR 版本与授权。Channel 最多提供 100 项、文件条目总计约 64 KiB，每个 patch 至多 12 Ki 字符；上游响应超过 4 MiB 时不传递任何补丁，并明确标记缺失。仅有文件状态、删除或改名信息不代表取得了完整 diff；检查返回的 limitations、patchStatus 与文件总数。
 
-**启用仓库。** 在[仓库声明](agent-self-service.md)中显式设置需要的能力。先用 `agent repo status` 获取实际修订，保留原有事件和规则，更新 `expectedRevision` 后 `agent repo apply`。下例只订阅 PR 打开与更新；两个布尔字段均默认关闭。服务端校验配对用户的仓库 admin 权限并记录绑定修订；无需编辑 ECS 配置或为 Review 设置 draft PR 的 writeProfiles。
+**启用自动评审。** 配对后按[自助接入指南](agent-self-service.md)绑定。下例观察默认事件，另外允许为 PR 打开/更新执行深评并发布正文型原生 Review。CLI 自动读取修订；状态显示负责 Agent、请求与生效能力。无需改 ECS 或再开启一组 Runtime 开关。
 
 ```yaml
+owner: xallor-ai
+repo: xallor
 declaration:
   enabled: true
-  events: [pull_request.opened, pull_request.synchronize]
+  autoReview: true
   deepReview: true
   nativeReview: true
-```
-
-**选择深评。** 在现有 agent.yaml 的 OpenClaw runtime 中增加所需字段（保留其他必填配置）：
-
-```yaml
-runtime:
-  type: openclaw
-  # 在既有 baseUrl、agentId、认证与超时字段后添加：
-  deepReview: true
-  # 可选：独立于深评，申请将结果发布为原生 Review
-  publishReview: true
 ```
 
 **源码由谁同步。** 首次深评时，配对连接器在本机准备专用 bare Git 对象库，通过 HTTPS 从 GitHub 获取任务指定的 head。再次评审只补缺少的对象；缓存命中仍需有效租约、绑定和授权。无需填写仓库路径或在 OpenClaw 工作目录执行 git pull。普通差异分析不下载整仓，普通 push 不是自动同步任务。
@@ -49,4 +40,4 @@ PR 的单文件补读从固定提交逐层遍历 Git 树（最多 24 段），�
 
 同一公开 PR 的深评探针 `ec8c8acb-7373-4671-9d5f-34ea123e38a6` 使用 3.183 真实 OpenClaw 和只读 bare Git 对象库。没有在提示里提供文件名；模型搜索两次、打开一个文件，找到本版未改动的 `tests/github-publication.test.ts`，引用源码与固定 head 的 blob 一致。其中一次搜索达到结果上限，已在输出中标记。本探针使用隔离的工具授权回执，没有验证生产绑定、Webhook 收件或外部发布。
 
-运行时启用增强表示设备可提供能力；领取时服务端随任务返回当前绑定的深评及原生 Review 授权。两者同时启用才使用增强，其他绑定仍可普通分析回帖；外部写入前重新授权。模型首次派发前读取材料的传输中断可确认为未派发（preparation_interrupted），不阻止设备领取下一任务；首次派发之后失联仍需对账，不自动重跑。
+适配器声明可提供的能力；管理员只在仓库绑定选择增强。PR 领取响应显式携带本仓有效的深评和原生 Review 策略，非 PR 不携带该策略，其他绑定仍可普通分析回帖；外部写入前重新授权。模型首次派发前读取材料的传输中断可确认为未派发（preparation_interrupted），不阻止设备领取下一任务；首次派发之后失联仍需对账，不自动重跑。

@@ -6,6 +6,8 @@
 
 本表适用当前 v2 实现（2026-11-25 增补版本化 PR 评审的源码与本地测试入口；真实验收按行记录）。配置、协议、状态库均不兼容旧版。代码路径在本地测试；真实环境列明确区分实际验收、故障注入测试与未实现范围。
 
+**待交付的功能不计入现有证据：** #21 的逐事件送达/处理、澄清必答和版本取代，#22 的原评论收件 reaction，#23 的门禁事实与工具轨迹，见[功能地图](product-features.md)。已收到活动、能读 diff 或已发评论均不能替代这些验收。
+
 ## 状态和证据口径
 
 - **已实现**：代码存在，并列出测试或源码入口；不自动代表线上已验收。
@@ -21,12 +23,13 @@
 | ID  | 能力                                 | 实现状态与限制                                                                | 证据                                                                         | 真实环境状态                       |
 | --- | ------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------- |
 | E01 | 接收签名 Webhook                     | 已实现；验签原始正文后解析                                                    | [webhook.ts](../src/webhook.ts)、[webhook.test.ts](../tests/webhook.test.ts) | v2真实投递/签名通过                |
-| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；默认要求提及，可按仓库关闭                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
+| E00 | 只观察与补领 | 签名活动与可选任务原子保存；按设备、负责人、绑定修订分页。自身回执不启动模型 | [活动库测试](../tests/activity-store.test.ts) | 新策略本地验证，未生产验收 |
+| E02 | Issue 评论 @App 发起任务             | 已实现；仅已启用的 created 与匹配 binding 的人类评论；明确提及时执行，普通评论只记活动                     | 同上；[outbound-e2e.test.ts](../tests/outbound-e2e.test.ts)                  | v2两轮真实评论触发通过             |
 | E03 | PR 会话区评论 @App | 按绑定触发；授权领取时固定 PR 版本，开放状态或版本不匹配即拒绝 | [pull.ts](../src/pull.ts)、[GitHub 测试](../tests/github.test.ts) | 旧版 PR #4 真实回帖；固定版本路径待验收 |
-| E04 | Issue 创建/标签触发                  | 显式启用 issues.opened（默认需提及）、issues.labeled（指定标签）；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
-| E05 | PR 创建/更新 | 显式启用 opened/synchronize；签名事件保留原始 base/head 身份 | [webhook.ts](../src/webhook.ts) | 旧版 PR #6 真实触发；H1/H2 版本验收待做 |
+| E04 | Issue 创建/标签触发                  | 新建时提及或显式 autoTriage；设置 triggerLabel 才按标签启动；assigned 未实现 | generic-tasks/webhook 测试                                                   | v2 Issue #5 opened/labeled 均通过 |
+| E05 | PR 创建/更新 | 默认观察；显式 autoReview 才自动执行；签名事件保留原始 base/head 身份 | [webhook.ts](../src/webhook.ts) | 旧版 PR #6 真实触发；H1/H2 版本验收待做 |
 | E06 | PR review / 行内 review comment 触发 | 未实现；两个 review 事件被忽略                                                | 同上                                                                         | 待实现                             |
-| E07 | push 触发                            | 显式启用有效非删除分支 push，产生 repository target                           | generic-tasks/webhook 测试                                                   | 修复后 v2 真实 push succeeded/skipped，无评论 |
+| E07 | 非删除分支 push | 记录 ref/SHA，只观察不执行 | [Webhook 策略](../src/webhook.ts) | 本版待真实验收，旧版的 push 执行不是本版承诺 |
 | E08 | check_run / check_suite 触发         | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
 | E09 | workflow_run / workflow_job 触发     | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
 | E10 | discussion / discussion_comment 触发 | 未实现；被忽略                                                                | 同上                                                                         | 待实现                             |
@@ -34,7 +37,7 @@
 | E12 | 防止机器人回复触发自身               | 已实现；忽略 Bot、自己的消息和不匹配的提及                                    | webhook.test.ts                                                              | v2两条机器人事件200 ignored        |
 | E13 | 重复投递只对应一个任务               | 已实现；delivery 和 scoped comment 去重                                       | [store.test.ts](../tests/store.test.ts)                                      | v2 GitHub Redeliver 同任务、单回帖 |
 
-GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明非空 `events`；仅接收提及评论时选 `[issue_comment.created]` 并保持 `requireMention: true`。可显式启用已实现的 `issues.opened/labeled`、`pull_request.opened/synchronize` 和 `push`，并满足对应触发规则。未启用或未实现的事件会被忽略，通常返回 `200 {ignored:true}`；这个 HTTP 200 不代表任务执行成功。
+默认关注支持范围与当前安装、订阅的交集；`events` 仅收窄观察范围。观察不等于委派：默认明确提及才执行，自动分诊/评审另行选择。当前新策略的真实 GitHub 验收未完成。详见[绑定指南](agent-self-service.md)。
 
 ## 2. 上下文、模型和执行环境
 
@@ -107,3 +110,5 @@ GitHub App 勾选事件仅表示平台会投递。启用仓库必须显式声明
 **工具读取降级与失败说明（C3/C5/C8）：** 已授权读取不能提供文件时返回有界原因；确认的模型输出失败可在开放线程给出状态通知；未知状态不重跑。本地 GitHub、Pull 和发布 worker 回归；运维边界见[失败回执](operations.md#工具读取和失败回执)。
 
 固定 PR 准备阶段与模型派发阶段的失败分类、同设备不同仓库的基础回复隔离、按标记查找不明 Review 回执均有本地回归；尚非生产故障注入验证。
+
+#20 补充证据：以 GitHub API 取得的真实 Issue #20 正文及其 Bot 评论重建事件，在隔离数据库使用本地测试签名回放；分别记录 observed / self_receipt，两条均没有任务。这不是公网原始 Webhook 投递或在线 Agent 逐条确认。乱序关闭、跨绑定去重、收件退避另由本地 HTTP/SQLite 回归验证。

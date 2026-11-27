@@ -12,6 +12,7 @@ const config: any = {
   channel: { baseUrl: "https://channel.example", tokenEnv: "CHANNEL" },
   runtime: {
     type: "acp",
+    agentId: "coding",
     command: process.execPath,
     args: [],
     timeoutMs: 2000,

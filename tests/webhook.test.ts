@@ -28,9 +28,9 @@ const event = () => ({
     body: "@helper[bot] explain this",
     user: { id: 3, login: "reader", type: "User" },
   },
-  issue: { number: 5 },
+  issue: { number: 5, state: "open" },
 });
-async function run(
+async function ingress(
   payload: unknown,
   eventName = "issue_comment",
   settings = config,
@@ -53,12 +53,19 @@ async function run(
     "test",
   );
 }
+async function run(...args: Parameters<typeof ingress>) {
+  const decision = await ingress(...args);
+  assert.ok(!decision || !("closure" in decision));
+  return decision;
+}
 test("valid signed mention constructs only server scope", async () => {
   const result = await run(event());
-  assert.equal(result?.repositoryId, 2);
-  assert.equal(result?.actorId, 3);
-  assert.deepEqual(result?.target, { kind: "issue", number: 5 });
-  assert.equal(result?.source.commentId, 4);
+  assert.equal(result?.input.repositoryId, 2);
+  assert.equal(result?.input.actorId, 3);
+  assert.equal(result?.execute, true);
+  assert.equal(result?.reason, "mention");
+  assert.deepEqual(result?.input.target, { kind: "issue", number: 5 });
+  assert.equal(result?.input.source.commentId, 4);
 });
 
 test("accepts bot slug mentions while rejecting lookalike names", async () => {
@@ -68,7 +75,7 @@ test("accepts bot slug mentions while rejecting lookalike names", async () => {
   ]) {
     const payload = event();
     payload.comment.body = body;
-    assert.equal((await run(payload))?.actorId, 3);
+    assert.equal((await run(payload))?.reason, "mention");
   }
   for (const body of [
     "@helper-other",
@@ -78,7 +85,7 @@ test("accepts bot slug mentions while rejecting lookalike names", async () => {
   ]) {
     const payload = event();
     payload.comment.body = body;
-    assert.equal(await run(payload), null);
+    assert.equal((await run(payload))?.reason, "observed");
   }
 });
 test("a signed mention on a closed PR does not start a task", async () => {
@@ -88,15 +95,17 @@ test("a signed mention on a closed PR does not start a task", async () => {
         ...event(),
         issue: { number: 5, state: "open", pull_request: {} },
       })
-    )?.target,
+    )?.input.target,
     { kind: "pull_request", number: 5 },
   );
   assert.equal(
-    await run({
-      ...event(),
-      issue: { number: 5, state: "closed", pull_request: {} },
-    }),
-    null,
+    (
+      await run({
+        ...event(),
+        issue: { number: 5, state: "closed", pull_request: {} },
+      })
+    )?.reason,
+    "closed",
   );
 });
 test("invalid signature rejected before malformed JSON parse", async () => {
@@ -114,7 +123,7 @@ test("invalid signature rejected before malformed JSON parse", async () => {
     /signature/i,
   );
 });
-test("unsupported, edited, bot, mismatched identities/scope and partial mentions ignored", async () => {
+test("unsupported, edited, bot and mismatched identities or scope ignored", async () => {
   assert.equal(await run(event(), "issues"), null);
   for (const mutate of [
     (x: ReturnType<typeof event>) => {
@@ -137,15 +146,6 @@ test("unsupported, edited, bot, mismatched identities/scope and partial mentions
     },
     (x: ReturnType<typeof event>) => {
       x.comment.id = -1;
-    },
-    (x: ReturnType<typeof event>) => {
-      x.comment.body = "mail@helper[bot]";
-    },
-    (x: ReturnType<typeof event>) => {
-      x.comment.body = "@helper[bot]-other";
-    },
-    (x: ReturnType<typeof event>) => {
-      x.comment.body += "x".repeat(16000);
     },
   ]) {
     const x = event();
@@ -170,39 +170,108 @@ test("delivery id must be UUID", async () => {
   );
 });
 
-test("mention-free binding accepts open human comments and opened issues, not bot or closed traffic", async () => {
-  const c = {
+test("ordinary comments update context only; self-replies are receipts", async () => {
+  const p = event();
+  p.comment.body = "ordinary request " + "x".repeat(18000);
+  const received = await run(p);
+  assert.equal(received?.execute, false);
+  assert.equal(received?.reason, "observed");
+  assert.equal(received?.input.prompt, p.comment.body);
+  const bot = { id: 20, type: "Bot", login: "Helper[bot]" };
+  const reply = {
+    ...p,
+    sender: bot,
+    comment: { ...p.comment, user: bot, body: "@helper done" },
+  };
+  assert.equal((await run(reply))?.reason, "self_receipt");
+  assert.equal((await run(reply))?.execute, false);
+  assert.equal(await run({ ...reply, comment: p.comment }), null);
+  const other = { ...bot, login: "other[bot]" };
+  assert.equal(
+    await run({
+      ...reply,
+      sender: other,
+      comment: { ...reply.comment, user: other },
+    }),
+    null,
+  );
+});
+test("event filters cannot enable unimplemented actions", async () => {
+  const settings = {
     ...config,
     bindings: config.bindings.map((b) => ({
       ...b,
-      requireMention: false,
-      events: ["issue_comment.created", "issues.opened"],
+      events: ["issue_comment.edited"],
     })),
   };
-  const p = event();
-  p.comment.body = "ordinary request";
-  assert.equal((await run(p, "issue_comment", c))?.prompt, "ordinary request");
   assert.equal(
-    await run(
-      { ...p, issue: { number: 5, state: "closed" } },
-      "issue_comment",
-      c,
-    ),
+    await run({ ...event(), action: "edited" }, "issue_comment", settings),
     null,
   );
+  assert.equal(await run({ ...event(), issue: { number: 5 } }), null);
+});
+
+test("signed comment actions use their creation time and closed observations use the thread close time", async () => {
+  const time = "2026-11-24T01:02:03Z",
+    eventTime = "2026-11-25T01:02:03Z",
+    payload = event();
+  const comment = { ...payload.comment, created_at: eventTime };
   assert.equal(
-    await run(
-      { ...p, sender: { ...p.sender, type: "Bot" } },
-      "issue_comment",
-      c,
-    ),
-    null,
+    (await run({ ...payload, comment }))?.githubTime,
+    Date.parse(eventTime),
   );
-  const opened = {
-    ...p,
-    action: "opened",
-    issue: { number: 5, title: "Investigate", body: "details" },
+  assert.equal(
+    (
+      await run({
+        ...payload,
+        comment,
+        issue: { ...payload.issue, state: "closed", closed_at: time },
+      })
+    )?.githubTime,
+    Date.parse(time),
+  );
+  assert.equal(
+    (await run({ ...payload, comment: { ...comment, created_at: "invalid" } }))
+      ?.githubTime,
+    undefined,
+  );
+});
+
+test("private lifecycle input requires a closed target in the signed repository scope", async () => {
+  const { installation, repository } = event();
+  const payload = {
+    action: "closed",
+    installation,
+    repository,
+    sender: { id: 7, login: "merge-queue[bot]", type: "Bot" },
+    pull_request: {
+      number: 5,
+      state: "closed",
+      closed_at: "2026-11-26T01:00:00Z",
+      base: { repo: repository },
+    },
   };
-  assert.equal((await run(opened, "issues", c))?.target.kind, "issue");
-  assert.equal(await run({ ...opened, action: "edited" }, "issues", c), null);
+  assert.deepEqual(await ingress(payload, "pull_request"), {
+    closure: {
+      bindingId: "b",
+      installationId: 1,
+      repositoryId: 2,
+      owner: "org",
+      repo: "repo",
+      target: { kind: "pull_request", number: 5 },
+      githubTime: Date.parse(payload.pull_request.closed_at),
+    },
+  });
+  for (const inconsistent of [
+    { ...payload, action: "synchronize" },
+    { ...payload, installation: { id: 9 } },
+    { ...payload, repository: { ...repository, name: "other" } },
+    { ...payload, pull_request: { ...payload.pull_request, state: "open" } },
+    {
+      ...payload,
+      pull_request: { ...payload.pull_request, base: { repo: { id: 9 } } },
+    },
+  ]) {
+    assert.equal(await ingress(inconsistent, "pull_request"), null);
+  }
 });

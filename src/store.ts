@@ -18,7 +18,15 @@ import {
   noticeFailureCode,
   type RuntimeFailureCode,
 } from "./runtime-failure.js";
-import { BindingRegistry } from "./binding-registry.js";
+import {
+  ActivityLedger,
+  threadKey,
+  profileParams,
+  profilePredicate,
+} from "./activity-ledger.js";
+import type { RuntimeProfile } from "./runtime-profile.js";
+import type { WebhookDecision, ThreadClosure } from "./webhook.js";
+import { BindingRegistry, effectiveEvents } from "./binding-registry.js";
 import { initializeTaskSchema } from "./store-schema.js";
 import { validateOutcome, validateTaskOutcome } from "./outcomes.js";
 
@@ -42,6 +50,7 @@ export class InvalidAssignmentOutcome extends Error {}
 
 export class TaskStore {
   private readonly db: DatabaseSync;
+  private readonly ledger: ActivityLedger;
   readonly registry: BindingRegistry;
   private closed = false;
   constructor(dbPath: string) {
@@ -49,6 +58,7 @@ export class TaskStore {
     this.db = new DatabaseSync(dbPath);
     try {
       initializeTaskSchema(this.db);
+      this.ledger = new ActivityLedger(this.db);
       this.registry = new BindingRegistry(this.db);
     } catch (error) {
       this.db.close();
@@ -60,6 +70,13 @@ export class TaskStore {
     if (!record?.enabled) return undefined;
     return {
       ...record,
+      events: effectiveEvents(record),
+      deepReview:
+        record.deepReview === true &&
+        record.responsibleAgent?.deepReview === true,
+      nativeReview:
+        record.nativeReview === true &&
+        record.responsibleAgent?.nativeReview === true,
       id: `${installationId}:${repositoryId}:${record.deviceId}:${record.revision}`,
     };
   }
@@ -79,7 +96,12 @@ export class TaskStore {
     return row ? this.decodeTask(row) : undefined;
   }
   private decodeTask(row: Record<string, unknown>): Task {
-    const { eventKey: _eventKey, ...data } = row;
+    const {
+      eventKey: _eventKey,
+      publicationBlocked: _publicationBlocked,
+      githubTime: _githubTime,
+      ...data
+    } = row;
     return {
       ...data,
       target: JSON.parse(String(row.target)),
@@ -93,6 +115,79 @@ export class TaskStore {
     } as unknown as Task;
   }
   accept(input: NewTask): { task: Task; duplicate: boolean } {
+    // Direct task construction for trusted callers/tests. HTTP ingress only calls observe.
+    const accepted = this.record(input, "mention", true);
+    if (!accepted.taskId) throw Error("Existing observation has no task");
+    return { task: this.get(accepted.taskId)!, duplicate: accepted.duplicate };
+  }
+  observe(decision: WebhookDecision) {
+    if (decision.execute && decision.input.source.event === "push")
+      throw Error("Push cannot execute");
+    return this.record(
+      decision.input,
+      decision.reason,
+      decision.execute,
+      decision.githubTime,
+    );
+  }
+  activityReceipt(deliveryId: string) {
+    const receipt = this.ledger.receipt(deliveryId);
+    return (
+      receipt && {
+        ...receipt,
+        ...this.ledger.deliveryAttempts(deliveryId),
+        deliveryId,
+        activity: this.ledger.activity(receipt.cursor) ?? null,
+      }
+    );
+  }
+  recentThread(
+    task: Pick<
+      NewTask,
+      "bindingId" | "installationId" | "repositoryId" | "deliveryId" | "target"
+    >,
+  ) {
+    return this.activeBinding(task.installationId, task.repositoryId)?.id ===
+      task.bindingId
+      ? this.ledger.thread(task)
+      : [];
+  }
+  activitiesForDevice(
+    workerId: string,
+    after: number,
+    limit: number,
+    profile: RuntimeProfile,
+    bindingId: string,
+  ) {
+    return this.ledger.page(workerId, after, limit, profile, bindingId);
+  }
+  runtimeLastSeen(deviceId: string, profile: RuntimeProfile): number | null {
+    const row = this.db
+      .prepare(
+        "SELECT seenAt FROM runtimePolls WHERE deviceId=? AND runtimeType=? AND runtimeId=? AND deepReview=? AND nativeReview=?",
+      )
+      .get(deviceId, ...profileParams(profile));
+    return row ? Number(row.seenAt) : null;
+  }
+  recordRuntimePoll(deviceId: string, profile: RuntimeProfile) {
+    const now = Date.now(),
+      keys = profileParams(profile);
+    // Ignore arbitrary self-declared profiles, and coalesce frequent healthy polls.
+    // Binding updates remove the row immediately once the last matching binding changes.
+    this.db
+      .prepare(
+        `INSERT INTO runtimePolls(deviceId,runtimeType,runtimeId,deepReview,nativeReview,seenAt)
+      SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM bindings b WHERE b.deviceId=? AND json_extract(b.declaration,'$.enabled')=1 AND ${profilePredicate})
+      ON CONFLICT(deviceId,runtimeType,runtimeId,deepReview,nativeReview) DO UPDATE SET seenAt=excluded.seenAt WHERE runtimePolls.seenAt<=?`,
+      )
+      .run(deviceId, ...keys, now, deviceId, ...keys, now - 30_000);
+  }
+  private record(
+    input: NewTask,
+    reason: WebhookDecision["reason"],
+    execute: boolean,
+    githubTime?: number,
+  ) {
     return this.transaction(() => {
       const binding = this.activeBinding(
         input.installationId,
@@ -110,58 +205,192 @@ export class TaskStore {
         !binding.events.some((event) => event === sourceKey)
       )
         throw new StaleBinding("Binding changed before acceptance");
-      const eventKey =
-        input.source.event === "issue_comment" &&
-        input.source.commentId !== undefined
-          ? JSON.stringify([
-              "comment",
-              input.installationId,
-              input.repositoryId,
-              input.source.commentId,
-            ])
-          : JSON.stringify(["delivery", input.deliveryId]);
-      const delivery = this.db
-        .prepare("SELECT taskId FROM deliveries WHERE deliveryId=?")
-        .get(input.deliveryId);
-      const existing = delivery
-        ? this.get(String(delivery.taskId))
-        : this.db
-            .prepare("SELECT id FROM tasks WHERE eventKey=?")
-            .get(eventKey);
-      if (existing) {
-        this.db
-          .prepare(
-            "INSERT OR IGNORE INTO deliveries(deliveryId,taskId) VALUES(?,?)",
-          )
-          .run(input.deliveryId, existing.id);
-        return { task: this.get(String(existing.id))!, duplicate: true };
+      const scope = [input.repositoryId, threadKey(input.target)];
+      const closed = execute
+        ? this.db
+            .prepare(
+              "SELECT closedAt FROM threadClosures WHERE repositoryId=? AND thread=?",
+            )
+            .get(...scope)
+        : undefined;
+      const isStale =
+        closed &&
+        (closed.closedAt === null ||
+          githubTime === undefined ||
+          githubTime <= Number(closed.closedAt));
+      const receipt = this.ledger.record(
+        input,
+        isStale ? "closed" : reason,
+        execute && !isStale
+          ? (eventKey) => this.enqueue(input, eventKey, githubTime)
+          : undefined,
+        closed?.closedAt == null ? undefined : Number(closed.closedAt),
+        githubTime,
+      );
+      if (
+        !receipt.duplicate &&
+        reason === "closed" &&
+        input.target.kind !== "repository"
+      ) {
+        this.fenceThread({ ...input, target: input.target, githubTime });
       }
-      const id = randomUUID();
+      return receipt;
+    });
+  }
+  private enqueue(
+    input: NewTask,
+    eventKey: string,
+    githubTime?: number,
+    receivedAt = Date.now(),
+  ) {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO tasks(id,deliveryId,eventKey,bindingId,installationId,repositoryId,owner,repo,actorId,actorLogin,prompt,status,deliveryStatus,createdAt,target,source,githubTime) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued','pending',?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.deliveryId,
+        eventKey,
+        input.bindingId,
+        input.installationId,
+        input.repositoryId,
+        input.owner,
+        input.repo,
+        input.actorId,
+        input.actorLogin,
+        input.prompt,
+        receivedAt,
+        JSON.stringify(input.target),
+        JSON.stringify(input.source),
+        githubTime ?? null,
+      );
+    return id;
+  }
+  closeThread(closure: ThreadClosure) {
+    this.transaction(() => {
+      const binding = this.activeBinding(
+        closure.installationId,
+        closure.repositoryId,
+      );
+      if (
+        !binding ||
+        binding.id !== closure.bindingId ||
+        binding.owner !== closure.owner ||
+        binding.repo !== closure.repo
+      )
+        throw new StaleBinding("Binding changed before close");
+      this.fenceThread(closure);
+    });
+  }
+  private fenceThread(input: ThreadClosure) {
+    const { githubTime } = input;
+    const scope = [input.repositoryId, threadKey(input.target)];
+    // A missing close instant cannot be ordered relative to any later delivery.
+    // Preserve that uncertainty rather than guessing from arrival order.
+    this.db
+      .prepare(
+        `INSERT INTO threadClosures VALUES(?,?,?) ON CONFLICT(repositoryId,thread) DO UPDATE SET closedAt=max(threadClosures.closedAt,excluded.closedAt)`,
+      )
+      .run(...scope, githubTime ?? null);
+    const affected = [
+      input.repositoryId,
+      input.target.kind,
+      input.target.number,
+      githubTime ?? null,
+      githubTime ?? null,
+    ];
+    const target =
+      "repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=? AND (? IS NULL OR githubTime IS NULL OR githubTime<=?)";
+    const cutoff = this.db
+      .prepare(
+        "SELECT closedAt FROM threadClosures WHERE repositoryId=? AND thread=?",
+      )
+      .get(...scope)?.closedAt;
+    const candidates =
+      cutoff == null
+        ? []
+        : this.db
+            .prepare(
+              `SELECT c.input,c.githubTime,c.receivedAt,t.id,t.eventKey FROM reviewCandidates c JOIN tasks t ON t.id=c.taskId
+          WHERE t.bindingId=? AND t.status='queued' AND (t.githubTime IS NULL OR t.githubTime<=?) AND c.githubTime>? AND json_extract(t.target,'$.kind')=? AND json_extract(t.target,'$.number')=?`,
+            )
+            .all(
+              input.bindingId,
+              cutoff,
+              cutoff,
+              input.target.kind,
+              input.target.number,
+            );
+    // A dispatched task may already have side effects. Record the mismatch on the
+    // newer delivery instead of replaying it; a confirmed publication is preserved.
+    if (cutoff != null)
       this.db
         .prepare(
-          `INSERT INTO tasks(id,deliveryId,eventKey,bindingId,installationId,repositoryId,owner,repo,actorId,actorLogin,prompt,status,deliveryStatus,createdAt,target,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued','pending',?,?,?)`,
+          `UPDATE deliveries SET reviewFollowUp='reconcile_before_new_review'
+          WHERE reason='review' AND duplicate=1 AND githubTime>? AND taskId IN (
+            SELECT id FROM tasks WHERE repositoryId=? AND json_extract(target,'$.kind')=? AND json_extract(target,'$.number')=?
+            AND (githubTime IS NULL OR githubTime<=?) AND deliveryStatus!='sent')`,
         )
         .run(
-          id,
-          input.deliveryId,
-          eventKey,
-          input.bindingId,
-          input.installationId,
+          cutoff,
           input.repositoryId,
-          input.owner,
-          input.repo,
-          input.actorId,
-          input.actorLogin,
-          input.prompt,
-          Date.now(),
-          JSON.stringify(input.target),
-          JSON.stringify(input.source),
+          input.target.kind,
+          input.target.number,
+          cutoff,
         );
+    this.db
+      .prepare(
+        "UPDATE tasks SET publicationBlocked=1 WHERE deliveryStatus IN ('sending','pending') AND " +
+          target,
+      )
+      .run(...affected);
+    this.db
+      .prepare(
+        "UPDATE tasks SET status='rejected',deliveryStatus='skipped',error='Thread closed before execution' WHERE status='queued' AND " +
+          target,
+      )
+      .run(...affected);
+    this.db
+      .prepare(
+        "UPDATE tasks SET status='unknown',error='Thread closed during execution; reconcile' WHERE status='running' AND " +
+          target,
+      )
+      .run(...affected);
+    this.db
+      .prepare(
+        "UPDATE tasks SET deliveryStatus='skipped',error='Thread closed before publication' WHERE status IN ('succeeded','failed') AND deliveryStatus='pending' AND " +
+          target,
+      )
+      .run(...affected);
+
+    for (const candidate of candidates) {
+      const fresh = JSON.parse(String(candidate.input)) as NewTask;
+      const next = this.enqueue(
+        fresh,
+        String(candidate.eventKey),
+        Number(candidate.githubTime),
+        Number(candidate.receivedAt),
+      );
       this.db
-        .prepare("INSERT INTO deliveries(deliveryId,taskId) VALUES(?,?)")
-        .run(input.deliveryId, id);
-      return { task: this.get(id)!, duplicate: false };
-    });
+        .prepare(
+          `UPDATE deliveries SET taskId=?,reviewFollowUp=NULL,duplicate=CASE WHEN deliveryId=? THEN 0 ELSE 1 END
+      WHERE taskId=? AND reason='review' AND bindingId=? AND githubTime>?`,
+        )
+        .run(next, fresh.deliveryId, candidate.id!, input.bindingId, cutoff!);
+      this.db
+        .prepare(
+          `UPDATE activities SET data=json_set(data,'$.taskId',?) WHERE cursor IN (SELECT cursor FROM deliveries WHERE taskId=?)`,
+        )
+        .run(next, next);
+    }
+    if (input.target.kind === "pull_request" && githubTime !== undefined)
+      this.ledger.detachPreCloseReviews(
+        input.repositoryId,
+        input.target.number,
+        githubTime,
+        cutoff == null ? null : Number(cutoff),
+      );
   }
   recordRuntime(id: string, event: RuntimeEvent): void {
     const task = this.get(id);
@@ -194,6 +423,7 @@ export class TaskStore {
     leaseHash: string,
     expiresAt: number,
     now = Date.now(),
+    profile?: RuntimeProfile,
   ): Task | undefined {
     if (
       !workerId ||
@@ -213,12 +443,16 @@ export class TaskStore {
       if (busy) return undefined;
       const row = this.db
         .prepare(
-          `SELECT q.id FROM tasks q JOIN bindings b USING (installationId,repositoryId) WHERE q.status='queued' AND b.deviceId=? AND NOT EXISTS (
+          `SELECT q.id FROM tasks q JOIN bindings b USING (installationId,repositoryId) WHERE q.status='queued' AND b.deviceId=? ${profile ? "AND " + profilePredicate : ""} AND NOT EXISTS (
         SELECT 1 FROM tasks busy WHERE busy.installationId=q.installationId AND busy.repositoryId=q.repositoryId AND (
           busy.status IN ('running','unknown') OR (${publishableStatus} AND busy.deliveryStatus IN ('pending','sending','unknown'))
         )) ORDER BY q.createdAt,q.rowid LIMIT 1`,
         )
-        .get(workerId, ...noticeMessages);
+        .get(
+          workerId,
+          ...(profile ? profileParams(profile) : []),
+          ...noticeMessages,
+        );
       if (!row) return undefined;
       this.db
         .prepare(
@@ -377,6 +611,11 @@ export class TaskStore {
       .run(status, error, id, workerId, leaseHash);
     if (!changed.changes) throw new AssignmentConflict("Task is not running");
   }
+  publicationAllowed(taskId: string) {
+    return !!this.db
+      .prepare("SELECT 1 FROM tasks WHERE id=? AND publicationBlocked=0")
+      .get(taskId);
+  }
   pendingDelivery(): Task | undefined {
     return this.transaction(() => {
       const row = this.db
@@ -395,14 +634,20 @@ export class TaskStore {
     id: string,
     status: DeliveryState,
     receipt?: PublicationReceipt,
+    diagnostic?: string,
   ): void {
     if (!["sent", "failed", "unknown"].includes(status))
       throw Error("Invalid delivery transition");
     const changed = this.db
       .prepare(
-        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=? WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
+        "UPDATE tasks SET deliveryStatus=?,publicationReceipt=?,error=COALESCE(?,error) WHERE id=? AND status IN ('succeeded','failed') AND deliveryStatus='sending'",
       )
-      .run(status, receipt ? JSON.stringify(receipt) : null, id);
+      .run(
+        status,
+        receipt ? JSON.stringify(receipt) : null,
+        diagnostic ?? null,
+        id,
+      );
     if (!changed.changes) throw Error("Delivery is not sending");
   }
   recover(): void {

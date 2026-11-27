@@ -28,8 +28,11 @@ const config = {
       events: [
         "issues.opened",
         "issues.labeled",
+        "issues.closed",
         "push",
         "pull_request.opened",
+        "pull_request.synchronize",
+        "pull_request.closed",
       ],
       triggerLabel: "agent",
     },
@@ -42,7 +45,7 @@ const envelope = {
 };
 async function receive(event: string, payload: unknown, settings = config) {
   const raw = Buffer.from(JSON.stringify(payload));
-  return normalizeWebhook(
+  const decision = await normalizeWebhook(
     {
       github: settings.github,
       lookup: (i, r) =>
@@ -58,17 +61,25 @@ async function receive(event: string, payload: unknown, settings = config) {
     },
     "test",
   );
+  assert.ok(!decision || !("closure" in decision));
+  return decision;
 }
 test("opted-in Issue and repository events produce scoped targets without invented comments", async () => {
   const issue = await receive("issues", {
     ...envelope,
     action: "opened",
-    issue: { number: 5, title: "Fix bug", body: "@helper fix it" },
+    issue: {
+      number: 5,
+      state: "open",
+      title: "Fix bug",
+      body: "@helper fix it",
+    },
   });
   assert.ok(issue);
-  assert.deepEqual(issue.target, { kind: "issue", number: 5 });
-  assert.equal(issue.source.commentId, undefined);
-  assert.deepEqual(issue.source, { event: "issues", action: "opened" });
+  assert.equal(issue.reason, "mention");
+  assert.deepEqual(issue.input.target, { kind: "issue", number: 5 });
+  assert.equal(issue.input.source.commentId, undefined);
+  assert.deepEqual(issue.input.source, { event: "issues", action: "opened" });
   const push = await receive("push", {
     ...envelope,
     ref: "refs/heads/main",
@@ -76,36 +87,39 @@ test("opted-in Issue and repository events produce scoped targets without invent
     deleted: false,
   });
   assert.ok(push);
-  assert.deepEqual(push.target, {
+  assert.equal(push.execute, false);
+  assert.deepEqual(push.input.target, {
     kind: "repository",
     ref: "refs/heads/main",
     sha: "a".repeat(40),
   });
-  assert.equal("issueNumber" in push, false);
-  const store = new TaskStore(":memory:");
-  try {
-    push.bindingId = seedBinding(store, push, "worker", ["push"]).id;
-    const first = store.accept(push);
-    assert.equal(first.task.target?.kind, "repository");
-    assert.equal(store.accept(push).task.id, first.task.id);
-  } finally {
-    store.close();
-  }
 });
 test("opted-in labels and PR events preserve activation and sender boundaries", async () => {
+  const created = "2026-11-24T00:00:00Z",
+    updated = "2026-11-25T00:00:00Z",
+    closedAt = "2026-11-26T00:00:00Z";
   const payload = {
     ...envelope,
     action: "labeled",
     label: { name: "other" },
-    issue: { number: 5, title: "Fix bug", body: "details" },
+    issue: {
+      number: 5,
+      state: "open",
+      title: "Fix bug",
+      body: "details",
+      created_at: created,
+      updated_at: updated,
+    },
   };
-  assert.equal(await receive("issues", payload), null);
+  assert.equal((await receive("issues", payload))?.reason, "observed");
   const accepted = await receive("issues", {
     ...payload,
     label: { name: "agent" },
   });
   assert.ok(accepted);
-  assert.equal(accepted.actorId, 3);
+  assert.equal(accepted.input.actorId, 3);
+  assert.equal(accepted.reason, "label");
+  assert.equal(accepted.githubTime, Date.parse(updated));
   assert.equal(
     await receive("issues", {
       ...payload,
@@ -114,7 +128,7 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
     }),
     null,
   );
-  const pr = await receive("pull_request", {
+  const update = {
     ...envelope,
     action: "opened",
     pull_request: {
@@ -122,11 +136,15 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
       state: "open",
       base: { sha: "a".repeat(40), repo: { id: 2 } },
       head: { sha: "b".repeat(40), repo: { id: 2 } },
+      created_at: created,
+      updated_at: updated,
       title: "Review",
       body: "changes",
     },
-  });
-  assert.deepEqual(pr?.target, {
+  };
+  const pr = await receive("pull_request", update);
+  assert.equal(pr?.execute, false);
+  assert.deepEqual(pr?.input.target, {
     kind: "pull_request",
     number: 9,
     revision: {
@@ -136,6 +154,72 @@ test("opted-in labels and PR events preserve activation and sender boundaries", 
       headRepoId: 2,
     },
   });
+  const enabled = {
+    ...config,
+    bindings: config.bindings.map((b) => ({
+      ...b,
+      autoReview: true,
+      autoTriage: true,
+    })),
+  };
+  for (const action of ["opened", "synchronize"]) {
+    assert.equal(
+      (await receive("pull_request", { ...update, action }, enabled))?.reason,
+      "review",
+    );
+  }
+  assert.equal(
+    (await receive("pull_request", update, enabled))?.githubTime,
+    Date.parse(created),
+  );
+  assert.equal(
+    (
+      await receive(
+        "pull_request",
+        { ...update, action: "synchronize" },
+        enabled,
+      )
+    )?.githubTime,
+    Date.parse(updated),
+  );
+  const closed = {
+    ...update,
+    action: "closed",
+    pull_request: {
+      ...update.pull_request,
+      state: "closed",
+      closed_at: closedAt,
+    },
+  };
+  assert.equal(
+    (await receive("pull_request", closed, enabled))?.githubTime,
+    Date.parse(closedAt),
+  );
+  assert.equal(
+    (await receive("pull_request", closed, enabled))?.reason,
+    "closed",
+  );
+  assert.equal(
+    await receive("pull_request", { ...update, action: "closed" }, enabled),
+    null,
+  );
+  const opened = { ...payload, action: "opened" };
+  assert.equal((await receive("issues", opened))?.reason, "observed");
+  assert.equal((await receive("issues", opened, enabled))?.reason, "triage");
+  assert.equal(
+    (
+      await receive(
+        "issues",
+        {
+          ...opened,
+          action: "closed",
+          issue: { ...opened.issue, state: "closed" },
+        },
+        enabled,
+      )
+    )?.reason,
+    "closed",
+  );
   const defaults = {
     ...config,
     bindings: config.bindings.map((b) => ({

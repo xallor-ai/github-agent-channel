@@ -1,4 +1,5 @@
 import { AccessDenied, type GitHubClient } from "./contracts.js";
+import { DraftPublicationUncertain } from "./github-publication.js";
 import { noticeFailureCode } from "./runtime-failure.js";
 import { TaskStore } from "./store.js";
 
@@ -80,6 +81,10 @@ export class DeliveryWorker {
         this.store.markDelivery(
           delivery.id,
           error instanceof AccessDenied ? "failed" : "unknown",
+          undefined,
+          error instanceof DraftPublicationUncertain
+            ? error.message
+            : undefined,
         );
       }
       return true;
